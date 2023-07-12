@@ -11,17 +11,27 @@ const Section = struct {
 };
 
 const Image = struct {
-    text: Section,
-    rodata: Section,
-    data: Section,
+    sections: struct {
+        text: Section,
+        rodata: Section,
+        data: Section,
+    },
     entry_point: u32 = 0,
 
     fn create() !Image {
         return Image{
-            .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
-            .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
-            .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
+            .sections = .{
+                .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
+                .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
+                .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
+            },
         };
+    }
+
+    fn destroy(image: *Image) void {
+        inline for (comptime std.meta.fieldNames(@TypeOf(image.sections))) |field_name| {
+            std.os.munmap(@field(image.sections, field_name).content);
+        }
     }
 
     inline fn mmap(size: usize, flags: packed struct {
@@ -34,9 +44,14 @@ const Image = struct {
     }
 
     fn appendCode(image: *Image, code: []const u8) void {
-        const destination = image.text.content[image.text.index..][0..code.len];
+        const destination = image.sections.text.content[image.sections.text.index..][0..code.len];
         @memcpy(destination, code);
-        image.text.index += code.len;
+        image.sections.text.index += code.len;
+    }
+
+    fn appendCodeByte(image: *Image, code_byte: u8) void {
+        image.sections.text.content[image.sections.text.index] = code_byte;
+        image.sections.text.index += 1;
     }
 
     fn getEntryPoint(image: *const Image, comptime Function: type) *const Function {
@@ -44,8 +59,8 @@ const Image = struct {
             assert(@typeInfo(Function) == .Fn);
         }
 
-        assert(image.text.content.len > 0);
-        return @as(*const Function, @ptrCast(&image.text.content[image.entry_point]));
+        assert(image.sections.text.content.len > 0);
+        return @as(*const Function, @ptrCast(&image.sections.text.content[image.entry_point]));
     }
 };
 
@@ -77,13 +92,24 @@ const GPRegister = enum(u4) {
     r15 = 15,
 };
 
+pub const BasicGPRegister = enum(u3) {
+    a = 0,
+    c = 1,
+    d = 2,
+    b = 3,
+    sp = 4,
+    bp = 5,
+    si = 6,
+    di = 7,
+};
+
 const prefix_lock = 0xf0;
 const prefix_repne_nz = 0xf2;
 const prefix_rep = 0xf3;
 const prefix_rex_w = [1]u8{@intFromEnum(Rex.w)};
 const prefix_16_bit_operand = [1]u8{0x66};
 
-const ret = [1]u8{0xc3};
+const ret = 0xc3;
 const mov_a_imm = [1]u8{0xb8};
 const mov_reg_imm8: u8 = 0xb0;
 
@@ -95,60 +121,27 @@ inline fn intToArrayOfBytes(integer: anytype) [@sizeOf(@TypeOf(integer))]u8 {
     return @as([@sizeOf(@TypeOf(integer))]u8, @bitCast(integer));
 }
 
-fn movToAInstructionByteCount(comptime bit_count: u16) type {
-    return [
-        switch (bit_count) {
-            8 => 2,
-            16 => 4,
-            32 => 5,
-            64 => 10,
-            else => @compileError("Not supported"),
-        }
-    ]u8;
-}
-
-inline fn movAImm(comptime signedness: std.builtin.Signedness, comptime bit_count: u16, integer: @Type(.{
-    .Int = .{
-        .signedness = signedness,
-        .bits = bit_count,
-    },
-})) movToAInstructionByteCount(bit_count) {
-    return switch (@TypeOf(integer)) {
+inline fn movAImm(image: *Image, integer: anytype) void {
+    const T = @TypeOf(integer);
+    image.appendCode(&(switch (T) {
         u8, i8 => .{mov_reg_imm8 | @intFromEnum(GPRegister.a)},
         u16, i16 => prefix_16_bit_operand ++ mov_a_imm,
         u32, i32 => mov_a_imm,
         u64, i64 => prefix_rex_w ++ mov_a_imm,
         else => @compileError("Unsupported"),
-    } ++ intToArrayOfBytes(integer);
+    } ++ intToArrayOfBytes(integer)));
 }
 
 test "ret void" {
     var image = try Image.create();
-    image.appendCode(&ret);
+    defer image.destroy();
+    image.appendCodeByte(ret);
 
     const function_pointer = image.getEntryPoint(fn () callconv(.C) void);
     function_pointer();
 }
 
 const integer_types_to_test = [_]type{ u8, u16, u32, u64, i8, i16, i32, i64 };
-
-fn testRetInteger(comptime T: type) !void {
-    comptime {
-        assert(@typeInfo(T) == .Int);
-        assert((T == u8 or T == u16 or T == u32 or T == u64) or (T == i8 or T == i16 or T == i32 or T == i64));
-    }
-
-    var image = try Image.create();
-    const signedness = @typeInfo(T).Int.signedness;
-    const expected_number = getMaxInteger(T);
-
-    image.appendCode(&movAImm(signedness, @bitSizeOf(T), expected_number));
-    image.appendCode(&ret);
-
-    const function_pointer = image.getEntryPoint(fn () callconv(.C) T);
-    const result = function_pointer();
-    try expect(result == expected_number);
-}
 
 fn getMaxInteger(comptime T: type) T {
     comptime {
@@ -163,32 +156,69 @@ fn getMaxInteger(comptime T: type) T {
 
 test "ret integer" {
     inline for (integer_types_to_test) |Int| {
-        try testRetInteger(Int);
+        var image = try Image.create();
+        defer image.destroy();
+        const expected_number = getMaxInteger(Int);
+
+        movAImm(&image, expected_number);
+        image.appendCodeByte(ret);
+
+        const function_pointer = image.getEntryPoint(fn () callconv(.C) Int);
+        const result = function_pointer();
+        try expect(result == expected_number);
     }
 }
 
-const mov_rm_r = 0x89;
+const LastByte = packed struct(u8) {
+    dst: BasicGPRegister,
+    src: BasicGPRegister,
+    always_on: u2 = 0b11,
+};
+
+fn movRmR(image: *Image, comptime T: type, dst: BasicGPRegister, src: BasicGPRegister) void {
+    dstRmSrcR(image, T, .mov, dst, src);
+}
+
+fn dstRmSrcR(image: *Image, comptime T: type, opcode: OpcodeRmR, dst: BasicGPRegister, src: BasicGPRegister) void {
+    const last_byte: u8 = @bitCast(LastByte{
+        .dst = dst,
+        .src = src,
+    });
+    const opcode_byte = @intFromEnum(opcode);
+
+    const bytes = switch (T) {
+        u8, i8 => blk: {
+            const base = [_]u8{ opcode_byte - 1, last_byte };
+            if (@intFromEnum(dst) >= @intFromEnum(BasicGPRegister.sp) or @intFromEnum(src) >= @intFromEnum(BasicGPRegister.sp)) {
+                image.appendCodeByte(0x40);
+            }
+
+            break :blk base;
+        },
+        u16, i16 => prefix_16_bit_operand ++ .{ opcode_byte, last_byte },
+        u32, i32 => .{ opcode_byte, last_byte },
+        u64, i64 => prefix_rex_w ++ .{ opcode_byte, last_byte },
+        else => @compileError("Not supported"),
+    };
+
+    image.appendCode(&bytes);
+}
 
 test "ret integer argument" {
     inline for (integer_types_to_test) |Int| {
         var image = try Image.create();
+        defer image.destroy();
         const number = getMaxInteger(Int);
-        const mov_a_di = switch (Int) {
-            u8, i8 => .{ 0x40, 0x88, 0xf8 },
-            u16, i16 => prefix_16_bit_operand ++ .{ mov_rm_r, 0xf8 },
-            u32, i32 => .{ mov_rm_r, 0xf8 },
-            u64, i64 => prefix_rex_w ++ .{ mov_rm_r, 0xf8 },
-            else => @compileError("Not supported"),
-        };
 
-        image.appendCode(&mov_a_di);
-        image.appendCode(&ret);
+        movRmR(&image, Int, .a, .di);
+        image.appendCodeByte(ret);
 
         const functionPointer = image.getEntryPoint(fn (Int) callconv(.C) Int);
         const result = functionPointer(number);
         try expectEqual(number, result);
     }
 }
+
 var r = std.rand.Pcg.init(0xffffffffffffffff);
 
 fn getRandomNumberRange(comptime T: type, min: T, max: T) T {
@@ -199,35 +229,113 @@ fn getRandomNumberRange(comptime T: type, min: T, max: T) T {
     };
 }
 
-const sub_rm_r = 0x29;
+fn subRmR(image: *Image, comptime T: type, dst: BasicGPRegister, src: BasicGPRegister) void {
+    dstRmSrcR(image, T, .sub, dst, src);
+}
 
 test "ret sub arguments" {
     inline for (integer_types_to_test) |Int| {
         var image = try Image.create();
+        defer image.destroy();
         const a = getRandomNumberRange(Int, std.math.minInt(Int) / 2, std.math.maxInt(Int) / 2);
         const b = getRandomNumberRange(Int, std.math.minInt(Int) / 2, a);
 
-        const mov_a_di = switch (Int) {
-            u8, i8 => .{ 0x40, 0x88, 0xf8 },
-            u16, i16 => prefix_16_bit_operand ++ .{ mov_rm_r, 0xf8 },
-            u32, i32 => .{ mov_rm_r, 0xf8 },
-            u64, i64 => prefix_rex_w ++ .{ mov_rm_r, 0xf8 },
-            else => @compileError("Not supported"),
-        };
-        image.appendCode(&mov_a_di);
-
-        const sub_a_si = switch (Int) {
-            u8, i8 => .{ 0x40, 0x28, 0xf0 },
-            u16, i16 => prefix_16_bit_operand ++ .{ sub_rm_r, 0xf0 },
-            u32, i32 => .{ sub_rm_r, 0xf0 },
-            u64, i64 => prefix_rex_w ++ .{ sub_rm_r, 0xf0 },
-            else => @compileError("Not supported"),
-        };
-        image.appendCode(&sub_a_si);
-        image.appendCode(&ret);
+        movRmR(&image, Int, .a, .di);
+        subRmR(&image, Int, .a, .si);
+        image.appendCodeByte(ret);
 
         const functionPointer = image.getEntryPoint(fn (Int, Int) callconv(.C) Int);
         const result = functionPointer(a, b);
         try expectEqual(a - b, result);
     }
+}
+
+const OpcodeRmR = enum(u8) {
+    add = 0x01,
+    @"or" = 0x09,
+    @"and" = 0x21,
+    sub = 0x29,
+    xor = 0x31,
+    @"test" = 0x85,
+    mov = 0x89,
+};
+
+test "test binary operations" {
+    inline for (integer_types_to_test) |T| {
+        const test_cases = [_]TestIntegerBinaryOperation(T){
+            .{
+                .opcode = .add,
+                .callback = struct {
+                    fn callback(a: T, b: T) T {
+                        return @addWithOverflow(a, b)[0];
+                    }
+                }.callback,
+            },
+            .{
+                .opcode = .sub,
+                .callback = struct {
+                    fn callback(a: T, b: T) T {
+                        return @subWithOverflow(a, b)[0];
+                    }
+                }.callback,
+            },
+            .{
+                .opcode = .@"or",
+                .callback = struct {
+                    fn callback(a: T, b: T) T {
+                        return a | b;
+                    }
+                }.callback,
+            },
+            .{
+                .opcode = .@"and",
+                .callback = struct {
+                    fn callback(a: T, b: T) T {
+                        return a & b;
+                    }
+                }.callback,
+            },
+            .{
+                .opcode = .xor,
+                .callback = struct {
+                    fn callback(a: T, b: T) T {
+                        return a ^ b;
+                    }
+                }.callback,
+            },
+        };
+
+        for (test_cases) |test_case| {
+            try test_case.runTest();
+        }
+    }
+}
+
+fn TestIntegerBinaryOperation(comptime T: type) type {
+    const should_log = false;
+    return struct {
+        callback: *const fn (a: T, b: T) T,
+        opcode: OpcodeRmR,
+
+        pub fn runTest(test_case: @This()) !void {
+            for (0..10) |_| {
+                var image = try Image.create();
+                defer image.destroy();
+                errdefer image.destroy();
+                const a = getRandomNumberRange(T, std.math.minInt(T) / 2, std.math.maxInt(T) / 2);
+                const b = getRandomNumberRange(T, std.math.minInt(T) / 2, a);
+                movRmR(&image, T, .a, .di);
+                dstRmSrcR(&image, T, test_case.opcode, .a, .si);
+                image.appendCodeByte(ret);
+
+                const functionPointer = image.getEntryPoint(fn (T, T) callconv(.C) T);
+                const expected = test_case.callback(a, b);
+                const result = functionPointer(a, b);
+                if (should_log) {
+                    log.err("{s} {}, {} ({})", .{ @tagName(test_case.opcode), a, b, T });
+                }
+                try expectEqual(expected, result);
+            }
+        }
+    };
 }
