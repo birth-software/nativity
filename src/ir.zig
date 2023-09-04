@@ -14,7 +14,7 @@ const void_type = Type{
 const Type = struct {
     id: Id,
 
-    inline fn isPrimitive(T: Type) bool {
+    fn isPrimitive(T: Type) bool {
         return switch (T.id) {
             .void => true,
         };
@@ -66,6 +66,7 @@ const Function = struct {
 pub const Result = struct {
     top_level_declarations: ArrayList(TopLevelDeclaration),
     functions: ArrayList(Function),
+    instructions: struct {} = .{},
 
     pub fn free(result: *Result, allocator: Allocator) void {
         for (result.functions.items) |*function| {

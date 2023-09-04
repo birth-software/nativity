@@ -8,19 +8,12 @@ const expectEqual = std.testing.expectEqual;
 
 const ir = @import("ir.zig");
 
-pub const Result = struct {
-    pub fn free(result: *Result, allocator: Allocator) void {
-        _ = allocator;
-        _ = result;
-    }
-};
-
 const Section = struct {
     content: []align(page_size) u8,
     index: usize = 0,
 };
 
-const Image = struct {
+const Result = struct {
     sections: struct {
         text: Section,
         rodata: Section,
@@ -28,8 +21,8 @@ const Image = struct {
     },
     entry_point: u32 = 0,
 
-    fn create() !Image {
-        return Image{
+    fn create() !Result {
+        return Result{
             .sections = .{
                 .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
                 .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
@@ -38,39 +31,63 @@ const Image = struct {
         };
     }
 
-    fn destroy(image: *Image) void {
+    fn destroy(image: *Result) void {
         inline for (comptime std.meta.fieldNames(@TypeOf(image.sections))) |field_name| {
-            std.os.munmap(@field(image.sections, field_name).content);
+            const section_bytes = @field(image.sections, field_name).content;
+            switch (@import("builtin").os.tag) {
+                .linux => std.os.munmap(section_bytes),
+                .windows => std.os.windows.VirtualFree(section_bytes.ptr, 0, std.os.windows.MEM_RELEASE),
+                else => @compileError("OS not supported"),
+            }
         }
     }
 
-    inline fn mmap(size: usize, flags: packed struct {
+    fn mmap(size: usize, flags: packed struct {
         executable: bool,
     }) ![]align(page_size) u8 {
-        const protection_flags = std.os.PROT.READ | std.os.PROT.WRITE | if (flags.executable) std.os.PROT.EXEC else 0;
-        const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE;
+        return switch (@import("builtin").os.tag) {
+            .windows => blk: {
+                const windows = std.os.windows;
+                break :blk @as([*]align(0x1000) u8, @ptrCast(@alignCast(try windows.VirtualAlloc(null, size, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE))))[0..size];
+            },
+            .linux => blk: {
+                const protection_flags = std.os.PROT.READ | std.os.PROT.WRITE | if (flags.executable) std.os.PROT.EXEC else 0;
+                const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE;
 
-        return std.os.mmap(null, size, protection_flags, mmap_flags, -1, 0);
+                break :blk std.os.mmap(null, size, protection_flags, mmap_flags, -1, 0);
+            },
+            else => @compileError("OS not supported"),
+        };
     }
 
-    fn appendCode(image: *Image, code: []const u8) void {
+    fn appendCode(image: *Result, code: []const u8) void {
         const destination = image.sections.text.content[image.sections.text.index..][0..code.len];
         @memcpy(destination, code);
         image.sections.text.index += code.len;
     }
 
-    fn appendCodeByte(image: *Image, code_byte: u8) void {
+    fn appendCodeByte(image: *Result, code_byte: u8) void {
         image.sections.text.content[image.sections.text.index] = code_byte;
         image.sections.text.index += 1;
     }
 
-    fn getEntryPoint(image: *const Image, comptime Function: type) *const Function {
+    fn getEntryPoint(image: *const Result, comptime Function: type) *const Function {
         comptime {
             assert(@typeInfo(Function) == .Fn);
         }
 
         assert(image.sections.text.content.len > 0);
         return @as(*const Function, @ptrCast(&image.sections.text.content[image.entry_point]));
+    }
+
+    pub fn free(result: *Result, allocator: Allocator) void {
+        _ = allocator;
+        inline for (comptime std.meta.fieldNames(@TypeOf(result.sections))) |field_name| {
+            switch (@import("builtin").os.tag) {
+                .windows => unreachable,
+                else => std.os.munmap(@field(result.sections, field_name).content),
+            }
+        }
     }
 };
 
@@ -123,7 +140,7 @@ const ret = 0xc3;
 const mov_a_imm = [1]u8{0xb8};
 const mov_reg_imm8: u8 = 0xb0;
 
-inline fn intToArrayOfBytes(integer: anytype) [@sizeOf(@TypeOf(integer))]u8 {
+fn intToArrayOfBytes(integer: anytype) [@sizeOf(@TypeOf(integer))]u8 {
     comptime {
         assert(@typeInfo(@TypeOf(integer)) == .Int);
     }
@@ -131,7 +148,7 @@ inline fn intToArrayOfBytes(integer: anytype) [@sizeOf(@TypeOf(integer))]u8 {
     return @as([@sizeOf(@TypeOf(integer))]u8, @bitCast(integer));
 }
 
-inline fn movAImm(image: *Image, integer: anytype) void {
+fn movAImm(image: *Result, integer: anytype) void {
     const T = @TypeOf(integer);
     image.appendCode(&(switch (T) {
         u8, i8 => .{mov_reg_imm8 | @intFromEnum(GPRegister.a)},
@@ -143,8 +160,9 @@ inline fn movAImm(image: *Image, integer: anytype) void {
 }
 
 test "ret void" {
-    var image = try Image.create();
-    defer image.destroy();
+    const allocator = std.testing.allocator;
+    var image = try Result.create();
+    defer image.free(allocator);
     image.appendCodeByte(ret);
 
     const function_pointer = image.getEntryPoint(fn () callconv(.C) void);
@@ -166,8 +184,8 @@ fn getMaxInteger(comptime T: type) T {
 
 test "ret integer" {
     inline for (integer_types_to_test) |Int| {
-        var image = try Image.create();
-        defer image.destroy();
+        var image = try Result.create();
+        defer image.free(std.testing.allocator);
         const expected_number = getMaxInteger(Int);
 
         movAImm(&image, expected_number);
@@ -185,11 +203,11 @@ const LastByte = packed struct(u8) {
     always_on: u2 = 0b11,
 };
 
-fn movRmR(image: *Image, comptime T: type, dst: BasicGPRegister, src: BasicGPRegister) void {
+fn movRmR(image: *Result, comptime T: type, dst: BasicGPRegister, src: BasicGPRegister) void {
     dstRmSrcR(image, T, .mov, dst, src);
 }
 
-fn dstRmSrcR(image: *Image, comptime T: type, opcode: OpcodeRmR, dst: BasicGPRegister, src: BasicGPRegister) void {
+fn dstRmSrcR(image: *Result, comptime T: type, opcode: OpcodeRmR, dst: BasicGPRegister, src: BasicGPRegister) void {
     const last_byte: u8 = @bitCast(LastByte{
         .dst = dst,
         .src = src,
@@ -216,8 +234,9 @@ fn dstRmSrcR(image: *Image, comptime T: type, opcode: OpcodeRmR, dst: BasicGPReg
 
 test "ret integer argument" {
     inline for (integer_types_to_test) |Int| {
-        var image = try Image.create();
-        defer image.destroy();
+        const allocator = std.testing.allocator;
+        var image = try Result.create();
+        defer image.free(allocator);
         const number = getMaxInteger(Int);
 
         movRmR(&image, Int, .a, .di);
@@ -239,14 +258,15 @@ fn getRandomNumberRange(comptime T: type, min: T, max: T) T {
     };
 }
 
-fn subRmR(image: *Image, comptime T: type, dst: BasicGPRegister, src: BasicGPRegister) void {
+fn subRmR(image: *Result, comptime T: type, dst: BasicGPRegister, src: BasicGPRegister) void {
     dstRmSrcR(image, T, .sub, dst, src);
 }
 
 test "ret sub arguments" {
     inline for (integer_types_to_test) |Int| {
-        var image = try Image.create();
-        defer image.destroy();
+        const allocator = std.testing.allocator;
+        var image = try Result.create();
+        defer image.free(allocator);
         const a = getRandomNumberRange(Int, std.math.minInt(Int) / 2, std.math.maxInt(Int) / 2);
         const b = getRandomNumberRange(Int, std.math.minInt(Int) / 2, a);
 
@@ -328,10 +348,10 @@ fn TestIntegerBinaryOperation(comptime T: type) type {
         opcode: OpcodeRmR,
 
         pub fn runTest(test_case: @This()) !void {
+            const allocator = std.testing.allocator;
             for (0..10) |_| {
-                var image = try Image.create();
-                defer image.destroy();
-                errdefer image.destroy();
+                var image = try Result.create();
+                defer image.free(allocator);
                 const a = getRandomNumberRange(T, std.math.minInt(T) / 2, std.math.maxInt(T) / 2);
                 const b = getRandomNumberRange(T, std.math.minInt(T) / 2, a);
                 movRmR(&image, T, .a, .di);
@@ -351,9 +371,9 @@ fn TestIntegerBinaryOperation(comptime T: type) type {
 }
 
 test "call after" {
-    var image = try Image.create();
-    defer image.destroy();
-    errdefer image.destroy();
+    const allocator = std.testing.allocator;
+    var image = try Result.create();
+    defer image.free(allocator);
     const jump_patch_offset = image.sections.text.index + 1;
     image.appendCode(&.{ 0xe8, 0x00, 0x00, 0x00, 0x00 });
     const jump_source = image.sections.text.index;
@@ -367,9 +387,9 @@ test "call after" {
 }
 
 test "call before" {
-    var image = try Image.create();
-    defer image.destroy();
-    errdefer image.destroy();
+    const allocator = std.testing.allocator;
+    var image = try Result.create();
+    defer image.free(allocator);
     const first_jump_patch_offset = image.sections.text.index + 1;
     const first_call = .{0xe8} ++ .{ 0x00, 0x00, 0x00, 0x00 };
     image.appendCode(&first_call);
@@ -390,9 +410,20 @@ test "call before" {
 pub fn runTest(allocator: Allocator, ir_result: *const ir.Result) !Result {
     _ = allocator;
 
+    var image = try Result.create();
+
+    var entry_point: u32 = 0;
+    _ = entry_point;
+
     for (ir_result.functions.items) |*function| {
-        _ = function;
+        for (function.instructions.items) |instruction| {
+            switch (instruction.id) {
+                .ret_void => {
+                    image.appendCodeByte(ret);
+                },
+            }
+        }
     }
 
-    return Result{};
+    return image;
 }

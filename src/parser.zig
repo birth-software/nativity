@@ -1,195 +1,434 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const log = std.log;
 
 const data_structures = @import("data_structures.zig");
 const ArrayList = data_structures.ArrayList;
+const HashMap = data_structures.HashMap;
 
 const lexer = @import("lexer.zig");
 
 pub const Result = struct {
-    functions: ArrayList(Function),
-    strings: StringMap,
+    function_map: ArrayList(lexer.Identifier),
+    nodes: ArrayList(Node),
 
     pub fn free(result: *Result, allocator: Allocator) void {
         result.functions.clearAndFree(allocator);
-        result.strings.clearAndFree(allocator);
     }
+};
+
+pub const Node = packed struct(u64) {
+    type: Type,
+    left: Node.Index,
+    right: Node.Index,
+
+    pub const Index = u27;
+
+    pub const Type = enum(u10) {
+        root = 0,
+        identifier = 1,
+        number = 2,
+        @"return" = 3,
+        block_one = 4,
+        function_declaration_no_arguments = 5,
+        container_declaration = 6,
+    };
+};
+
+const Error = error{
+    unexpected_token,
+    not_implemented,
+    OutOfMemory,
+};
+
+pub fn parse(allocator: Allocator, lexer_result: *const lexer.Result) !Result {
+    var parser = Parser{
+        .allocator = allocator,
+        .nodes = ArrayList(Node){},
+        .function_map = ArrayList(lexer.Identifier){},
+        .lexer = .{
+            .result = lexer_result,
+        },
+    };
+    errdefer parser.free();
+
+    const node_index = try parser.appendNode(Node{
+        .type = .root,
+        .left = 0,
+        .right = 0,
+    });
+    _ = node_index;
+
+    const members = try parser.parseContainerMembers();
+    _ = members;
+
+    return Result{
+        .function_map = parser.function_map,
+        .nodes = parser.nodes,
+    };
+}
+
+const ExpressionMutabilityQualifier = enum {
+    @"const",
+    @"var",
+};
+
+const Keyword = enum {
+    @"return",
+    @"fn",
 };
 
 const PeekResult = union(lexer.TokenId) {
-    special_character: lexer.SpecialCharacter,
-    identifier: []const u8,
+    identifier: lexer.Identifier,
+    operator: lexer.Operator,
+    number: lexer.Number,
 };
 
-const Function = struct {
-    name: u32,
-    return_type: u32,
-    arguments: ArrayList(Argument),
-    statements: ArrayList(Statement),
+const Lexer = struct {
+    result: *const lexer.Result,
+    indices: struct {
+        identifier: u32 = 0,
+        operator: u32 = 0,
+        number: u32 = 0,
+        id: u32 = 0,
+    } = .{},
 
-    const Argument = struct {
-        foo: u32 = 0,
-    };
+    fn hasTokens(l: *const Lexer) bool {
+        return l.indices.id < l.result.arrays.id.items.len;
+    }
+
+    fn currentTokenIndex(l: *const Lexer, comptime token_id: lexer.TokenId) u32 {
+        assert(l.isCurrentToken(token_id));
+        return @field(l.indices, @tagName(token_id));
+    }
+
+    fn consume(l: *Lexer, comptime token_id: lexer.TokenId) void {
+        assert(l.isCurrentToken(token_id));
+        l.indices.id += 1;
+        const index_ptr = &@field(l.indices, @tagName(token_id));
+        const index = index_ptr.*;
+        const token_value = @field(l.result.arrays, @tagName(token_id)).items[index];
+        log.err("Consuming {s} ({})...", .{ @tagName(token_id), token_value });
+
+        index_ptr.* += 1;
+    }
+
+    fn isCurrentToken(l: *const Lexer, token_id: lexer.TokenId) bool {
+        return l.result.arrays.id.items[l.indices.id] == token_id;
+    }
+
+    fn getIdentifier(l: *const Lexer, identifier: Node) []const u8 {
+        comptime {
+            assert(lexer.Identifier == Node);
+        }
+
+        assert(identifier.type == .identifier);
+
+        return l.result.file[identifier.left..][0 .. identifier.right - identifier.left];
+    }
+
+    fn expectTokenType(l: *Lexer, comptime expected_token_id: lexer.TokenId) !lexer.TokenTypeMap[@intFromEnum(expected_token_id)] {
+        const peek_result = l.peek() orelse return error.not_implemented;
+        return switch (peek_result) {
+            expected_token_id => |token| blk: {
+                l.consume(expected_token_id);
+                break :blk token;
+            },
+            else => error.not_implemented,
+        };
+    }
+
+    fn expectTokenTypeIndex(l: *Lexer, comptime expected_token_id: lexer.TokenId) !u32 {
+        const peek_result = l.peek() orelse return error.not_implemented;
+        return switch (peek_result) {
+            expected_token_id => blk: {
+                const index = l.currentTokenIndex(expected_token_id);
+                l.consume(expected_token_id);
+                break :blk index;
+            },
+            else => error.not_implemented,
+        };
+    }
+
+    fn expectSpecificToken(l: *Lexer, comptime expected_token_id: lexer.TokenId, expected_token: lexer.TokenTypeMap[@intFromEnum(expected_token_id)]) !void {
+        const peek_result = l.peek() orelse return error.not_implemented;
+        switch (peek_result) {
+            expected_token_id => |token| {
+                if (expected_token != token) {
+                    return error.not_implemented;
+                }
+
+                l.consume(expected_token_id);
+            },
+            else => |token| {
+                std.debug.panic("{s}", .{@tagName(token)});
+            },
+        }
+    }
+
+    fn maybeExpectOperator(l: *Lexer, expected_operator: lexer.Operator) bool {
+        return switch (l.peek() orelse unreachable) {
+            .operator => |operator| {
+                const result = operator == expected_operator;
+                if (result) {
+                    l.consume(.operator);
+                }
+                return result;
+            },
+            else => false,
+        };
+    }
+
+    fn peek(l: *const Lexer) ?PeekResult {
+        if (l.indices.id >= l.result.arrays.id.items.len) {
+            return null;
+        }
+
+        return switch (l.result.arrays.id.items[l.indices.id]) {
+            inline else => |token| blk: {
+                const tag = @tagName(token);
+                const index = @field(l.indices, tag);
+                const array = &@field(l.result.arrays, tag);
+
+                break :blk @unionInit(PeekResult, tag, array.items[index]);
+            },
+        };
+    }
 };
-
-const Statement = struct {
-    foo: u32 = 0,
-};
-
-const StringMap = std.AutoHashMapUnmanaged(u32, []const u8);
 
 const Parser = struct {
-    id_index: u32 = 0,
-    identifier_index: u32 = 0,
-    special_character_index: u32 = 0,
-    strings: StringMap,
+    lexer: Lexer,
+    nodes: ArrayList(Node),
+    function_map: ArrayList(lexer.Identifier),
     allocator: Allocator,
-    functions: ArrayList(Function),
 
-    fn parse(parser: *Parser, lexer_result: *const lexer.Result) !Result {
-        while (parser.id_index < lexer_result.ids.items.len) {
-            try parser.parseTopLevelDeclaration(lexer_result);
-        }
+    fn appendNode(parser: *Parser, node: Node) !Node.Index {
+        const index = parser.nodes.items.len;
+        try parser.nodes.append(parser.allocator, node);
+        return @intCast(index);
+    }
 
-        return Result{
-            .functions = parser.functions,
-            .strings = parser.strings,
+    fn getNode(parser: *Parser, node_index: Node.Index) *Node {
+        return &parser.nodes.items[node_index];
+    }
+
+    fn free(parser: *Parser) void {
+        _ = parser;
+    }
+
+    fn parseTypeExpression(parser: *Parser) !Node.Index {
+        // TODO: make this decent
+        return switch (parser.lexer.peek() orelse unreachable) {
+            .identifier => parser.nodeFromToken(.identifier),
+            else => unreachable,
         };
     }
 
-    fn parseFunction(parser: *Parser, lexer_result: *const lexer.Result, name: u32) !Function {
-        assert(lexer_result.special_characters.items[parser.special_character_index] == .left_parenthesis);
-        parser.consume(lexer_result, .special_character);
-
-        while (true) {
-            if (parser.expectSpecialCharacter(lexer_result, .right_parenthesis)) {
-                break;
-            } else |_| {}
-
+    fn parseFunctionDeclaration(parser: *Parser) !Node.Index {
+        try parser.lexer.expectSpecificToken(.operator, .left_parenthesis);
+        while (!parser.lexer.maybeExpectOperator(.right_parenthesis)) {
             return error.not_implemented;
         }
 
-        try parser.expectSpecialCharacter(lexer_result, .arrow);
-
-        const return_type_identifier = try parser.expectIdentifier(lexer_result);
-
-        try parser.expectSpecialCharacter(lexer_result, .left_brace);
-
-        while (true) {
-            if (parser.expectSpecialCharacter(lexer_result, .right_brace)) {
-                break;
-            } else |_| {}
-
-            return error.not_implemented;
-        }
-
-        return Function{
-            .name = name,
-            .statements = ArrayList(Statement){},
-            .arguments = ArrayList(Function.Argument){},
-            .return_type = return_type_identifier,
-        };
+        const t = try parser.parseTypeExpression();
+        const function_declaration = try parser.appendNode(.{
+            .type = .function_declaration_no_arguments,
+            .left = t,
+            .right = try parser.parseBlock(),
+        });
+        return function_declaration;
     }
 
-    inline fn consume(parser: *Parser, lexer_result: *const lexer.Result, comptime token_id: lexer.TokenId) void {
-        assert(lexer_result.ids.items[parser.id_index] == token_id);
-        parser.id_index += 1;
-        switch (token_id) {
-            .special_character => parser.special_character_index += 1,
-            .identifier => parser.identifier_index += 1,
+    fn parseBlock(parser: *Parser) !Node.Index {
+        try parser.lexer.expectSpecificToken(.operator, .left_brace);
+
+        var statements = ArrayList(Node.Index){};
+
+        while (!parser.lexer.maybeExpectOperator(.right_brace)) {
+            const statement = try parser.parseStatement();
+            try statements.append(parser.allocator, statement);
         }
-    }
 
-    fn parseTopLevelDeclaration(parser: *Parser, lexer_result: *const lexer.Result) !void {
-        const top_level_identifier = try parser.expectIdentifier(lexer_result);
-        const next_token = parser.peek(lexer_result);
-
-        switch (next_token) {
-            .special_character => |special_character| switch (special_character) {
-                .left_parenthesis => {
-                    const function = try parser.parseFunction(lexer_result, top_level_identifier);
-                    try parser.functions.append(parser.allocator, function);
-                },
-                else => return error.not_implemented,
+        const node: Node = switch (statements.items.len) {
+            0 => unreachable,
+            1 => .{
+                .type = .block_one,
+                .left = statements.items[0],
+                .right = 0,
             },
+            else => unreachable,
+        };
+        log.debug("Parsed block!", .{});
+        return parser.appendNode(node);
+    }
+
+    fn parseStatement(parser: *Parser) !Node.Index {
+        // TODO: more stuff before
+        const expression = try parser.parseAssignExpression();
+        try parser.lexer.expectSpecificToken(.operator, .semicolon);
+
+        return expression;
+    }
+
+    fn parseAssignExpression(parser: *Parser) !Node.Index {
+        const expression = try parser.parseExpression();
+        switch (parser.lexer.peek() orelse unreachable) {
+            .operator => |operator| switch (operator) {
+                .semicolon => return expression,
+                else => unreachable,
+            },
+            else => unreachable,
+        }
+
+        return error.not_implemented;
+    }
+
+    fn parseExpression(parser: *Parser) Error!Node.Index {
+        return parser.parseExpressionPrecedence(0);
+    }
+
+    fn parseExpressionPrecedence(parser: *Parser, minimum_precedence: i32) !Node.Index {
+        var expr_index = try parser.parsePrefixExpression();
+        log.debug("Expr index: {}", .{expr_index});
+
+        var banned_precedence: i32 = -1;
+        while (parser.lexer.hasTokens()) {
+            const precedence: i32 = switch (parser.lexer.peek() orelse unreachable) {
+                .operator => |operator| switch (operator) {
+                    .semicolon => -1,
+                    else => @panic(@tagName(operator)),
+                },
+                else => |foo| std.debug.panic("Foo: ({s}) {}", .{ @tagName(foo), foo }),
+            };
+
+            if (precedence < minimum_precedence) {
+                break;
+            }
+
+            if (precedence == banned_precedence) {
+                unreachable;
+            }
+
+            const node_index = try parser.parseExpressionPrecedence(1);
+            _ = node_index;
+
+            unreachable;
+        }
+
+        log.err("Parsed expression precedence", .{});
+
+        return expr_index;
+    }
+
+    fn parsePrefixExpression(parser: *Parser) !Node.Index {
+        switch (parser.lexer.peek() orelse unreachable) {
+            // .bang => .bool_not,
+            // .minus => .negation,
+            // .tilde => .bit_not,
+            // .minus_percent => .negation_wrap,
+            // .ampersand => .address_of,
+            // .keyword_try => .@"try",
+            // .keyword_await => .@"await",
+
+            else => |pref| {
+                log.err("Pref: {s}", .{@tagName(pref)});
+                return parser.parsePrimaryExpression();
+            },
+        }
+
+        return error.not_implemented;
+    }
+
+    fn nodeFromToken(parser: *Parser, comptime token_id: lexer.TokenId) !Node.Index {
+        const node = try parser.appendNode(.{
+            .type = @field(Node.Type, @tagName(token_id)),
+            .left = @intCast(parser.lexer.currentTokenIndex(token_id)),
+            .right = 0,
+        });
+        parser.lexer.consume(token_id);
+
+        return node;
+    }
+
+    fn parsePrimaryExpression(parser: *Parser) !Node.Index {
+        const result = switch (parser.lexer.peek() orelse unreachable) {
+            .number => try parser.nodeFromToken(.number),
             .identifier => |identifier| {
-                _ = identifier;
-                return error.not_implemented;
-            },
-        }
-    }
+                const identifier_name = parser.lexer.getIdentifier(identifier);
+                inline for (@typeInfo(Keyword).Enum.fields) |keyword| {
+                    if (std.mem.eql(u8, identifier_name, keyword.name)) return switch (@as(Keyword, @enumFromInt(keyword.value))) {
+                        .@"return" => blk: {
+                            parser.lexer.consume(.identifier);
+                            const node_ref = try parser.appendNode(.{
+                                .type = .@"return",
+                                .left = try parser.parseExpression(),
+                                .right = 0,
+                            });
+                            break :blk node_ref;
+                        },
+                        .@"fn" => blk: {
+                            parser.lexer.consume(.identifier);
+                            // TODO: figure out name association
+                            break :blk try parser.parseFunctionDeclaration();
+                        },
+                    };
+                }
 
-    inline fn peek(parser: *const Parser, lexer_result: *const lexer.Result) PeekResult {
-        return switch (lexer_result.ids.items[parser.id_index]) {
-            .special_character => .{
-                .special_character = lexer_result.special_characters.items[parser.special_character_index],
+                unreachable;
             },
-            .identifier => .{
-                .identifier = blk: {
-                    const identifier_range = lexer_result.identifiers.items[parser.identifier_index];
-                    break :blk lexer_result.file[identifier_range.start .. identifier_range.start + identifier_range.end];
-                },
+            else => |foo| {
+                std.debug.panic("foo: {s}. {}", .{ @tagName(foo), foo });
             },
         };
+
+        return result;
     }
 
-    fn expectSpecialCharacter(parser: *Parser, lexer_result: *const lexer.Result, expected: lexer.SpecialCharacter) !void {
-        const token_id = lexer_result.ids.items[parser.id_index];
-        if (token_id != .special_character) {
-            return error.expected_special_character;
+    fn parseContainerMembers(parser: *Parser) !void {
+        var container_nodes = ArrayList(Node.Index){};
+        while (parser.lexer.hasTokens()) {
+            const container_node = switch (parser.lexer.peek() orelse unreachable) {
+                .identifier => |first_identifier_ref| blk: {
+                    parser.lexer.consume(.identifier);
+
+                    const first_identifier = parser.lexer.getIdentifier(first_identifier_ref);
+
+                    if (std.mem.eql(u8, first_identifier, "comptime")) {
+                        unreachable;
+                    } else {
+                        const mutability_qualifier: ExpressionMutabilityQualifier = if (std.mem.eql(u8, first_identifier, @tagName(ExpressionMutabilityQualifier.@"const"))) .@"const" else if (std.mem.eql(u8, first_identifier, @tagName(ExpressionMutabilityQualifier.@"var"))) .@"var" else @panic(first_identifier);
+                        _ = mutability_qualifier;
+
+                        const identifier = try parser.appendNode(.{
+                            .type = .identifier,
+                            .left = @intCast(try parser.lexer.expectTokenTypeIndex(.identifier)),
+                            .right = 0,
+                        });
+
+                        switch (parser.lexer.peek() orelse unreachable) {
+                            .operator => |operator| switch (operator) {
+                                .colon => unreachable,
+                                .equal => {
+                                    parser.lexer.consume(.operator);
+
+                                    const expression = try parser.parseExpression();
+                                    break :blk try parser.appendNode(.{
+                                        .type = .container_declaration,
+                                        .left = expression,
+                                        .right = identifier,
+                                    });
+                                },
+                                else => unreachable,
+                            },
+                            else => |foo| std.debug.panic("WTF: {}", .{foo}),
+                        }
+                    }
+                },
+                else => |a| std.debug.panic("{}", .{a}),
+            };
+
+            try container_nodes.append(parser.allocator, container_node);
         }
-
-        defer parser.id_index += 1;
-
-        const special_character = lexer_result.special_characters.items[parser.special_character_index];
-        if (special_character != expected) {
-            return error.expected_different_special_character;
-        }
-
-        parser.special_character_index += 1;
     }
-
-    fn acceptSpecialCharacter() void {}
-
-    fn expectIdentifier(parser: *Parser, lexer_result: *const lexer.Result) !u32 {
-        const token_id = lexer_result.ids.items[parser.id_index];
-        if (token_id != .identifier) {
-            return Error.expected_identifier;
-        }
-
-        parser.id_index += 1;
-
-        const identifier_range = lexer_result.identifiers.items[parser.identifier_index];
-        parser.identifier_index += 1;
-        const identifier = lexer_result.file[identifier_range.start..identifier_range.end];
-        const Hash = std.hash.Wyhash;
-        const seed = @intFromPtr(identifier.ptr);
-        var hasher = Hash.init(seed);
-        std.hash.autoHash(&hasher, identifier.ptr);
-        const hash = hasher.final();
-        const truncated_hash: u32 = @truncate(hash);
-        try parser.strings.put(parser.allocator, truncated_hash, identifier);
-        return truncated_hash;
-    }
-
-    const Error = error{
-        expected_identifier,
-        expected_special_character,
-        expected_different_special_character,
-        not_implemented,
-    };
 };
-
-pub fn runTest(allocator: Allocator, lexer_result: *const lexer.Result) !Result {
-    var parser = Parser{
-        .allocator = allocator,
-        .strings = StringMap{},
-        .functions = ArrayList(Function){},
-    };
-
-    return parser.parse(lexer_result) catch |err| {
-        std.log.err("error: {}", .{err});
-        return err;
-    };
-}

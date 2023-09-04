@@ -3,95 +3,90 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log;
 
+const equal = std.mem.eql;
+
 const data_structures = @import("data_structures.zig");
 const ArrayList = data_structures.ArrayList;
 
 const fs = @import("fs.zig");
+const parser = @import("parser.zig");
 
-pub inline fn rdtsc() u64 {
-    var edx: u32 = undefined;
-    var eax: u32 = undefined;
+pub const TokenTypeMap = blk: {
+    var result: [@typeInfo(TokenId).Enum.fields.len]type = undefined;
 
-    asm volatile (
-        \\rdtsc
-        : [eax] "={eax}" (eax),
-          [edx] "={edx}" (edx),
-    );
+    result[@intFromEnum(TokenId.identifier)] = Identifier;
+    result[@intFromEnum(TokenId.operator)] = Operator;
+    result[@intFromEnum(TokenId.number)] = Number;
 
-    return @as(u64, edx) << 32 | eax;
-}
-
-inline fn rdtscFast() u32 {
-    return asm volatile (
-        \\rdtsc
-        : [eax] "={eax}" (-> u32),
-        :
-        : "edx"
-    );
-}
-
-const vector_byte_count = 16;
-// These two actually take less space due to how Zig handles bool as u1
-const VBool = @Vector(vector_byte_count, bool);
-const VU1 = @Vector(vector_byte_count, u1);
-
-const VU8 = @Vector(vector_byte_count, u8);
-
-inline fn vand(v1: VBool, v2: VBool) VBool {
-    return @bitCast(@as(VU1, @bitCast(v1)) & @as(VU1, @bitCast(v2)));
-}
-
-inline fn byteMask(n: u8) VU8 {
-    return @splat(n);
-}
-
-inline fn endOfIdentifier(ch: u8) bool {
-    // TODO: complete
-    return ch == ' ' or ch == '(' or ch == ')';
-}
-
-const Identifier = struct {
-    start: u32,
-    end: u32,
+    break :blk result;
 };
+
+pub const Identifier = parser.Node;
 
 pub const TokenId = enum {
     identifier,
-    special_character,
+    operator,
+    number,
 };
 
-pub const SpecialCharacter = enum(u8) {
-    arrow = 0,
+pub const Operator = enum(u8) {
     left_parenthesis = '(',
     right_parenthesis = ')',
     left_brace = '{',
     right_brace = '}',
+    equal = '=',
+    colon = ':',
+    semicolon = ';',
+};
+
+pub const Number = struct {
+    content: union(enum) {
+        float: f64,
+        integer: Integer,
+    },
+
+    const Integer = struct {
+        value: u64,
+        is_negative: bool,
+    };
 };
 
 pub const Result = struct {
-    identifiers: ArrayList(Identifier),
-    special_characters: ArrayList(SpecialCharacter),
-    ids: ArrayList(TokenId),
+    arrays: struct {
+        identifier: ArrayList(Identifier),
+        operator: ArrayList(Operator),
+        number: ArrayList(Number),
+        id: ArrayList(TokenId),
+    },
     file: []const u8,
     time: u64 = 0,
 
     pub fn free(result: *Result, allocator: Allocator) void {
-        result.identifiers.clearAndFree(allocator);
-        result.special_characters.clearAndFree(allocator);
-        result.ids.clearAndFree(allocator);
-        allocator.free(result.file);
+        inline for (@typeInfo(@TypeOf(result.arrays)).Struct.fields) |field| {
+            @field(result.arrays, field.name).clearAndFree(allocator);
+        }
+    }
+
+    fn appendToken(result: *Result, comptime token_id: TokenId, token_value: TokenTypeMap[@intFromEnum(token_id)]) void {
+        // const index = result.arrays.id.items.len;
+        @field(result.arrays, @tagName(token_id)).appendAssumeCapacity(token_value);
+        result.arrays.id.appendAssumeCapacity(token_id);
+        // log.err("Token #{}: {s} {}", .{ index, @tagName(token_id), token_value });
     }
 };
 
-fn lex(allocator: Allocator, text: []const u8) !Result {
+pub fn lex(allocator: Allocator, text: []const u8) !Result {
     const time_start = std.time.Instant.now() catch unreachable;
 
     var index: usize = 0;
 
     var result = Result{
-        .identifiers = try ArrayList(Identifier).initCapacity(allocator, text.len),
-        .special_characters = try ArrayList(SpecialCharacter).initCapacity(allocator, text.len),
-        .ids = try ArrayList(TokenId).initCapacity(allocator, text.len),
+        .arrays = .{
+            .identifier = try ArrayList(Identifier).initCapacity(allocator, text.len),
+            .operator = try ArrayList(Operator).initCapacity(allocator, text.len),
+            .number = try ArrayList(Number).initCapacity(allocator, text.len),
+            .id = try ArrayList(TokenId).initCapacity(allocator, text.len),
+        },
         .file = text,
     };
 
@@ -105,44 +100,50 @@ fn lex(allocator: Allocator, text: []const u8) !Result {
         switch (first_char) {
             'a'...'z', 'A'...'Z', '_' => {
                 const start = index;
-                // SIMD this
-                while (!endOfIdentifier(text[index])) {
+                while (true) {
+                    const ch = text[index];
+                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_' or (ch >= '0' and ch <= '9')) {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                result.appendToken(.identifier, .{
+                    .left = @intCast(start),
+                    .right = @intCast(index),
+                    .type = .identifier,
+                });
+            },
+            '(', ')', '{', '}', '-', '=', ';' => |operator| {
+                result.appendToken(.operator, @enumFromInt(operator));
+                index += 1;
+            },
+            '0'...'9' => {
+                const start = index;
+
+                while (text[index] >= '0' and text[index] <= '9') {
                     index += 1;
                 }
-
-                result.identifiers.appendAssumeCapacity(.{
-                    .start = @intCast(start),
-                    .end = @intCast(index),
+                const end = index;
+                const number_slice = text[start..end];
+                const number = try std.fmt.parseInt(u64, number_slice, 10);
+                result.appendToken(.number, .{
+                    .content = .{
+                        .integer = .{
+                            .value = number,
+                            .is_negative = false,
+                        },
+                    },
                 });
-
-                result.ids.appendAssumeCapacity(.identifier);
-            },
-            '(', ')', '{', '}' => |special_character| {
-                result.special_characters.appendAssumeCapacity(@enumFromInt(special_character));
-                result.ids.appendAssumeCapacity(.special_character);
-                index += 1;
             },
             ' ', '\n' => index += 1,
-            '-' => {
-                if (text[index + 1] == '>') {
-                    result.special_characters.appendAssumeCapacity(.arrow);
-                    result.ids.appendAssumeCapacity(.special_character);
-                    index += 2;
-                } else {
-                    @panic("TODO");
-                }
-            },
-            else => {
+            else => |foo| {
                 index += 1;
+                std.debug.panic("NI: {c}", .{foo});
             },
         }
     }
-
-    return result;
-}
-
-pub fn runTest(allocator: Allocator, file: []const u8) !Result {
-    const result = try lex(allocator, file);
 
     return result;
 }
@@ -151,6 +152,7 @@ test "lexer" {
     const allocator = std.testing.allocator;
     const file_path = fs.first;
     const file = try fs.readFile(allocator, file_path);
-    var result = try runTest(allocator, file);
+    defer allocator.free(file);
+    var result = try lex(allocator, file);
     defer result.free(allocator);
 }
