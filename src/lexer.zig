@@ -137,10 +137,10 @@ pub fn lex(allocator: Allocator, text: []const u8) !Result {
                     },
                 });
             },
-            ' ', '\n' => index += 1,
+            ' ', '\n', '\r', '\t' => index += 1,
             else => |foo| {
                 index += 1;
-                std.debug.panic("NI: {c}", .{foo});
+                std.debug.panic("NI: {c} 0x{x}", .{ foo, foo });
             },
         }
     }
