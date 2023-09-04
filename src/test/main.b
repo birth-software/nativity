@@ -1,3 +1,3 @@
-main() -> void {
-
+const main = fn() i32 {
+    return 0;
 }
