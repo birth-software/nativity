@@ -28,6 +28,11 @@ pub fn build(b: *std.Build) void {
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
+    b.installDirectory(.{
+        .source_dir = std.Build.LazyPath.relative("lib"),
+        .install_dir = .bin,
+        .install_subdir = "lib",
+    });
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
@@ -61,6 +66,13 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    const debug_unit_tests_cmd = b.addSystemCommand(&.{"gf2"});
+    debug_unit_tests_cmd.addArtifactArg(unit_tests);
+    debug_unit_tests_cmd.addArgs(&.{ "-ex", "r" });
+
+    const debug_test_step = b.step("debug_test", "Run the tests through the debugger");
+    debug_test_step.dependOn(&debug_unit_tests_cmd.step);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
