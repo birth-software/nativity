@@ -67,9 +67,28 @@ pub fn build(b: *std.Build) void {
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
-    const debug_unit_tests_cmd = b.addSystemCommand(&.{"gf2"});
-    debug_unit_tests_cmd.addArtifactArg(unit_tests);
-    debug_unit_tests_cmd.addArgs(&.{ "-ex", "r" });
+    const debug_unit_tests_cmd = switch (@import("builtin").os.tag) {
+        .linux => blk: {
+            const result = b.addSystemCommand(&.{"gf2"});
+            result.addArtifactArg(unit_tests);
+            result.addArgs(&.{ "-ex", "r" });
+            break :blk result;
+        },
+        .windows => blk: {
+            const result = b.addSystemCommand(&.{"remedybg"});
+            result.addArg("-g");
+            result.addArtifactArg(unit_tests);
+
+            break :blk result;
+        },
+        .macos => blk: {
+            // Broken, but it compiles
+            const result = b.addSystemCommand(&.{"gdb"});
+            result.addArtifactArg(unit_tests);
+            break :blk result;
+        },
+        else => @compileError("Operating system not supported"),
+    };
 
     const debug_test_step = b.step("debug_test", "Run the tests through the debugger");
     debug_test_step.dependOn(&debug_unit_tests_cmd.step);
