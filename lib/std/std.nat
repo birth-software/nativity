@@ -1,4 +1,5 @@
-const start = #import("start.nat");
 comptime {
     _ = start;
 }
+
+const start = #import("start.nat");

@@ -1,1 +1,7 @@
-const builtin = #import("builtin");
+comptime {
+    _ = _start;
+}
+
+const _start = () noreturn {
+    while (true) {}
+};

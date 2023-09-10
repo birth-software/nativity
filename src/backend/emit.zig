@@ -31,17 +31,6 @@ const Result = struct {
         };
     }
 
-    fn destroy(image: *Result) void {
-        inline for (comptime std.meta.fieldNames(@TypeOf(image.sections))) |field_name| {
-            const section_bytes = @field(image.sections, field_name).content;
-            switch (@import("builtin").os.tag) {
-                .linux => std.os.munmap(section_bytes),
-                .windows => std.os.windows.VirtualFree(section_bytes.ptr, 0, std.os.windows.MEM_RELEASE),
-                else => @compileError("OS not supported"),
-            }
-        }
-    }
-
     fn mmap(size: usize, flags: packed struct {
         executable: bool,
     }) ![]align(page_size) u8 {
@@ -78,16 +67,6 @@ const Result = struct {
 
         assert(image.sections.text.content.len > 0);
         return @as(*const Function, @ptrCast(&image.sections.text.content[image.entry_point]));
-    }
-
-    pub fn free(result: *Result, allocator: Allocator) void {
-        _ = allocator;
-        inline for (comptime std.meta.fieldNames(@TypeOf(result.sections))) |field_name| {
-            switch (@import("builtin").os.tag) {
-                .windows => unreachable,
-                else => std.os.munmap(@field(result.sections, field_name).content),
-            }
-        }
     }
 };
 
@@ -160,9 +139,7 @@ fn movAImm(image: *Result, integer: anytype) void {
 }
 
 test "ret void" {
-    const allocator = std.testing.allocator;
     var image = try Result.create();
-    defer image.free(allocator);
     image.appendCodeByte(ret);
 
     const function_pointer = image.getEntryPoint(fn () callconv(.C) void);
@@ -185,7 +162,6 @@ fn getMaxInteger(comptime T: type) T {
 test "ret integer" {
     inline for (integer_types_to_test) |Int| {
         var image = try Result.create();
-        defer image.free(std.testing.allocator);
         const expected_number = getMaxInteger(Int);
 
         movAImm(&image, expected_number);
@@ -234,9 +210,7 @@ fn dstRmSrcR(image: *Result, comptime T: type, opcode: OpcodeRmR, dst: BasicGPRe
 
 test "ret integer argument" {
     inline for (integer_types_to_test) |Int| {
-        const allocator = std.testing.allocator;
         var image = try Result.create();
-        defer image.free(allocator);
         const number = getMaxInteger(Int);
 
         movRmR(&image, Int, .a, .di);
@@ -264,9 +238,7 @@ fn subRmR(image: *Result, comptime T: type, dst: BasicGPRegister, src: BasicGPRe
 
 test "ret sub arguments" {
     inline for (integer_types_to_test) |Int| {
-        const allocator = std.testing.allocator;
         var image = try Result.create();
-        defer image.free(allocator);
         const a = getRandomNumberRange(Int, std.math.minInt(Int) / 2, std.math.maxInt(Int) / 2);
         const b = getRandomNumberRange(Int, std.math.minInt(Int) / 2, a);
 
@@ -348,10 +320,8 @@ fn TestIntegerBinaryOperation(comptime T: type) type {
         opcode: OpcodeRmR,
 
         pub fn runTest(test_case: @This()) !void {
-            const allocator = std.testing.allocator;
             for (0..10) |_| {
                 var image = try Result.create();
-                defer image.free(allocator);
                 const a = getRandomNumberRange(T, std.math.minInt(T) / 2, std.math.maxInt(T) / 2);
                 const b = getRandomNumberRange(T, std.math.minInt(T) / 2, a);
                 movRmR(&image, T, .a, .di);
@@ -371,9 +341,7 @@ fn TestIntegerBinaryOperation(comptime T: type) type {
 }
 
 test "call after" {
-    const allocator = std.testing.allocator;
     var image = try Result.create();
-    defer image.free(allocator);
     const jump_patch_offset = image.sections.text.index + 1;
     image.appendCode(&.{ 0xe8, 0x00, 0x00, 0x00, 0x00 });
     const jump_source = image.sections.text.index;
@@ -387,9 +355,7 @@ test "call after" {
 }
 
 test "call before" {
-    const allocator = std.testing.allocator;
     var image = try Result.create();
-    defer image.free(allocator);
     const first_jump_patch_offset = image.sections.text.index + 1;
     const first_call = .{0xe8} ++ .{ 0x00, 0x00, 0x00, 0x00 };
     image.appendCode(&first_call);

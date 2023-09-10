@@ -6,6 +6,7 @@ const log = std.log;
 
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
+const enumFromString = data_structures.enumFromString;
 const HashMap = data_structures.HashMap;
 
 const lexical_analyzer = @import("lexical_analyzer.zig");
@@ -14,26 +15,40 @@ const Token = lexical_analyzer.Token;
 pub const Result = struct {
     nodes: ArrayList(Node),
     time: u64,
-
-    pub fn free(result: *Result, allocator: Allocator) void {
-        result.nodes.clearAndFree(allocator);
-    }
 };
 
-pub const Node = packed struct(u96) {
+// TODO: pack it to be more efficient
+pub const Node = packed struct(u128) {
     token: u32,
     id: Id,
     left: Node.Index,
     right: Node.Index,
 
-    pub const Index = u27;
+    pub const Index = packed struct(u32) {
+        value: u31,
+        valid: bool = true,
+
+        pub const invalid = Index{
+            .value = 0,
+            .valid = false,
+        };
+
+        pub fn get(index: Index) ?u32 {
+            return if (index.valid) index.value else null;
+        }
+
+        pub fn unwrap(index: Index) u32 {
+            assert(index.valid);
+            return index.value;
+        }
+    };
 
     pub const Range = struct {
         start: u32,
         end: u32,
     };
 
-    pub const Id = enum(u10) {
+    pub const Id = enum(u32) {
         main = 0,
         identifier = 1,
         number = 2,
@@ -46,6 +61,13 @@ pub const Node = packed struct(u96) {
         simple_variable_declaration = 9,
         assign = 10,
         @"comptime" = 11,
+        node_list = 12,
+        block_zero = 13,
+        simple_while = 14,
+        simple_function_prototype = 15,
+        function_definition = 16,
+        keyword_noreturn = 17,
+        keyword_true = 18,
     };
 };
 
@@ -62,10 +84,6 @@ const Analyzer = struct {
     file: []const u8,
     allocator: Allocator,
     temporal_node_heap: ArrayList(Node.Index) = .{},
-
-    fn free(analyzer: *Analyzer) void {
-        _ = analyzer;
-    }
 
     fn expectToken(analyzer: *Analyzer, token_id: Token.Id) !u32 {
         if (analyzer.tokens[analyzer.token_i].id == token_id) {
@@ -90,56 +108,50 @@ const Analyzer = struct {
         while (analyzer.token_i < analyzer.tokens.len) {
             const first = analyzer.token_i;
             const member_node: Node = switch (analyzer.tokens[first].id) {
-                .identifier => blk: {
-                    const first_identifier_token = analyzer.tokens[first];
-                    analyzer.token_i += 1;
+                .fixed_keyword_comptime => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                    .left_brace => blk: {
+                        analyzer.token_i += 1;
+                        const comptime_block = try analyzer.block();
 
-                    const identifier = analyzer.getIdentifier(first_identifier_token);
-
-                    if (equal(u8, identifier, "comptime")) {
-                        switch (analyzer.tokens[analyzer.token_i].id) {
-                            .left_brace => {
-                                const comptime_block = try analyzer.block();
-
-                                break :blk .{
-                                    .id = .@"comptime",
-                                    .token = first,
-                                    .left = comptime_block,
-                                    .right = 0,
-                                };
-                            },
-                            else => |foo| std.debug.panic("NI: {s}", .{@tagName(foo)}),
-                        }
-                    } else {
-                        const is_const = equal(u8, identifier, "const");
-                        const is_var = equal(u8, identifier, "var");
-                        assert(is_const or is_var);
-
-                        _ = try analyzer.expectToken(.identifier);
-
-                        // TODO: type
-                        _ = try analyzer.expectToken(.equal);
-
-                        // TODO: do this in a function
-                        const init_node = switch (analyzer.tokens[analyzer.token_i].id) {
-                            .identifier => unreachable,
-                            .hash => try analyzer.compilerIntrinsic(),
-                            else => |t| std.debug.panic("NI: {s}", .{@tagName(t)}),
-                        };
-
-                        _ = try analyzer.expectToken(.semicolon);
-
-                        // TODO:
-                        const type_node = 0;
-                        const top_level_decl = .{
-                            .id = .simple_variable_declaration,
+                        break :blk .{
+                            .id = .@"comptime",
                             .token = first,
-                            .left = type_node,
-                            .right = init_node,
+                            .left = comptime_block,
+                            .right = Node.Index.invalid,
                         };
+                    },
+                    else => |foo| std.debug.panic("NI: {s}", .{@tagName(foo)}),
+                },
+                .fixed_keyword_const, .fixed_keyword_var => blk: {
+                    analyzer.token_i += 1;
+                    _ = try analyzer.expectToken(.identifier);
 
-                        break :blk top_level_decl;
-                    }
+                    // TODO: type
+                    _ = try analyzer.expectToken(.equal);
+
+                    // TODO: do this in a function
+                    const init_node = switch (analyzer.tokens[analyzer.token_i].id) {
+                        .identifier => unreachable,
+                        .hash => try analyzer.compilerIntrinsic(),
+                        .left_parenthesis => try analyzer.function(),
+                        else => |t| std.debug.panic("NI: {s}", .{@tagName(t)}),
+                    };
+
+                    _ = try analyzer.expectToken(.semicolon);
+
+                    // TODO:
+                    const type_node = Node.Index.invalid;
+                    const top_level_decl = .{
+                        .id = .simple_variable_declaration,
+                        .token = first,
+                        .left = type_node,
+                        .right = init_node,
+                    };
+
+                    break :blk top_level_decl;
+                },
+                .identifier => {
+                    unreachable;
                 },
                 else => |t| std.debug.panic("NI: {s}", .{@tagName(t)}),
             };
@@ -150,6 +162,11 @@ const Analyzer = struct {
 
         const members_array = analyzer.temporal_node_heap.items[node_heap_top..];
         const members: Members = switch (members_array.len) {
+            1 => .{
+                .len = 1,
+                .left = members_array[0],
+                .right = Node.Index.invalid,
+            },
             2 => .{
                 .len = 2,
                 .left = members_array[0],
@@ -159,6 +176,51 @@ const Analyzer = struct {
         };
 
         return members;
+    }
+
+    fn function(analyzer: *Analyzer) !Node.Index {
+        const token = analyzer.token_i;
+        const function_prototype = try analyzer.functionPrototype();
+        const function_body = try analyzer.block();
+        return analyzer.addNode(.{
+            .id = .function_definition,
+            .token = token,
+            .left = function_prototype,
+            .right = function_body,
+        });
+    }
+
+    fn functionPrototype(analyzer: *Analyzer) !Node.Index {
+        const token = analyzer.token_i;
+        const arguments = try analyzer.argumentList(.left_parenthesis, .right_parenthesis);
+        const return_type = try analyzer.typeExpression();
+
+        return analyzer.addNode(.{
+            .id = .simple_function_prototype,
+            .token = token,
+            .left = arguments,
+            .right = return_type,
+        });
+    }
+
+    fn argumentList(analyzer: *Analyzer, maybe_start_token: ?Token.Id, end_token: Token.Id) !Node.Index {
+        if (maybe_start_token) |start_token| {
+            _ = try analyzer.expectToken(start_token);
+        }
+
+        var list = ArrayList(Node.Index){};
+
+        while (analyzer.tokens[analyzer.token_i].id != end_token) {
+            @panic("TODO: argument list");
+        }
+
+        _ = try analyzer.expectToken(end_token);
+
+        if (list.items.len != 0) {
+            @panic("TODO: arguments");
+        } else {
+            return Node.Index.invalid;
+        }
     }
 
     fn block(analyzer: *Analyzer) !Node.Index {
@@ -174,11 +236,17 @@ const Analyzer = struct {
 
         const statement_array = analyzer.temporal_node_heap.items[node_heap_top..];
         const node: Node = switch (statement_array.len) {
+            0 => .{
+                .id = .block_zero,
+                .token = left_brace,
+                .left = Node.Index.invalid,
+                .right = Node.Index.invalid,
+            },
             1 => .{
                 .id = .block_one,
                 .token = left_brace,
                 .left = statement_array[0],
-                .right = 0,
+                .right = Node.Index.invalid,
             },
             else => |len| std.debug.panic("len: {}", .{len}),
         };
@@ -187,10 +255,41 @@ const Analyzer = struct {
 
     fn statement(analyzer: *Analyzer) !Node.Index {
         // TODO: more stuff before
-        const result = try analyzer.assignExpression();
-        _ = try analyzer.expectToken(.semicolon);
+        const first_statement_token = analyzer.tokens[analyzer.token_i];
+        return switch (first_statement_token.id) {
+            .identifier => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                .colon => {
+                    unreachable;
+                },
+                else => blk: {
+                    const identifier = analyzer.getIdentifier(first_statement_token);
+                    std.debug.print("Starting statement with identifier: {s}\n", .{identifier});
+                    const result = try analyzer.assignExpression();
+                    _ = try analyzer.expectToken(.semicolon);
+                    break :blk result;
+                },
+            },
+            .fixed_keyword_while => try analyzer.whileStatement(),
+            else => unreachable,
+        };
+    }
 
-        return result;
+    fn whileStatement(analyzer: *Analyzer) error{ OutOfMemory, unexpected_token, not_implemented }!Node.Index {
+        const while_identifier_index = try analyzer.expectToken(.fixed_keyword_while);
+
+        _ = try analyzer.expectToken(.left_parenthesis);
+        // TODO:
+        const while_condition = try analyzer.expression();
+        _ = try analyzer.expectToken(.right_parenthesis);
+
+        const while_block = try analyzer.block();
+
+        return analyzer.addNode(.{
+            .id = .simple_while,
+            .token = while_identifier_index,
+            .left = while_condition,
+            .right = while_block,
+        });
     }
 
     fn assignExpression(analyzer: *Analyzer) !Node.Index {
@@ -242,13 +341,13 @@ const Analyzer = struct {
                 .id = .compiler_intrinsic_one,
                 .token = hash,
                 .left = parameters[0],
-                .right = 0,
+                .right = Node.Index.invalid,
             }),
             else => unreachable,
         };
     }
 
-    fn expression(analyzer: *Analyzer) !Node.Index {
+    fn expression(analyzer: *Analyzer) error{ OutOfMemory, not_implemented, unexpected_token }!Node.Index {
         return analyzer.expressionPrecedence(0);
     }
 
@@ -259,7 +358,7 @@ const Analyzer = struct {
 
         while (analyzer.token_i < analyzer.tokens.len) {
             const precedence: i32 = switch (analyzer.tokens[analyzer.token_i].id) {
-                .equal, .semicolon, .right_parenthesis => -1,
+                .equal, .semicolon, .right_parenthesis, .right_brace => -1,
                 else => |foo| std.debug.panic("Foo: ({s}) {}", .{ @tagName(foo), foo }),
             };
 
@@ -305,7 +404,8 @@ const Analyzer = struct {
                 .colon => unreachable,
                 else => try analyzer.curlySuffixExpression(),
             },
-            .string_literal => try analyzer.curlySuffixExpression(),
+            .string_literal, .fixed_keyword_true, .fixed_keyword_false => try analyzer.curlySuffixExpression(),
+            .left_brace => try analyzer.block(),
             else => |id| {
                 log.warn("By default, calling curlySuffixExpression with {s}", .{@tagName(id)});
                 unreachable;
@@ -324,9 +424,33 @@ const Analyzer = struct {
         };
     }
 
+    fn noReturn(analyzer: *Analyzer) !Node.Index {
+        const token_i = analyzer.token_i;
+        assert(analyzer.tokens[token_i].id == .fixed_keyword_noreturn);
+        analyzer.token_i += 1;
+        return analyzer.addNode(.{
+            .id = .keyword_noreturn,
+            .token = token_i,
+            .left = Node.Index.invalid,
+            .right = Node.Index.invalid,
+        });
+    }
+
+    fn boolTrue(analyzer: *Analyzer) !Node.Index {
+        const token_i = analyzer.token_i;
+        assert(analyzer.tokens[token_i].id == .fixed_keyword_true);
+        analyzer.token_i += 1;
+        return analyzer.addNode(.{
+            .id = .keyword_true,
+            .token = token_i,
+            .left = Node.Index.invalid,
+            .right = Node.Index.invalid,
+        });
+    }
+
     fn typeExpression(analyzer: *Analyzer) !Node.Index {
         return switch (analyzer.tokens[analyzer.token_i].id) {
-            .string_literal, .identifier => try analyzer.errorUnionExpression(),
+            .identifier, .fixed_keyword_noreturn, .fixed_keyword_true, .fixed_keyword_false => try analyzer.errorUnionExpression(),
             else => |id| blk: {
                 log.warn("By default, calling errorUnionExpression with {s}", .{@tagName(id)});
 
@@ -354,7 +478,21 @@ const Analyzer = struct {
                 unreachable;
             } else {
                 if (analyzer.tokens[analyzer.token_i].id == .left_parenthesis) {
-                    unreachable;
+                    analyzer.token_i += 1;
+
+                    var expression_list = ArrayList(Node.Index){};
+                    while (analyzer.tokens[analyzer.token_i].id != .right_parenthesis) {
+                        const parameter = try analyzer.expression();
+                        try expression_list.append(analyzer.allocator, parameter);
+                        analyzer.token_i += @intFromBool(switch (analyzer.tokens[analyzer.token_i].id) {
+                            .comma, .right_parenthesis => true,
+                            .colon, .right_brace, .right_bracket => unreachable,
+                            else => unreachable,
+                        });
+                    }
+
+                    _ = try analyzer.expectToken(.right_parenthesis);
+                    @panic("TODO");
                 } else {
                     return result;
                 }
@@ -366,28 +504,34 @@ const Analyzer = struct {
 
     fn primaryTypeExpression(analyzer: *Analyzer) !Node.Index {
         const token_i = analyzer.token_i;
-        return switch (analyzer.tokens[token_i].id) {
+        const token = analyzer.tokens[token_i];
+        return switch (token.id) {
             .string_literal => blk: {
                 analyzer.token_i += 1;
                 break :blk analyzer.addNode(.{
                     .id = .string_literal,
                     .token = token_i,
-                    .left = 0,
-                    .right = 0,
+                    .left = Node.Index.invalid,
+                    .right = Node.Index.invalid,
                 });
             },
             .identifier => switch (analyzer.tokens[token_i + 1].id) {
                 .colon => unreachable,
-                else => analyzer.addNode(.{
-                    .id = .identifier,
-                    .token = blk: {
-                        analyzer.token_i += 1;
-                        break :blk token_i;
-                    },
-                    .left = 0,
-                    .right = 0,
-                }),
+                else => blk: {
+                    const identifier = analyzer.getIdentifier(token);
+                    analyzer.token_i += 1;
+                    if (equal(u8, identifier, "_")) {
+                        break :blk Node.Index.invalid;
+                    } else break :blk analyzer.addNode(.{
+                        .id = .identifier,
+                        .token = token_i,
+                        .left = Node.Index.invalid,
+                        .right = Node.Index.invalid,
+                    });
+                },
             },
+            .fixed_keyword_noreturn => try analyzer.noReturn(),
+            .fixed_keyword_true => try analyzer.boolTrue(),
             else => |foo| {
                 switch (foo) {
                     .identifier => std.debug.panic("{s}: {s}", .{ @tagName(foo), analyzer.getIdentifier(analyzer.tokens[token_i]) }),
@@ -405,9 +549,13 @@ const Analyzer = struct {
     }
 
     fn addNode(analyzer: *Analyzer, node: Node) !Node.Index {
+        std.debug.print("Adding node {s}\n", .{@tagName(node.id)});
         const index = analyzer.nodes.items.len;
         try analyzer.nodes.append(analyzer.allocator, node);
-        return @intCast(index);
+
+        return Node.Index{
+            .value = @intCast(index),
+        };
     }
 };
 
@@ -420,12 +568,12 @@ const Members = struct {
         return switch (members.len) {
             0 => unreachable,
             1 => .{
-                .start = members.left,
-                .end = members.left,
+                .start = members.left.value,
+                .end = members.left.value,
             },
             2 => .{
-                .start = members.left,
-                .end = members.right,
+                .start = members.left.value,
+                .end = members.right.value,
             },
             else => unreachable,
         };
@@ -439,19 +587,19 @@ pub fn analyze(allocator: Allocator, tokens: []const Token, file: []const u8) !R
         .file = file,
         .allocator = allocator,
     };
-    errdefer analyzer.free();
     const node_index = try analyzer.addNode(.{
         .id = .main,
         .token = 0,
-        .left = 0,
-        .right = 0,
+        .left = Node.Index.invalid,
+        .right = Node.Index.invalid,
     });
 
-    assert(node_index == 0);
+    assert(node_index.value == 0);
+    assert(node_index.valid);
     const members = try analyzer.containerMembers();
     const member_range = members.toRange();
-    analyzer.nodes.items[0].left = @intCast(member_range.start);
-    analyzer.nodes.items[0].right = @intCast(member_range.end);
+    analyzer.nodes.items[0].left = .{ .value = @intCast(member_range.start) };
+    analyzer.nodes.items[0].right = .{ .value = @intCast(member_range.end) };
 
     const end = std.time.Instant.now() catch unreachable;
 
@@ -471,4 +619,18 @@ const ExpressionMutabilityQualifier = enum {
 const Keyword = enum {
     @"return",
     @"fn",
+    @"while",
+    void,
+    noreturn,
+};
+
+// These types are meant to be used by the semantic analyzer
+pub const ContainerDeclaration = struct {
+    members: []const Node.Index,
+};
+
+pub const SymbolDeclaration = struct {
+    type_node: Node.Index,
+    initialization_node: Node.Index,
+    mutability_token: Token.Index,
 };
