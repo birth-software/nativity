@@ -6,7 +6,13 @@ const assert = std.debug.assert;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
-const ir = @import("ir.zig");
+const ir = @import("intermediate_representation.zig");
+
+const data_structures = @import("../data_structures.zig");
+const ArrayList = data_structures.ArrayList;
+const AutoHashMap = data_structures.AutoHashMap;
+
+const jit_callconv = .SysV;
 
 const Section = struct {
     content: []align(page_size) u8,
@@ -39,8 +45,13 @@ const Result = struct {
                 const windows = std.os.windows;
                 break :blk @as([*]align(0x1000) u8, @ptrCast(@alignCast(try windows.VirtualAlloc(null, size, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE))))[0..size];
             },
-            .linux => blk: {
-                const protection_flags = std.os.PROT.READ | std.os.PROT.WRITE | if (flags.executable) std.os.PROT.EXEC else 0;
+            .linux, .macos => |os_tag| blk: {
+                const execute_flag: switch (os_tag) {
+                    .linux => u32,
+                    .macos => c_int,
+                    else => unreachable,
+                } = if (flags.executable) std.os.PROT.EXEC else 0;
+                const protection_flags: u32 = @intCast(std.os.PROT.READ | std.os.PROT.WRITE | execute_flag);
                 const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE;
 
                 break :blk std.os.mmap(null, size, protection_flags, mmap_flags, -1, 0);
@@ -60,15 +71,162 @@ const Result = struct {
         image.sections.text.index += 1;
     }
 
-    fn getEntryPoint(image: *const Result, comptime Function: type) *const Function {
+    fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {
         comptime {
-            assert(@typeInfo(Function) == .Fn);
+            assert(@typeInfo(FunctionType) == .Fn);
         }
 
         assert(image.sections.text.content.len > 0);
-        return @as(*const Function, @ptrCast(&image.sections.text.content[image.entry_point]));
+        return @as(*const FunctionType, @ptrCast(&image.sections.text.content[image.entry_point]));
     }
 };
+
+const SimpleRelocation = struct {
+    source: u32,
+    write_offset: u8,
+    instruction_len: u8,
+    size: u8,
+};
+
+const RelocationManager = struct {
+    in_function_relocations: data_structures.AutoHashMap(ir.BasicBlock.Index, ArrayList(SimpleRelocation)) = .{},
+};
+
+pub fn get(comptime arch: std.Target.Cpu.Arch) type {
+    const backend = switch (arch) {
+        .x86_64 => @import("x86_64.zig"),
+        else => @compileError("Architecture not supported"),
+    };
+    _ = backend;
+    const Function = struct {
+        block_byte_counts: ArrayList(u16),
+        byte_count: u32 = 0,
+        relocations: ArrayList(Relocation) = .{},
+        block_map: AutoHashMap(ir.BasicBlock.Index, u32) = .{},
+        const Relocation = struct {
+            source: ir.BasicBlock.Index,
+            destination: ir.BasicBlock.Index,
+            offset_offset: u8,
+            preferred_instruction_len: u8,
+        };
+    };
+
+    const InstructionSelector = struct {
+        functions: ArrayList(Function),
+    };
+    _ = InstructionSelector;
+
+    return struct {
+        pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
+            _ = intermediate;
+            _ = allocator;
+            // var function_iterator = intermediate.functions.iterator();
+            // var instruction_selector = InstructionSelector{
+            //     .functions = try ArrayList(Function).initCapacity(allocator, intermediate.functions.len),
+            // };
+            // while (function_iterator.next()) |ir_function| {
+            //     const function = instruction_selector.functions.addOneAssumeCapacity();
+            //     function.* = .{
+            //         .block_byte_counts = try ArrayList(u16).initCapacity(allocator, ir_function.blocks.items.len),
+            //     };
+            //     try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
+            //     for (ir_function.blocks.items, 0..) |block_index, index| {
+            //         function.block_map.putAssumeCapacity(allocator, block_index, @intCast(index));
+            //     }
+            //
+            //     for (ir_function.blocks.items) |block_index| {
+            //         const block = intermediate.blocks.get(block_index);
+            //         var block_byte_count: u16 = 0;
+            //         for (block.instructions.items) |instruction_index| {
+            //             const instruction = intermediate.instructions.get(instruction_index).*;
+            //             switch (instruction) {
+            //                 .phi => unreachable,
+            //                 .ret => unreachable,
+            //                 .jump => {
+            //                     block_byte_count += 2;
+            //                 },
+            //             }
+            //         }
+            //         function.block_byte_counts.appendAssumeCapacity(block_byte_count);
+            //     }
+            // }
+            // unreachable;
+        }
+    };
+}
+
+pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
+    _ = allocator;
+    var result = try Result.create();
+    _ = result;
+    var relocation_manager = RelocationManager{};
+    _ = relocation_manager;
+
+    var function_iterator = intermediate.functions.iterator();
+    _ = function_iterator;
+    // while (function_iterator.next()) |function| {
+    //     defer relocation_manager.in_function_relocations.clearRetainingCapacity();
+    //
+    //     for (function.blocks.items) |block_index| {
+    //         if (relocation_manager.in_function_relocations.getPtr(block_index)) |relocations| {
+    //             const current_offset: i64 = @intCast(result.sections.text.index);
+    //             _ = current_offset;
+    //             for (relocations.items) |relocation| switch (relocation.size) {
+    //                 inline @sizeOf(u8), @sizeOf(u32) => |relocation_size| {
+    //                     const Elem = switch (relocation_size) {
+    //                         @sizeOf(u8) => u8,
+    //                         @sizeOf(u32) => u32,
+    //                         else => unreachable,
+    //                     };
+    //                     const Ptr = *align(1) Elem;
+    //                     _ = Ptr;
+    //                     const relocation_slice = result.sections.text.content[relocation.source + relocation.write_offset ..][0..relocation_size];
+    //                     _ = relocation_slice;
+    //                     // std.math.cast(
+    //                     //
+    //                     unreachable;
+    //                 },
+    //                 else => unreachable,
+    //             };
+    //             // const ptr: *align(1) u32 = @ptrCast(&result.sections.text[relocation_source..][0..@sizeOf(u32)]);
+    //             // ptr.* =
+    //             // try relocations.append(allocator, @intCast(result.sections.text[));
+    //         }
+    //
+    //         const block = intermediate.blocks.get(block_index);
+    //
+    //         for (block.instructions.items) |instruction_index| {
+    //             const instruction = intermediate.instructions.get(instruction_index);
+    //             switch (instruction.*) {
+    //                 .jump => |jump_index| {
+    //                     const jump = intermediate.jumps.get(jump_index);
+    //                     assert(@as(u32, @bitCast(jump.source)) == @as(u32, @bitCast(block_index)));
+    //                     const relocation_index = result.sections.text.index + 1;
+    //                     if (@as(u32, @bitCast(jump.destination)) <= @as(u32, @bitCast(jump.source))) {
+    //                         unreachable;
+    //                     } else {
+    //                         result.appendCode(&(.{jmp_rel_32} ++ .{0} ** @sizeOf(u32)));
+    //                         const lookup_result = try relocation_manager.in_function_relocations.getOrPut(allocator, jump.destination);
+    //                         if (!lookup_result.found_existing) {
+    //                             lookup_result.value_ptr.* = .{};
+    //                         }
+    //
+    //                         try lookup_result.value_ptr.append(allocator, .{
+    //                             .source = @intCast(relocation_index),
+    //                             .write_offset = @sizeOf(u8),
+    //                             .instruction_len = @sizeOf(u8) + @sizeOf(u32),
+    //                             .size = @sizeOf(u32),
+    //                         });
+    //                     }
+    //                 },
+    //                 else => |t| @panic(@tagName(t)),
+    //             }
+    //         }
+    //     }
+    //     unreachable;
+    // }
+    // unreachable;
+}
 
 const Rex = enum(u8) {
     b = upper_4_bits | (1 << 0),
@@ -115,6 +273,7 @@ const prefix_rep = 0xf3;
 const prefix_rex_w = [1]u8{@intFromEnum(Rex.w)};
 const prefix_16_bit_operand = [1]u8{0x66};
 
+const jmp_rel_32 = 0xe9;
 const ret = 0xc3;
 const mov_a_imm = [1]u8{0xb8};
 const mov_reg_imm8: u8 = 0xb0;
@@ -142,7 +301,7 @@ test "ret void" {
     var image = try Result.create();
     image.appendCodeByte(ret);
 
-    const function_pointer = image.getEntryPoint(fn () callconv(.C) void);
+    const function_pointer = image.getEntryPoint(fn () callconv(jit_callconv) void);
     function_pointer();
 }
 
@@ -167,7 +326,7 @@ test "ret integer" {
         movAImm(&image, expected_number);
         image.appendCodeByte(ret);
 
-        const function_pointer = image.getEntryPoint(fn () callconv(.C) Int);
+        const function_pointer = image.getEntryPoint(fn () callconv(jit_callconv) Int);
         const result = function_pointer();
         try expect(result == expected_number);
     }
@@ -216,7 +375,7 @@ test "ret integer argument" {
         movRmR(&image, Int, .a, .di);
         image.appendCodeByte(ret);
 
-        const functionPointer = image.getEntryPoint(fn (Int) callconv(.C) Int);
+        const functionPointer = image.getEntryPoint(fn (Int) callconv(jit_callconv) Int);
         const result = functionPointer(number);
         try expectEqual(number, result);
     }
@@ -246,7 +405,7 @@ test "ret sub arguments" {
         subRmR(&image, Int, .a, .si);
         image.appendCodeByte(ret);
 
-        const functionPointer = image.getEntryPoint(fn (Int, Int) callconv(.C) Int);
+        const functionPointer = image.getEntryPoint(fn (Int, Int) callconv(jit_callconv) Int);
         const result = functionPointer(a, b);
         try expectEqual(a - b, result);
     }
@@ -328,7 +487,7 @@ fn TestIntegerBinaryOperation(comptime T: type) type {
                 dstRmSrcR(&image, T, test_case.opcode, .a, .si);
                 image.appendCodeByte(ret);
 
-                const functionPointer = image.getEntryPoint(fn (T, T) callconv(.C) T);
+                const functionPointer = image.getEntryPoint(fn (T, T) callconv(jit_callconv) T);
                 const expected = test_case.callback(a, b);
                 const result = functionPointer(a, b);
                 if (should_log) {
@@ -350,7 +509,7 @@ test "call after" {
     @as(*align(1) u32, @ptrCast(&image.sections.text.content[jump_patch_offset])).* = @intCast(jump_target - jump_source);
     image.appendCodeByte(ret);
 
-    const functionPointer = image.getEntryPoint(fn () callconv(.C) void);
+    const functionPointer = image.getEntryPoint(fn () callconv(jit_callconv) void);
     functionPointer();
 }
 
@@ -369,7 +528,7 @@ test "call before" {
     image.appendCode(&second_call);
     image.appendCodeByte(ret);
 
-    const functionPointer = image.getEntryPoint(fn () callconv(.C) void);
+    const functionPointer = image.getEntryPoint(fn () callconv(jit_callconv) void);
     functionPointer();
 }
 

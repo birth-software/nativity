@@ -21,6 +21,7 @@ const syntactic_analyzer = @import("frontend/syntactic_analyzer.zig");
 const Node = syntactic_analyzer.Node;
 const semantic_analyzer = @import("frontend/semantic_analyzer.zig");
 const intermediate_representation = @import("backend/intermediate_representation.zig");
+const emit = @import("backend/emit.zig");
 
 test {
     _ = lexical_analyzer;
@@ -59,7 +60,8 @@ pub fn init(allocator: Allocator) !*Compilation {
 
 pub const Struct = struct {
     scope: Scope.Index,
-    initialization: Value.Index,
+    fields: ArrayList(Field.Index) = .{},
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
@@ -69,6 +71,7 @@ pub const Type = union(enum) {
     noreturn,
     bool,
     integer: Integer,
+    @"struct": Struct.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
@@ -85,16 +88,29 @@ pub const Integer = struct {
 /// A scope contains a bunch of declarations
 pub const Scope = struct {
     parent: Scope.Index,
-    type: Type.Index,
+    type: Type.Index = Type.Index.invalid,
     declarations: AutoHashMap(u32, Declaration.Index) = .{},
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
 
-pub const Declaration = union(enum) {
-    unresolved: Node.Index,
-    struct_type: Struct,
+pub const ScopeType = enum(u1) {
+    local = 0,
+    global = 1,
+};
+
+pub const Mutability = enum(u1) {
+    @"const",
+    @"var",
+};
+
+pub const Declaration = struct {
+    scope_type: ScopeType,
+    mutability: Mutability,
+    init_value: Value.Index,
+    name: []const u8,
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
@@ -111,12 +127,17 @@ pub const Function = struct {
         pub const Index = Prototype.List.Index;
     };
 
+    pub fn getBodyBlock(function: Function, module: *Module) *Block {
+        return module.blocks.get(function.body);
+    }
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
 
 pub const Block = struct {
-    foo: u32 = 0,
+    statements: ArrayList(Value.Index) = .{},
+    reaches_end: bool,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
@@ -129,25 +150,59 @@ pub const Field = struct {
 };
 
 pub const Loop = struct {
-    foo: u32 = 0,
+    condition: Value.Index,
+    body: Value.Index,
+    breaks: bool,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
 
-pub const Value = struct {
-    type: union(enum) {
-        declaration: Declaration.Index,
-        bool_true,
-        bool_false,
-        loop: Loop.Index,
-        function: Function.Index,
-    },
-    is_const: bool,
-    is_comptime: bool,
+const Runtime = struct {
+    foo: u32 = 0,
+};
+
+const Unresolved = struct {
+    node_index: Node.Index,
+};
+
+pub const Assignment = struct {
+    store: Value.Index,
+    load: Value.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+};
+
+pub const Value = union(enum) {
+    unresolved: Unresolved,
+    declaration: Declaration.Index,
+    void,
+    bool: bool,
+    undefined,
+    loop: Loop.Index,
+    function: Function.Index,
+    block: Block.Index,
+    runtime: Runtime,
+    assign: Assignment.Index,
+    type: Type.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+
+    pub fn isComptime(value: Value) bool {
+        return switch (value) {
+            .bool, .void, .undefined, .function => true,
+            else => false,
+        };
+    }
+
+    pub fn getType(value: *Value) !void {
+        switch (value.*) {
+            else => |t| @panic(@tagName(t)),
+        }
+        unreachable;
+    }
 };
 
 pub const Module = struct {
@@ -165,6 +220,7 @@ pub const Module = struct {
     types: BlockList(Type) = .{},
     blocks: BlockList(Block) = .{},
     loops: BlockList(Loop) = .{},
+    assignments: BlockList(Assignment) = .{},
 
     pub const Descriptor = struct {
         main_package_path: []const u8,
@@ -354,7 +410,12 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     const main_declaration = try semantic_analyzer.initialize(compilation, module, packages[0]);
 
-    try intermediate_representation.initialize(compilation, module, packages[0], main_declaration);
+    var ir = try intermediate_representation.initialize(compilation, module, packages[0], main_declaration);
+
+    switch (@import("builtin").cpu.arch) {
+        .x86_64 => |arch| try emit.get(arch).initialize(compilation.base_allocator, &ir),
+        else => {},
+    }
 }
 
 fn generateAST() !void {}

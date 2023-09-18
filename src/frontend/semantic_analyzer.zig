@@ -7,10 +7,12 @@ const File = Compilation.File;
 const Module = Compilation.Module;
 const Package = Compilation.Package;
 
+const Assignment = Compilation.Assignment;
 const Block = Compilation.Block;
 const Declaration = Compilation.Declaration;
 const Field = Compilation.Field;
 const Function = Compilation.Function;
+const Loop = Compilation.Loop;
 const Scope = Compilation.Scope;
 const Struct = Compilation.Struct;
 const Type = Compilation.Type;
@@ -45,90 +47,157 @@ const Analyzer = struct {
     fn comptimeBlock(analyzer: *Analyzer, scope: *Scope, node_index: Node.Index) !Value.Index {
         const comptime_node = analyzer.nodes[node_index.unwrap()];
 
-        const comptime_block_node = analyzer.nodes[comptime_node.left.unwrap()];
-        var statement_node_indices = ArrayList(Node.Index){};
-        switch (comptime_block_node.id) {
-            .block_one => {
-                try statement_node_indices.append(analyzer.allocator, comptime_block_node.left);
+        const comptime_block = try analyzer.block(scope, .{ .none = {} }, comptime_node.left);
+        return try analyzer.module.values.append(analyzer.allocator, .{
+            .block = comptime_block,
+        });
+    }
+
+    fn assign(analyzer: *Analyzer, scope: *Scope, node_index: Node.Index) !Assignment.Index {
+        print("Assign: #{}", .{node_index.value});
+        const node = analyzer.nodes[node_index.unwrap()];
+        assert(node.id == .assign);
+        const Result = struct {
+            left: Value.Index,
+            right: Value.Index,
+        };
+        const result: Result = switch (node.left.valid) {
+            // In an assignment, the node being invalid means a discarding underscore, like this: ```_ = result```
+            false => .{
+                .left = Value.Index.invalid,
+                .right = try analyzer.expression(scope, ExpectType.none, node.right),
             },
+            true => {
+                const left_node = analyzer.nodes[node.left.unwrap()];
+                print("left node index: {}. Left node: {}", .{ node.left, left_node });
+                // const id = analyzer.tokenIdentifier(.token);
+                // print("id: {s}\n", .{id});
+                const left = try analyzer.expression(scope, ExpectType.none, node.left);
+                _ = left;
+                unreachable;
+            },
+        };
+
+        print("Assignment: L: {}. R: {}\n", .{ result.left, result.right });
+
+        if (result.left.valid and analyzer.module.values.get(result.left).isComptime() and analyzer.module.values.get(result.right).isComptime()) {
+            unreachable;
+        } else {
+            const assignment_index = try analyzer.module.assignments.append(analyzer.allocator, .{
+                .store = result.left,
+                .load = result.right,
+            });
+            return assignment_index;
+        }
+    }
+
+    fn block(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) anyerror!Block.Index {
+        var reaches_end = true;
+        const block_node = analyzer.nodes[node_index.unwrap()];
+        var statement_nodes = ArrayList(Node.Index){};
+        switch (block_node.id) {
+            .block_one, .comptime_block_one => {
+                try statement_nodes.append(analyzer.allocator, block_node.left);
+            },
+            .block_zero, .comptime_block_zero => {},
             else => |t| @panic(@tagName(t)),
         }
 
-        var statement_values = ArrayList(Value.Index){};
+        const is_comptime = switch (block_node.id) {
+            .comptime_block_zero, .comptime_block_one => true,
+            .block_zero, .block_one => false,
+            else => |t| @panic(@tagName(t)),
+        };
+        _ = is_comptime;
 
-        for (statement_node_indices.items) |statement_node_index| {
+        var statements = ArrayList(Value.Index){};
+
+        for (statement_nodes.items) |statement_node_index| {
+            if (!reaches_end) {
+                unreachable;
+            }
+
             const statement_node = analyzer.nodes[statement_node_index.unwrap()];
-            switch (statement_node.id) {
-                .assign => {
-                    const assign_expression = try analyzer.assign(scope, statement_node_index);
-                    try statement_values.append(analyzer.allocator, assign_expression);
+            const statement_value = switch (statement_node.id) {
+                inline .assign, .simple_while => |statement_id| blk: {
+                    const specific_value_index = switch (statement_id) {
+                        .assign => try analyzer.assign(scope, statement_node_index),
+                        .simple_while => statement: {
+                            const loop_index = try analyzer.module.loops.append(analyzer.allocator, .{
+                                .condition = Value.Index.invalid,
+                                .body = Value.Index.invalid,
+                                .breaks = false,
+                            });
+                            const loop_structure = analyzer.module.loops.get(loop_index);
+                            const while_condition = try analyzer.expression(scope, ExpectType.boolean, statement_node.left);
+                            const while_body = try analyzer.expression(scope, expect_type, statement_node.right);
+                            loop_structure.condition = while_condition;
+                            loop_structure.body = while_body;
+
+                            reaches_end = loop_structure.breaks or while_condition.valid;
+
+                            break :statement loop_index;
+                        },
+                        else => unreachable,
+                    };
+                    const value = @unionInit(Value, switch (statement_id) {
+                        .assign => "assign",
+                        .simple_while => "loop",
+                        else => unreachable,
+                    }, specific_value_index);
+                    const value_index = try analyzer.module.values.append(analyzer.allocator, value);
+                    break :blk value_index;
                 },
                 else => |t| @panic(@tagName(t)),
-            }
+            };
+            try statements.append(analyzer.allocator, statement_value);
         }
 
-        // TODO
-
-        return Value.Index.invalid;
+        return try analyzer.module.blocks.append(analyzer.allocator, .{
+            .statements = statements,
+            .reaches_end = reaches_end,
+        });
     }
 
-    fn assign(analyzer: *Analyzer, scope: *Scope, node_index: Node.Index) !Value.Index {
-        const node = analyzer.nodes[node_index.unwrap()];
-
-        print("\nAssign. Left: {}. Right: {}\n", .{ node.left, node.right });
-        // In an assignment, the node being invalid means a discarding underscore, like this: ```_ = result```
-        if (node.left.valid) {
-            @panic("Not discard");
-        } else {
-            return try analyzer.expression(scope, ExpectType{ .none = {} }, node.right);
-        }
+    fn whileExpression(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node: Node) !Loop.Index {
+        _ = node;
+        _ = expect_type;
+        _ = scope;
+        _ = analyzer;
     }
 
-    fn block(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) !Block.Index {
-        const block_node = analyzer.nodes[node_index.unwrap()];
-        var statements = ArrayList(Node.Index){};
-        switch (block_node.id) {
-            .block_one => {
-                try statements.append(analyzer.allocator, block_node.left);
-            },
-            .block_zero => {},
+    fn resolve(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, value: *Value) !void {
+        const node_index = switch (value.*) {
+            .unresolved => |unresolved| unresolved.node_index,
             else => |t| @panic(@tagName(t)),
-        }
-
-        for (statements.items) |statement_node_index| {
-            _ = try analyzer.expression(scope, expect_type, statement_node_index);
-            // const statement_node = analyzer.nodes[statement_node_index.unwrap()];
-            //
-            // switch (statement_node.id) {
-            //     try .simple_while => {
-            //         const while_condition = try analyzer.expression(scope, ExpectType.boolean, statement_node.left);
-            //         _ = while_condition;
-            //         const while_block = try analyzer.block(scope, expect_type, statement_node.right);
-            //         _ = while_block;
-            //         unreachable;
-            //     },
-            //     else => |t| @panic(@tagName(t)),
-            // }
-        }
-
-        return try analyzer.module.blocks.append(analyzer.allocator, .{});
+        };
+        value.* = try analyzer.resolveNode(scope, expect_type, node_index);
     }
 
-    fn expression(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) error{OutOfMemory}!Value.Index {
+    fn doIdentifier(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node: Node) !Value.Index {
+        assert(node.id == .identifier);
+        const identifier_hash = try analyzer.identifierFromToken(node.token);
+        // TODO: search in upper scopes too
+        const identifier_scope_lookup = try scope.declarations.getOrPut(analyzer.allocator, identifier_hash);
+        if (identifier_scope_lookup.found_existing) {
+            const declaration_index = identifier_scope_lookup.value_ptr.*;
+            const declaration = analyzer.module.declarations.get(declaration_index);
+            const init_value = analyzer.module.values.get(declaration.init_value);
+            try analyzer.resolve(scope, expect_type, init_value);
+            if (init_value.* != .runtime and declaration.mutability == .@"const") {
+                return declaration.init_value;
+            } else {
+                unreachable;
+            }
+        } else {
+            @panic("TODO: not found");
+        }
+    }
+
+    fn resolveNode(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) anyerror!Value {
         const node = analyzer.nodes[node_index.unwrap()];
         return switch (node.id) {
-            .identifier => blk: {
-                const identifier_hash = try analyzer.identifierFromToken(node.token);
-                // TODO: search in upper scopes too
-                const identifier_scope_lookup = try scope.declarations.getOrPut(analyzer.allocator, identifier_hash);
-                if (identifier_scope_lookup.found_existing) {
-                    const declaration_index = identifier_scope_lookup.value_ptr.*;
-                    const declaration = analyzer.module.declarations.get(declaration_index);
-                    break :blk try analyzer.analyzeDeclaration(scope, declaration);
-                } else {
-                    @panic("TODO: not found");
-                }
-            },
+            .identifier => unreachable,
             .compiler_intrinsic_one => blk: {
                 const intrinsic_name = analyzer.tokenIdentifier(node.token + 1);
                 const intrinsic = data_structures.enumFromString(Intrinsic, intrinsic_name) orelse unreachable;
@@ -148,14 +217,9 @@ const Analyzer = struct {
                                     unreachable;
                                 }
 
-                                const file_struct_declaration_index = try analyzeFile(analyzer.allocator, analyzer.module, imported_file.file);
-                                break :blk try analyzer.module.values.append(analyzer.allocator, .{
-                                    .type = .{
-                                        .declaration = file_struct_declaration_index,
-                                    },
-                                    .is_const = true,
-                                    .is_comptime = true,
-                                });
+                                break :blk .{
+                                    .type = try analyzeFile(analyzer.allocator, analyzer.module, imported_file.file),
+                                };
                             },
                             else => unreachable,
                         }
@@ -174,15 +238,27 @@ const Analyzer = struct {
                     .prototype = function_prototype_index,
                     .body = function_body,
                 });
-                const value_index = try analyzer.module.values.append(analyzer.allocator, .{
-                    .type = .{
-                        .function = function_index,
-                    },
-                    .is_const = true,
-                    .is_comptime = true,
-                });
-                break :blk value_index;
+                break :blk .{
+                    .function = function_index,
+                };
             },
+            .keyword_true => unreachable,
+            .simple_while => unreachable,
+            // .assign => try analyzer.assign(scope, node_index),
+            .block_zero, .block_one => blk: {
+                const block_index = try analyzer.block(scope, expect_type, node_index);
+                break :blk .{
+                    .block = block_index,
+                };
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn expression(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) !Value.Index {
+        const node = analyzer.nodes[node_index.unwrap()];
+        return switch (node.id) {
+            .identifier => analyzer.doIdentifier(scope, expect_type, node),
             .keyword_true => blk: {
                 switch (expect_type) {
                     .none => {},
@@ -195,22 +271,9 @@ const Analyzer = struct {
 
                 break :blk bool_true;
             },
-            .simple_while => blk: {
-                const while_condition = try analyzer.expression(scope, ExpectType.boolean, node.left);
-                _ = while_condition;
-                const while_body = try analyzer.block(scope, expect_type, node.right);
-                _ = while_body;
-                const loop_index = try analyzer.module.loops.append(analyzer.allocator, .{});
-                const value_index = try analyzer.module.values.append(analyzer.allocator, .{
-                    .type = .{
-                        .loop = loop_index,
-                    },
-                    // TODO:
-                    .is_const = false,
-                    .is_comptime = false,
-                });
-                break :blk value_index;
-            },
+            .block_zero => try analyzer.module.values.append(analyzer.allocator, .{
+                .block = try analyzer.block(scope, expect_type, node_index),
+            }),
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -249,42 +312,34 @@ const Analyzer = struct {
     }
 
     fn analyzeDeclaration(analyzer: *Analyzer, scope: *Scope, declaration: *Declaration) !Value.Index {
-        switch (declaration.*) {
-            .unresolved => |node_index| {
-                const declaration_node = analyzer.nodes[node_index.unwrap()];
-                return switch (declaration_node.id) {
-                    .simple_variable_declaration => blk: {
-                        const expect_type = switch (declaration_node.left.valid) {
-                            true => unreachable,
-                            false => @unionInit(ExpectType, "none", {}),
-                        };
-
-                        const initialization_expression = try analyzer.expression(scope, expect_type, declaration_node.right);
-                        const value = analyzer.module.values.get(initialization_expression);
-                        if (value.is_comptime and value.is_const) {
-                            break :blk initialization_expression;
-                        }
-
-                        unreachable;
-                    },
-                    else => |t| @panic(@tagName(t)),
-                };
-            },
-            .struct_type => unreachable,
-        }
+        _ = declaration;
+        _ = scope;
+        _ = analyzer;
+        // switch (declaration.*) {
+        //     .unresolved => |node_index| {
+        //         const declaration_node = analyzer.nodes[node_index.unwrap()];
+        //         return switch (declaration_node.id) {
+        //             .simple_variable_declaration => blk: {
+        //                 const expect_type = switch (declaration_node.left.valid) {
+        //                     true => unreachable,
+        //                     false => @unionInit(ExpectType, "none", {}),
+        //                 };
+        //
+        //                 const initialization_expression = try analyzer.expression(scope, expect_type, declaration_node.right);
+        //                 const value = analyzer.module.values.get(initialization_expression);
+        //                 if (value.is_comptime and value.is_const) {
+        //                     break :blk initialization_expression;
+        //                 }
+        //
+        //                 unreachable;
+        //             },
+        //             else => |t| @panic(@tagName(t)),
+        //         };
+        //     },
+        //     .struct_type => unreachable,
+        // }
 
         @panic("TODO: analyzeDeclaration");
-    }
-
-    fn containerMember(analyzer: *Analyzer, scope: *Scope, node_index: Node.Index) !void {
-        const node = analyzer.nodes[node_index.unwrap()];
-        switch (node.id) {
-            .simple_variable_declaration => {},
-            .@"comptime" => {
-                _ = try analyzer.comptimeBlock(scope, node_index);
-            },
-            else => std.debug.panic("Tag: {}", .{node.id}),
-        }
     }
 
     fn globalSymbolDeclaration(analyzer: *Analyzer, symbol_declaration: SymbolDeclaration) !void {
@@ -339,21 +394,24 @@ const Analyzer = struct {
         };
     }
 
-    fn structDeclaration(analyzer: *Analyzer, parent_scope: Scope.Index, container_declaration: syntactic_analyzer.ContainerDeclaration, index: Node.Index) !Declaration.Index {
+    fn structType(analyzer: *Analyzer, parent_scope: Scope.Index, container_declaration: syntactic_analyzer.ContainerDeclaration, index: Node.Index) !Type.Index {
         _ = index;
-        const new_scope = try analyzer.allocateScope(parent_scope, Type.Index.invalid);
+        const new_scope = try analyzer.allocateScope(.{ .parent = parent_scope });
         const scope = new_scope.ptr;
 
         const is_file = !parent_scope.valid;
         assert(is_file);
-        // TODO: do it properly
-        const declaration_index = try analyzer.module.declarations.append(analyzer.allocator, .{
-            .struct_type = .{
-                .scope = new_scope.index,
-                .initialization = if (is_file) Value.Index.invalid else unreachable,
-            },
+
+        const struct_index = try analyzer.module.structs.append(analyzer.allocator, .{
+            .scope = new_scope.index,
         });
-        // TODO:
+        const struct_type = analyzer.module.structs.get(struct_index);
+        const type_index = try analyzer.module.types.append(analyzer.allocator, .{
+            .@"struct" = struct_index,
+        });
+        scope.type = type_index;
+
+        _ = struct_type;
         assert(container_declaration.members.len > 0);
 
         const count = blk: {
@@ -391,6 +449,11 @@ const Analyzer = struct {
             switch (declaration_node.id) {
                 .@"comptime" => {},
                 .simple_variable_declaration => {
+                    const mutability: Compilation.Mutability = switch (analyzer.tokens[declaration_node.token].id) {
+                        .fixed_keyword_const => .@"const",
+                        .fixed_keyword_var => .@"var",
+                        else => |t| @panic(@tagName(t)),
+                    };
                     const expected_identifier_token_index = declaration_node.token + 1;
                     const expected_identifier_token = analyzer.tokens[expected_identifier_token_index];
                     if (expected_identifier_token.id != .identifier) {
@@ -416,7 +479,14 @@ const Analyzer = struct {
                     }
 
                     const container_declaration_index = try analyzer.module.declarations.append(analyzer.allocator, .{
-                        .unresolved = declaration_node_index,
+                        .name = declaration_name,
+                        .scope_type = .global,
+                        .mutability = mutability,
+                        .init_value = try analyzer.module.values.append(analyzer.allocator, .{
+                            .unresolved = .{
+                                .node_index = declaration_node.right,
+                            },
+                        }),
                     });
 
                     scope_lookup.value_ptr.* = container_declaration_index;
@@ -429,8 +499,9 @@ const Analyzer = struct {
         for (declaration_nodes.items) |declaration_node_index| {
             const declaration_node = analyzer.nodes[declaration_node_index.unwrap()];
             switch (declaration_node.id) {
-                .@"comptime", .simple_variable_declaration => try analyzer.containerMember(scope, declaration_node_index),
-                else => unreachable,
+                .@"comptime" => _ = try analyzer.comptimeBlock(scope, declaration_node_index),
+                .simple_variable_declaration => {},
+                else => |t| @panic(@tagName(t)),
             }
         }
 
@@ -441,7 +512,7 @@ const Analyzer = struct {
             @panic("TODO: fields");
         }
 
-        return declaration_index;
+        return type_index;
     }
 
     const MemberType = enum {
@@ -494,11 +565,8 @@ const Analyzer = struct {
         index: Scope.Index,
     };
 
-    fn allocateScope(analyzer: *Analyzer, parent_scope: Scope.Index, scope_type: Type.Index) !ScopeAllocation {
-        const scope_index = try analyzer.module.scopes.append(analyzer.allocator, .{
-            .parent = parent_scope,
-            .type = scope_type,
-        });
+    fn allocateScope(analyzer: *Analyzer, scope_value: Scope) !ScopeAllocation {
+        const scope_index = try analyzer.module.scopes.append(analyzer.allocator, scope_value);
         const scope = analyzer.module.scopes.get(scope_index);
 
         return .{
@@ -512,6 +580,9 @@ const ExpectType = union(enum) {
     none,
     type_index: Type.Index,
 
+    pub const none = ExpectType{
+        .none = {},
+    };
     pub const boolean = ExpectType{
         .type_index = type_boolean,
     };
@@ -562,7 +633,7 @@ const HardwareSignedIntegerType = enum {
     const offset = HardwareUnsignedIntegerType.offset + @typeInfo(HardwareUnsignedIntegerType).Enum.fields.len;
 };
 
-pub fn initialize(compilation: *Compilation, module: *Module, package: *Package) !Declaration.Index {
+pub fn initialize(compilation: *Compilation, module: *Module, package: *Package) !Type.Index {
     inline for (@typeInfo(FixedTypeKeyword).Enum.fields) |enum_field| {
         _ = try module.types.append(compilation.base_allocator, @unionInit(Type, enum_field.name, {}));
     }
@@ -596,25 +667,17 @@ pub fn initialize(compilation: *Compilation, module: *Module, package: *Package)
     }
 
     _ = try module.values.append(compilation.base_allocator, .{
-        .type = .{
-            .bool_false = {},
-        },
-        .is_const = true,
-        .is_comptime = true,
+        .bool = false,
     });
 
     _ = try module.values.append(compilation.base_allocator, .{
-        .type = .{
-            .bool_true = {},
-        },
-        .is_const = true,
-        .is_comptime = true,
+        .bool = true,
     });
 
     return analyzeExistingPackage(compilation, module, package);
 }
 
-pub fn analyzeExistingPackage(compilation: *Compilation, module: *Module, package: *Package) !Declaration.Index {
+pub fn analyzeExistingPackage(compilation: *Compilation, module: *Module, package: *Package) !Type.Index {
     const package_import = try module.importPackage(compilation.base_allocator, package);
     assert(!package_import.is_new);
     const package_file = package_import.file;
@@ -622,7 +685,7 @@ pub fn analyzeExistingPackage(compilation: *Compilation, module: *Module, packag
     return try analyzeFile(compilation.base_allocator, module, package_file);
 }
 
-pub fn analyzeFile(allocator: Allocator, module: *Module, file: *File) !Declaration.Index {
+pub fn analyzeFile(allocator: Allocator, module: *Module, file: *File) !Type.Index {
     assert(file.status == .parsed);
 
     var analyzer = Analyzer{
@@ -634,7 +697,7 @@ pub fn analyzeFile(allocator: Allocator, module: *Module, file: *File) !Declarat
         .module = module,
     };
 
-    const result = try analyzer.structDeclaration(Scope.Index.invalid, try mainNodeToContainerDeclaration(allocator, file), .{ .value = 0 });
+    const result = try analyzer.structType(Scope.Index.invalid, try mainNodeToContainerDeclaration(allocator, file), .{ .value = 0 });
     return result;
 }
 
