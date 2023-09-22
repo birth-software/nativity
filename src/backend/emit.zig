@@ -71,6 +71,14 @@ const Result = struct {
         image.sections.text.index += 1;
     }
 
+    fn appendOnlyOpcodeSkipInstructionBytes(image: *Result, instruction: Instruction) void {
+        const instruction_descriptor = instruction_descriptors.get(instruction);
+        assert(instruction_descriptor.opcode_byte_count == instruction_descriptor.operand_offset);
+        image.appendCode(instruction_descriptor.getOpcode());
+
+        image.sections.text.index += instruction_descriptor.size - instruction_descriptor.opcode_byte_count;
+    }
+
     fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {
         comptime {
             assert(@typeInfo(FunctionType) == .Fn);
@@ -81,15 +89,86 @@ const Result = struct {
     }
 };
 
-const SimpleRelocation = struct {
-    source: u32,
-    write_offset: u8,
-    instruction_len: u8,
-    size: u8,
+const Instruction = enum {
+    jmp_rel_8,
+
+    const Descriptor = struct {
+        operands: [4]Operand,
+        operand_count: u3,
+        operand_offset: u5,
+        size: u8,
+        opcode: [2]u8,
+        opcode_byte_count: u8,
+
+        fn getOperands(descriptor: Descriptor) []const Operand {
+            return descriptor.operands[0..descriptor.operand_count];
+        }
+
+        fn getOpcode(descriptor: Descriptor) []const u8 {
+            return descriptor.opcode[0..descriptor.opcode_byte_count];
+        }
+
+        fn new(opcode_bytes: []const u8, operands: []const Operand) Descriptor {
+            // TODO: prefixes
+            var result = Descriptor{
+                .operands = undefined,
+                .operand_count = @intCast(operands.len),
+                .operand_offset = opcode_bytes.len,
+                .size = opcode_bytes.len,
+                .opcode = undefined,
+                .opcode_byte_count = opcode_bytes.len,
+            };
+
+            for (opcode_bytes, result.opcode[0..opcode_bytes.len]) |opcode_byte, *out_opcode| {
+                out_opcode.* = opcode_byte;
+            }
+
+            for (operands, result.operands[0..operands.len]) |operand, *out_operand| {
+                out_operand.* = operand;
+                result.size += operand.size;
+            }
+
+            return result;
+        }
+    };
+
+    const Operand = struct {
+        type: Type,
+        size: u8,
+
+        const Type = enum {
+            rel,
+        };
+    };
 };
 
-const RelocationManager = struct {
-    in_function_relocations: data_structures.AutoHashMap(ir.BasicBlock.Index, ArrayList(SimpleRelocation)) = .{},
+const rel8 = Instruction.Operand{
+    .type = .rel,
+    .size = @sizeOf(u8),
+};
+
+const instruction_descriptors = blk: {
+    var result = std.EnumArray(Instruction, Instruction.Descriptor).initUndefined();
+    result.getPtr(.jmp_rel_8).* = Instruction.Descriptor.new(&.{0xeb}, &[_]Instruction.Operand{rel8});
+    break :blk result;
+};
+
+const InstructionSelector = struct {
+    functions: ArrayList(Function),
+    const Function = struct {
+        instructions: ArrayList(Instruction) = .{},
+        block_byte_counts: ArrayList(u16),
+        block_offsets: ArrayList(u32),
+        byte_count: u32 = 0,
+        relocations: ArrayList(Relocation) = .{},
+        block_map: AutoHashMap(ir.BasicBlock.Index, u32) = .{},
+        const Relocation = struct {
+            instruction: Instruction,
+            source: u16,
+            destination: u16,
+            block_offset: u16,
+        };
+    };
 };
 
 pub fn get(comptime arch: std.Target.Cpu.Arch) type {
@@ -98,134 +177,102 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
         else => @compileError("Architecture not supported"),
     };
     _ = backend;
-    const Function = struct {
-        block_byte_counts: ArrayList(u16),
-        byte_count: u32 = 0,
-        relocations: ArrayList(Relocation) = .{},
-        block_map: AutoHashMap(ir.BasicBlock.Index, u32) = .{},
-        const Relocation = struct {
-            source: ir.BasicBlock.Index,
-            destination: ir.BasicBlock.Index,
-            offset_offset: u8,
-            preferred_instruction_len: u8,
-        };
-    };
-
-    const InstructionSelector = struct {
-        functions: ArrayList(Function),
-    };
-    _ = InstructionSelector;
 
     return struct {
         pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
-            _ = intermediate;
-            _ = allocator;
-            // var function_iterator = intermediate.functions.iterator();
-            // var instruction_selector = InstructionSelector{
-            //     .functions = try ArrayList(Function).initCapacity(allocator, intermediate.functions.len),
-            // };
-            // while (function_iterator.next()) |ir_function| {
-            //     const function = instruction_selector.functions.addOneAssumeCapacity();
-            //     function.* = .{
-            //         .block_byte_counts = try ArrayList(u16).initCapacity(allocator, ir_function.blocks.items.len),
-            //     };
-            //     try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
-            //     for (ir_function.blocks.items, 0..) |block_index, index| {
-            //         function.block_map.putAssumeCapacity(allocator, block_index, @intCast(index));
-            //     }
-            //
-            //     for (ir_function.blocks.items) |block_index| {
-            //         const block = intermediate.blocks.get(block_index);
-            //         var block_byte_count: u16 = 0;
-            //         for (block.instructions.items) |instruction_index| {
-            //             const instruction = intermediate.instructions.get(instruction_index).*;
-            //             switch (instruction) {
-            //                 .phi => unreachable,
-            //                 .ret => unreachable,
-            //                 .jump => {
-            //                     block_byte_count += 2;
-            //                 },
-            //             }
-            //         }
-            //         function.block_byte_counts.appendAssumeCapacity(block_byte_count);
-            //     }
-            // }
-            // unreachable;
+            var result = try Result.create();
+            var function_iterator = intermediate.functions.iterator();
+            var instruction_selector = InstructionSelector{
+                .functions = try ArrayList(InstructionSelector.Function).initCapacity(allocator, intermediate.functions.len),
+            };
+
+            while (function_iterator.next()) |ir_function| {
+                const function = instruction_selector.functions.addOneAssumeCapacity();
+                function.* = .{
+                    .block_byte_counts = try ArrayList(u16).initCapacity(allocator, ir_function.blocks.items.len),
+                    .block_offsets = try ArrayList(u32).initCapacity(allocator, ir_function.blocks.items.len),
+                };
+                try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
+                for (ir_function.blocks.items, 0..) |block_index, index| {
+                    function.block_map.putAssumeCapacity(block_index, @intCast(index));
+                }
+
+                for (ir_function.blocks.items) |block_index| {
+                    const block = intermediate.blocks.get(block_index);
+                    function.block_offsets.appendAssumeCapacity(function.byte_count);
+                    var block_byte_count: u16 = 0;
+                    for (block.instructions.items) |instruction_index| {
+                        const instruction = intermediate.instructions.get(instruction_index).*;
+                        switch (instruction) {
+                            .phi => unreachable,
+                            .ret => unreachable,
+                            .jump => |jump_index| {
+                                const jump = intermediate.jumps.get(jump_index);
+                                const relocation = InstructionSelector.Function.Relocation{
+                                    .instruction = .jmp_rel_8,
+                                    .source = @intCast(function.block_map.get(jump.source) orelse unreachable),
+                                    .destination = @intCast(function.block_map.get(jump.destination) orelse unreachable),
+                                    .block_offset = block_byte_count,
+                                };
+                                try function.relocations.append(allocator, relocation);
+                                block_byte_count += instruction_descriptors.get(.jmp_rel_8).size;
+                                try function.instructions.append(allocator, .jmp_rel_8);
+                            },
+                        }
+                    }
+                    function.block_byte_counts.appendAssumeCapacity(block_byte_count);
+                    function.byte_count += block_byte_count;
+                }
+            }
+
+            for (instruction_selector.functions.items) |function| {
+                for (function.instructions.items) |instruction| switch (instruction) {
+                    .jmp_rel_8 => result.appendOnlyOpcodeSkipInstructionBytes(instruction),
+
+                    // else => unreachable,
+                };
+            }
+
+            for (instruction_selector.functions.items) |function| {
+                var fix_size: bool = false;
+                _ = fix_size;
+                for (function.relocations.items) |relocation| {
+                    std.debug.print("RELOC: {}\n", .{relocation});
+                    const source_block = relocation.source;
+                    const destination_block = relocation.destination;
+                    const source_offset = function.block_offsets.items[source_block];
+                    const destination_offset = function.block_offsets.items[destination_block];
+                    std.debug.print("Source offset: {}. Destination: {}\n", .{ source_offset, destination_offset });
+                    const instruction_descriptor = instruction_descriptors.get(relocation.instruction);
+                    const instruction_offset = source_offset + relocation.block_offset;
+                    const really_source_offset = instruction_offset + instruction_descriptor.size;
+                    const displacement = @as(i64, destination_offset) - @as(i64, really_source_offset);
+
+                    const operands = instruction_descriptor.getOperands();
+                    switch (operands.len) {
+                        1 => switch (operands[0].size) {
+                            @sizeOf(u8) => {
+                                if (displacement >= std.math.minInt(i8) and displacement <= std.math.maxInt(i8)) {
+                                    const writer_index = instruction_offset + instruction_descriptor.operand_offset;
+                                    std.debug.print("Instruction offset: {}. Operand offset: {}. Writer index: {}. displacement: {}\n", .{ instruction_offset, instruction_descriptor.operand_offset, writer_index, displacement });
+                                    result.sections.text.content[writer_index] = @bitCast(@as(i8, @intCast(displacement)));
+                                } else {
+                                    unreachable;
+                                }
+                            },
+                            else => unreachable,
+                        },
+                        else => unreachable,
+                    }
+                }
+            }
+
+            const text_section = result.sections.text.content[0..result.sections.text.index];
+            for (text_section) |byte| {
+                std.debug.print("0x{x}\n", .{byte});
+            }
         }
     };
-}
-
-pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
-    _ = allocator;
-    var result = try Result.create();
-    _ = result;
-    var relocation_manager = RelocationManager{};
-    _ = relocation_manager;
-
-    var function_iterator = intermediate.functions.iterator();
-    _ = function_iterator;
-    // while (function_iterator.next()) |function| {
-    //     defer relocation_manager.in_function_relocations.clearRetainingCapacity();
-    //
-    //     for (function.blocks.items) |block_index| {
-    //         if (relocation_manager.in_function_relocations.getPtr(block_index)) |relocations| {
-    //             const current_offset: i64 = @intCast(result.sections.text.index);
-    //             _ = current_offset;
-    //             for (relocations.items) |relocation| switch (relocation.size) {
-    //                 inline @sizeOf(u8), @sizeOf(u32) => |relocation_size| {
-    //                     const Elem = switch (relocation_size) {
-    //                         @sizeOf(u8) => u8,
-    //                         @sizeOf(u32) => u32,
-    //                         else => unreachable,
-    //                     };
-    //                     const Ptr = *align(1) Elem;
-    //                     _ = Ptr;
-    //                     const relocation_slice = result.sections.text.content[relocation.source + relocation.write_offset ..][0..relocation_size];
-    //                     _ = relocation_slice;
-    //                     // std.math.cast(
-    //                     //
-    //                     unreachable;
-    //                 },
-    //                 else => unreachable,
-    //             };
-    //             // const ptr: *align(1) u32 = @ptrCast(&result.sections.text[relocation_source..][0..@sizeOf(u32)]);
-    //             // ptr.* =
-    //             // try relocations.append(allocator, @intCast(result.sections.text[));
-    //         }
-    //
-    //         const block = intermediate.blocks.get(block_index);
-    //
-    //         for (block.instructions.items) |instruction_index| {
-    //             const instruction = intermediate.instructions.get(instruction_index);
-    //             switch (instruction.*) {
-    //                 .jump => |jump_index| {
-    //                     const jump = intermediate.jumps.get(jump_index);
-    //                     assert(@as(u32, @bitCast(jump.source)) == @as(u32, @bitCast(block_index)));
-    //                     const relocation_index = result.sections.text.index + 1;
-    //                     if (@as(u32, @bitCast(jump.destination)) <= @as(u32, @bitCast(jump.source))) {
-    //                         unreachable;
-    //                     } else {
-    //                         result.appendCode(&(.{jmp_rel_32} ++ .{0} ** @sizeOf(u32)));
-    //                         const lookup_result = try relocation_manager.in_function_relocations.getOrPut(allocator, jump.destination);
-    //                         if (!lookup_result.found_existing) {
-    //                             lookup_result.value_ptr.* = .{};
-    //                         }
-    //
-    //                         try lookup_result.value_ptr.append(allocator, .{
-    //                             .source = @intCast(relocation_index),
-    //                             .write_offset = @sizeOf(u8),
-    //                             .instruction_len = @sizeOf(u8) + @sizeOf(u32),
-    //                             .size = @sizeOf(u32),
-    //                         });
-    //                     }
-    //                 },
-    //                 else => |t| @panic(@tagName(t)),
-    //             }
-    //         }
-    //     }
-    //     unreachable;
-    // }
-    // unreachable;
 }
 
 const Rex = enum(u8) {
