@@ -20,7 +20,7 @@ pub const Token = packed struct(u64) {
     pub const Id = enum(u8) {
         eof = 0x00,
         identifier = 0x01,
-        number = 0x02,
+        number_literal = 0x02,
         string_literal = 0x03,
         fixed_keyword_function = 0x04,
         fixed_keyword_const = 0x05,
@@ -32,6 +32,8 @@ pub const Token = packed struct(u64) {
         fixed_keyword_bool = 0x0b,
         fixed_keyword_true = 0x0c,
         fixed_keyword_false = 0x0d,
+        fixed_keyword_fn = 0x0e,
+        fixed_keyword_unreachable = 0x0f,
         bang = '!', // 0x21
         hash = '#', // 0x23
         dollar_sign = '$', // 0x24
@@ -78,6 +80,8 @@ pub const FixedKeyword = enum {
     bool,
     true,
     false,
+    @"fn",
+    @"unreachable",
 };
 
 pub const Result = struct {
@@ -123,7 +127,7 @@ pub fn analyze(allocator: Allocator, text: []const u8) !Result {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else .identifier;
             },
-            '(', ')', '{', '}', '-', '=', ';', '#' => |operator| blk: {
+            '(', ')', '{', '}', '-', '=', ';', '#', '@', ',' => |operator| blk: {
                 index += 1;
                 break :blk @enumFromInt(operator);
             },
@@ -132,7 +136,7 @@ pub fn analyze(allocator: Allocator, text: []const u8) !Result {
                     index += 1;
                 }
 
-                break :blk .number;
+                break :blk .number_literal;
             },
             '\'' => {
                 unreachable;

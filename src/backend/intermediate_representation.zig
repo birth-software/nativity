@@ -16,6 +16,9 @@ pub const Result = struct {
     blocks: BlockList(BasicBlock) = .{},
     instructions: BlockList(Instruction) = .{},
     jumps: BlockList(Jump) = .{},
+    values: BlockList(Value) = .{},
+    syscalls: BlockList(Syscall) = .{},
+    loads: BlockList(Load) = .{},
 };
 
 pub fn initialize(compilation: *Compilation, module: *Module, package: *Package, main_file: Compilation.Type.Index) !Result {
@@ -57,10 +60,13 @@ pub const BasicBlock = struct {
     }
 };
 
-const Instruction = union(enum) {
+pub const Instruction = union(enum) {
     jump: Jump.Index,
+    load: Load.Index,
     phi: Phi.Index,
     ret: Ret,
+    syscall: Syscall.Index,
+    @"unreachable",
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -81,6 +87,38 @@ pub const Jump = struct {
     destination: BasicBlock.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+};
+
+const Syscall = struct {
+    arguments: ArrayList(Value.Index),
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
+const Load = struct {
+    value: Value.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
+pub const Value = union(enum) {
+    integer: Integer,
+    load: Load.Index,
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+
+    pub fn isInMemory(value: Value) bool {
+        return switch (value) {
+            .integer => false,
+            .load => true,
+        };
+    }
+};
+
+const Integer = struct {
+    value: u64,
+    sign: bool,
 };
 
 const Function = struct {
@@ -207,9 +245,64 @@ pub const Builder = struct {
                         builder.current_basic_block = loop_prologue_block;
                     }
                 },
+                .syscall => |syscall_index| {
+                    const sema_syscall = builder.module.syscalls.get(syscall_index);
+                    var arguments = try ArrayList(Value.Index).initCapacity(builder.allocator, sema_syscall.argument_count + 1);
+
+                    const sema_syscall_number = sema_syscall.number;
+                    assert(sema_syscall_number.valid);
+                    const number_value_index = try builder.emitValue(sema_syscall_number);
+
+                    arguments.appendAssumeCapacity(number_value_index);
+
+                    for (sema_syscall.getArguments()) |sema_syscall_argument| {
+                        assert(sema_syscall_argument.valid);
+                        const argument_value_index = try builder.emitValue(sema_syscall_argument);
+                        arguments.appendAssumeCapacity(argument_value_index);
+                    }
+
+                    _ = try builder.append(.{
+                        .syscall = try builder.ir.syscalls.append(builder.allocator, .{
+                            .arguments = arguments,
+                        }),
+                    });
+                },
+                .@"unreachable" => _ = try builder.append(.{
+                    .@"unreachable" = {},
+                }),
                 else => |t| @panic(@tagName(t)),
             }
         }
+    }
+
+    fn load(builder: *Builder, value_index: Value.Index) !Value.Index {
+        print("Doing load!\n", .{});
+
+        const load_index = try builder.ir.loads.append(builder.allocator, .{
+            .value = value_index,
+        });
+        const instruction_index = try builder.append(.{
+            .load = load_index,
+        });
+        _ = instruction_index;
+        const result = try builder.ir.values.append(builder.allocator, .{
+            .load = load_index,
+        });
+        return result;
+    }
+
+    fn emitValue(builder: *Builder, sema_value_index: Compilation.Value.Index) !Value.Index {
+        const sema_value = builder.module.values.get(sema_value_index).*;
+        return switch (sema_value) {
+            // TODO
+            .integer => |integer| try builder.ir.values.append(builder.allocator, .{
+                .integer = .{
+                    .value = integer,
+                    .sign = false,
+                },
+            }),
+            else => |t| @panic(@tagName(t)),
+        };
     }
 
     fn jump(builder: *Builder, jump_descriptor: Jump) !Jump.Index {

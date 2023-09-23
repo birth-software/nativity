@@ -174,18 +174,34 @@ pub const Assignment = struct {
     pub const Index = List.Index;
 };
 
+pub const Syscall = struct {
+    number: Value.Index,
+    arguments: [6]Value.Index,
+    argument_count: u8,
+
+    pub fn getArguments(syscall: Syscall) []const Value.Index {
+        return syscall.arguments[0..syscall.argument_count];
+    }
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
 pub const Value = union(enum) {
     unresolved: Unresolved,
     declaration: Declaration.Index,
     void,
     bool: bool,
     undefined,
+    @"unreachable",
     loop: Loop.Index,
     function: Function.Index,
     block: Block.Index,
     runtime: Runtime,
     assign: Assignment.Index,
     type: Type.Index,
+    integer: u64,
+    syscall: Syscall.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -221,6 +237,7 @@ pub const Module = struct {
     blocks: BlockList(Block) = .{},
     loops: BlockList(Loop) = .{},
     assignments: BlockList(Assignment) = .{},
+    syscalls: BlockList(Syscall) = .{},
 
     pub const Descriptor = struct {
         main_package_path: []const u8,
@@ -238,6 +255,7 @@ pub const Module = struct {
     };
 
     pub fn importFile(module: *Module, allocator: Allocator, current_file: *File, import_name: []const u8) !ImportPackageResult {
+        print("import: '{s}'\n", .{import_name});
         if (equal(u8, import_name, "std")) {
             return module.importPackage(allocator, module.main_package.dependencies.get("std").?);
         }

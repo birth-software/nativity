@@ -54,41 +54,9 @@ const Analyzer = struct {
     }
 
     fn assign(analyzer: *Analyzer, scope: *Scope, node_index: Node.Index) !Assignment.Index {
-        print("Assign: #{}", .{node_index.value});
-        const node = analyzer.nodes[node_index.unwrap()];
-        assert(node.id == .assign);
-        const Result = struct {
-            left: Value.Index,
-            right: Value.Index,
-        };
-        const result: Result = switch (node.left.valid) {
-            // In an assignment, the node being invalid means a discarding underscore, like this: ```_ = result```
-            false => .{
-                .left = Value.Index.invalid,
-                .right = try analyzer.expression(scope, ExpectType.none, node.right),
-            },
-            true => {
-                const left_node = analyzer.nodes[node.left.unwrap()];
-                print("left node index: {}. Left node: {}", .{ node.left, left_node });
-                // const id = analyzer.tokenIdentifier(.token);
-                // print("id: {s}\n", .{id});
-                const left = try analyzer.expression(scope, ExpectType.none, node.left);
-                _ = left;
-                unreachable;
-            },
-        };
-
-        print("Assignment: L: {}. R: {}\n", .{ result.left, result.right });
-
-        if (result.left.valid and analyzer.module.values.get(result.left).isComptime() and analyzer.module.values.get(result.right).isComptime()) {
-            unreachable;
-        } else {
-            const assignment_index = try analyzer.module.assignments.append(analyzer.allocator, .{
-                .store = result.left,
-                .load = result.right,
-            });
-            return assignment_index;
-        }
+        _ = node_index;
+        _ = scope;
+        _ = analyzer;
     }
 
     fn block(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) anyerror!Block.Index {
@@ -100,15 +68,19 @@ const Analyzer = struct {
                 try statement_nodes.append(analyzer.allocator, block_node.left);
             },
             .block_zero, .comptime_block_zero => {},
+            .block_two, .comptime_block_two => {
+                try statement_nodes.append(analyzer.allocator, block_node.left);
+                try statement_nodes.append(analyzer.allocator, block_node.right);
+            },
             else => |t| @panic(@tagName(t)),
         }
 
         const is_comptime = switch (block_node.id) {
-            .comptime_block_zero, .comptime_block_one => true,
-            .block_zero, .block_one => false,
+            .comptime_block_zero, .comptime_block_one, .comptime_block_two => true,
+            .block_zero, .block_one, .block_two => false,
             else => |t| @panic(@tagName(t)),
         };
-        _ = is_comptime;
+        print("Is comptime: {}\n", .{is_comptime});
 
         var statements = ArrayList(Value.Index){};
 
@@ -121,7 +93,37 @@ const Analyzer = struct {
             const statement_value = switch (statement_node.id) {
                 inline .assign, .simple_while => |statement_id| blk: {
                     const specific_value_index = switch (statement_id) {
-                        .assign => try analyzer.assign(scope, statement_node_index),
+                        .assign => {
+                            print("Assign: #{}\n", .{node_index.value});
+                            assert(statement_node.id == .assign);
+                            switch (statement_node.left.valid) {
+                                // In an assignment, the node being invalid means a discarding underscore, like this: ```_ = result```
+                                false => {
+                                    const right = try analyzer.expression(scope, ExpectType.none, statement_node.right);
+                                    try statements.append(analyzer.allocator, right);
+                                    continue;
+                                },
+                                true => {
+                                    const left_node = analyzer.nodes[statement_node.left.unwrap()];
+                                    print("left node index: {}. Left node: {}\n", .{ statement_node.left, left_node });
+                                    // const id = analyzer.tokenIdentifier(.token);
+                                    // print("id: {s}\n", .{id});
+                                    const left = try analyzer.expression(scope, ExpectType.none, statement_node.left);
+                                    _ = left;
+
+                                    // if (analyzer.module.values.get(left).isComptime() and analyzer.module.values.get(right).isComptime()) {
+                                    //     unreachable;
+                                    // } else {
+                                    //                                 const assignment_index = try analyzer.module.assignments.append(analyzer.allocator, .{
+                                    //                                     .store = result.left,
+                                    //                                     .load = result.right,
+                                    //                                 });
+                                    //                                 return assignment_index;
+                                    // }
+                                    unreachable;
+                                },
+                            }
+                        },
                         .simple_while => statement: {
                             const loop_index = try analyzer.module.loops.append(analyzer.allocator, .{
                                 .condition = Value.Index.invalid,
@@ -147,6 +149,10 @@ const Analyzer = struct {
                     }, specific_value_index);
                     const value_index = try analyzer.module.values.append(analyzer.allocator, value);
                     break :blk value_index;
+                },
+                .@"unreachable" => blk: {
+                    reaches_end = false;
+                    break :blk Values.@"unreachable".getIndex();
                 },
                 else => |t| @panic(@tagName(t)),
             };
@@ -194,16 +200,31 @@ const Analyzer = struct {
         }
     }
 
+    fn getArguments(analyzer: *Analyzer, node_index: Node.Index) !ArrayList(Node.Index) {
+        var arguments = ArrayList(Node.Index){};
+        const node = analyzer.nodes[node_index.unwrap()];
+        switch (node.id) {
+            .compiler_intrinsic_two => {
+                try arguments.append(analyzer.allocator, node.left);
+                try arguments.append(analyzer.allocator, node.right);
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+
+        return arguments;
+    }
+
     fn resolveNode(analyzer: *Analyzer, scope: *Scope, expect_type: ExpectType, node_index: Node.Index) anyerror!Value {
         const node = analyzer.nodes[node_index.unwrap()];
         return switch (node.id) {
             .identifier => unreachable,
-            .compiler_intrinsic_one => blk: {
+            .compiler_intrinsic_one, .compiler_intrinsic_two => blk: {
                 const intrinsic_name = analyzer.tokenIdentifier(node.token + 1);
                 const intrinsic = data_structures.enumFromString(Intrinsic, intrinsic_name) orelse unreachable;
-                print("Intrinsic: {s}", .{@tagName(intrinsic)});
+                print("Intrinsic: {s}\n", .{@tagName(intrinsic)});
                 switch (intrinsic) {
                     .import => {
+                        assert(node.id == .compiler_intrinsic_one);
                         const import_argument = analyzer.nodes[node.left.unwrap()];
                         switch (import_argument.id) {
                             .string_literal => {
@@ -212,7 +233,7 @@ const Analyzer = struct {
 
                                 if (imported_file.is_new) {
                                     // TODO: fix error
-                                    analyzer.module.generateAbstractSyntaxTreeForFile(analyzer.allocator, imported_file.file) catch return error.OutOfMemory;
+                                    try analyzer.module.generateAbstractSyntaxTreeForFile(analyzer.allocator, imported_file.file);
                                 } else {
                                     unreachable;
                                 }
@@ -222,6 +243,35 @@ const Analyzer = struct {
                                 };
                             },
                             else => unreachable,
+                        }
+                    },
+                    .syscall => {
+                        var argument_nodes = try analyzer.getArguments(node_index);
+                        print("Argument count: {}\n", .{argument_nodes.items.len});
+                        if (argument_nodes.items.len > 0 and argument_nodes.items.len <= 6 + 1) {
+                            const number = try analyzer.expression(scope, ExpectType.none, argument_nodes.items[0]);
+                            assert(number.valid);
+                            var arguments = std.mem.zeroes([6]Value.Index);
+                            for (argument_nodes.items[1..], 0..) |argument_node_index, argument_index| {
+                                const argument = try analyzer.expression(scope, ExpectType.none, argument_node_index);
+                                print("Index: {}. Argument: {}\n", .{ argument_index, argument });
+                                arguments[argument_index] = argument;
+                            }
+
+                            // TODO: typecheck for usize
+                            for (arguments[0..argument_nodes.items.len]) |argument| {
+                                _ = argument;
+                            }
+
+                            break :blk .{
+                                .syscall = try analyzer.module.syscalls.append(analyzer.allocator, .{
+                                    .number = number,
+                                    .arguments = arguments,
+                                    .argument_count = @intCast(argument_nodes.items.len - 1),
+                                }),
+                            };
+                        } else {
+                            unreachable;
                         }
                     },
                 }
@@ -244,12 +294,17 @@ const Analyzer = struct {
             },
             .keyword_true => unreachable,
             .simple_while => unreachable,
-            // .assign => try analyzer.assign(scope, node_index),
             .block_zero, .block_one => blk: {
                 const block_index = try analyzer.block(scope, expect_type, node_index);
                 break :blk .{
                     .block = block_index,
                 };
+            },
+            .number_literal => switch (std.zig.parseNumberLiteral(analyzer.tokenBytes(analyzer.tokens[node.token]))) {
+                .int => |integer| .{
+                    .integer = integer,
+                },
+                else => |t| @panic(@tagName(t)),
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -269,12 +324,9 @@ const Analyzer = struct {
                     },
                 }
 
-                break :blk bool_true;
+                break :blk Values.getIndex(.bool_true);
             },
-            .block_zero => try analyzer.module.values.append(analyzer.allocator, .{
-                .block = try analyzer.block(scope, expect_type, node_index),
-            }),
-            else => |t| @panic(@tagName(t)),
+            else => try analyzer.module.values.append(analyzer.allocator, try analyzer.resolveNode(scope, expect_type, node_index)),
         };
     }
 
@@ -340,58 +392,6 @@ const Analyzer = struct {
         // }
 
         @panic("TODO: analyzeDeclaration");
-    }
-
-    fn globalSymbolDeclaration(analyzer: *Analyzer, symbol_declaration: SymbolDeclaration) !void {
-        if (symbol_declaration.type_node.get()) |type_node_index| {
-            _ = type_node_index;
-            @panic("TODO: type node");
-        }
-        const initialization_node = analyzer.nodes[symbol_declaration.initialization_node.unwrap()];
-        switch (initialization_node.id) {
-            .compiler_intrinsic_one => {
-                const intrinsic_name = analyzer.tokenIdentifier(initialization_node.token + 1);
-                const intrinsic = inline for (@typeInfo(Intrinsic).Enum.fields) |intrinsic_enum_field| {
-                    if (equal(u8, intrinsic_name, intrinsic_enum_field.name)) {
-                        break @field(Intrinsic, intrinsic_enum_field.name);
-                    }
-                } else unreachable;
-                print("Intrinsic: {s}", .{@tagName(intrinsic)});
-                switch (intrinsic) {
-                    .import => {
-                        const import_argument = analyzer.nodes[initialization_node.left.get()];
-                        switch (import_argument.id) {
-                            .string_literal => unreachable,
-                            else => unreachable,
-                        }
-                    },
-                }
-                // const intrinsic_node_index = initialization_node.left.unwrap();
-                // const intrinsic_node = analyzer.nodes[intrinsic_node_index];
-                //
-                // switch (intrinsic_node.id) {
-                //     .string_literal =>
-                // }
-                // print("intrinsic: {}", .{intrinsic_node.id});
-
-                // _ = a;
-            },
-            else => unreachable,
-        }
-        print("Init node: {}\n", .{initialization_node});
-        @panic("TODO");
-    }
-
-    fn symbolDeclaration(analyzer: *Analyzer, node_index: Node.Index) SymbolDeclaration {
-        const node = analyzer.nodes[node_index.unwrap()];
-        return switch (node.id) {
-            .simple_variable_declaration => .{
-                .type_node = node.left,
-                .initialization_node = node.right,
-                .mutability_token = node.token,
-            },
-            else => unreachable,
-        };
     }
 
     fn structType(analyzer: *Analyzer, parent_scope: Scope.Index, container_declaration: syntactic_analyzer.ContainerDeclaration, index: Node.Index) !Type.Index {
@@ -544,18 +544,20 @@ const Analyzer = struct {
     fn tokenIdentifier(analyzer: *Analyzer, token_index: Token.Index) []const u8 {
         const token = analyzer.tokens[token_index];
         assert(token.id == .identifier);
-        const identifier = analyzer.source_code[token.start..][0..token.len];
+        const identifier = analyzer.tokenBytes(token);
 
         return identifier;
+    }
+
+    fn tokenBytes(analyzer: *Analyzer, token: Token) []const u8 {
+        return analyzer.source_code[token.start..][0..token.len];
     }
 
     fn tokenStringLiteral(analyzer: *Analyzer, token_index: Token.Index) []const u8 {
         const token = analyzer.tokens[token_index];
         assert(token.id == .string_literal);
         // Eat double quotes
-        const start = token.start + 1;
-        const len = token.len - 2;
-        const string_literal = analyzer.source_code[start..][0..len];
+        const string_literal = analyzer.tokenBytes(token)[1..][0 .. token.len - 2];
 
         return string_literal;
     }
@@ -593,18 +595,30 @@ const type_boolean = Type.Index{
     .index = FixedTypeKeyword.offset + @intFromEnum(FixedTypeKeyword.bool),
 };
 
-const bool_false = Value.Index{
-    .block = 0,
-    .index = 1,
-};
+// Each time an enum is added here, a corresponding insertion in the initialization must be made
+const Values = enum {
+    bool_false,
+    bool_true,
+    @"unreachable",
 
-const bool_true = Value.Index{
-    .block = 0,
-    .index = 1,
+    fn getIndex(value: Values) Value.Index {
+        const absolute: u32 = @intFromEnum(value);
+        const foo = @as(Value.Index, undefined);
+        const ElementT = @TypeOf(@field(foo, "index"));
+        const BlockT = @TypeOf(@field(foo, "block"));
+        const divider = std.math.maxInt(ElementT);
+        const element_index: ElementT = @intCast(absolute % divider);
+        const block_index: BlockT = @intCast(absolute / divider);
+        return .{
+            .index = element_index,
+            .block = block_index,
+        };
+    }
 };
 
 const Intrinsic = enum {
     import,
+    syscall,
 };
 
 const FixedTypeKeyword = enum {
@@ -672,6 +686,10 @@ pub fn initialize(compilation: *Compilation, module: *Module, package: *Package)
 
     _ = try module.values.append(compilation.base_allocator, .{
         .bool = true,
+    });
+
+    _ = try module.values.append(compilation.base_allocator, .{
+        .@"unreachable" = {},
     });
 
     return analyzeExistingPackage(compilation, module, package);
