@@ -2,6 +2,7 @@ comptime {
     _ = _start;
 }
 
-const _start = () noreturn {
-    while (true) {}
+const _start = fn () noreturn {
+    _ = #syscall(231, 0);
+    unreachable;
 };
