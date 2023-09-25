@@ -204,6 +204,19 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
             for (text_section) |byte| {
                 std.debug.print("0x{x}\n", .{byte});
             }
+
+            switch (@import("builtin").os.tag) {
+                .linux => switch (@import("builtin").cpu.arch == arch) {
+                    true => {
+                        std.debug.print("Executing...\n", .{});
+                        const entryPoint = result.getEntryPoint(fn () callconv(.SysV) noreturn);
+                        entryPoint();
+                        std.debug.print("This should not print...\n", .{});
+                    },
+                    false => {},
+                },
+                else => {},
+            }
         }
     };
 }
