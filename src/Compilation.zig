@@ -64,6 +64,7 @@ pub const Struct = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Type = union(enum) {
@@ -74,6 +75,7 @@ pub const Type = union(enum) {
     @"struct": Struct.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Integer = struct {
@@ -87,12 +89,14 @@ pub const Integer = struct {
 
 /// A scope contains a bunch of declarations
 pub const Scope = struct {
-    parent: Scope.Index,
-    type: Type.Index = Type.Index.invalid,
     declarations: AutoHashMap(u32, Declaration.Index) = .{},
+    parent: Scope.Index,
+    file: File.Index,
+    type: Type.Index = Type.Index.invalid,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const ScopeType = enum(u1) {
@@ -113,6 +117,7 @@ pub const Declaration = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Function = struct {
@@ -133,6 +138,7 @@ pub const Function = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Block = struct {
@@ -140,6 +146,7 @@ pub const Block = struct {
     reaches_end: bool,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Field = struct {
@@ -147,6 +154,7 @@ pub const Field = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Loop = struct {
@@ -156,6 +164,7 @@ pub const Loop = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 const Runtime = struct {
@@ -172,6 +181,7 @@ pub const Assignment = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Syscall = struct {
@@ -185,11 +195,35 @@ pub const Syscall = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const Call = struct {
+    value: Value.Index,
+    arguments: ArgumentList.Index,
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const ArgumentList = struct {
+    array: ArrayList(Value.Index),
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const Return = struct {
+    value: Value.Index,
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Value = union(enum) {
     unresolved: Unresolved,
     declaration: Declaration.Index,
+    declaration_reference: Declaration.Index,
     void,
     bool: bool,
     undefined,
@@ -202,9 +236,13 @@ pub const Value = union(enum) {
     type: Type.Index,
     integer: u64,
     syscall: Syscall.Index,
+    call: Call.Index,
+    argument_list: ArgumentList,
+    @"return": Return.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 
     pub fn isComptime(value: Value) bool {
         return switch (value) {
@@ -238,23 +276,26 @@ pub const Module = struct {
     loops: BlockList(Loop) = .{},
     assignments: BlockList(Assignment) = .{},
     syscalls: BlockList(Syscall) = .{},
+    calls: BlockList(Call) = .{},
+    argument_list: BlockList(ArgumentList) = .{},
+    returns: BlockList(Return) = .{},
 
     pub const Descriptor = struct {
         main_package_path: []const u8,
     };
 
     const ImportFileResult = struct {
-        file: *File,
+        ptr: *File,
+        index: File.Index,
         is_new: bool,
     };
 
     const ImportPackageResult = struct {
-        file: *File,
-        is_new: bool,
+        file: ImportFileResult,
         is_package: bool,
     };
 
-    pub fn importFile(module: *Module, allocator: Allocator, current_file: *File, import_name: []const u8) !ImportPackageResult {
+    pub fn importFile(module: *Module, allocator: Allocator, current_file_index: File.Index, import_name: []const u8) !ImportPackageResult {
         print("import: '{s}'\n", .{import_name});
         if (equal(u8, import_name, "std")) {
             return module.importPackage(allocator, module.main_package.dependencies.get("std").?);
@@ -268,6 +309,7 @@ pub const Module = struct {
             return module.importPackage(allocator, module.main_package);
         }
 
+        const current_file = module.files.get(current_file_index);
         if (current_file.package.dependencies.get(import_name)) |package| {
             return module.importPackage(allocator, package);
         }
@@ -279,55 +321,73 @@ pub const Module = struct {
         const full_path = try std.fs.path.join(allocator, &.{ current_file.package.directory.path, import_name });
         const file_relative_path = std.fs.path.basename(full_path);
         const package = current_file.package;
-        const import = try module.getFile(allocator, full_path, file_relative_path, package);
+        const import_file = try module.getFile(allocator, full_path, file_relative_path, package);
 
-        try import.file.addFileReference(allocator, current_file);
+        try import_file.ptr.addFileReference(allocator, current_file);
 
         const result = ImportPackageResult{
-            .file = import.file,
-            .is_new = import.is_new,
+            .file = import_file,
             .is_package = false,
         };
 
         return result;
     }
 
+    fn lookupDeclaration(module: *Module, hashed: u32) !noreturn {
+        _ = hashed;
+        _ = module;
+        while (true) {}
+    }
+
     fn getFile(module: *Module, allocator: Allocator, full_path: []const u8, relative_path: []const u8, package: *Package) !ImportFileResult {
         const path_lookup = try module.import_table.getOrPut(allocator, full_path);
-        const file: *File = switch (path_lookup.found_existing) {
-            true => path_lookup.value_ptr.*,
+        const file, const index = switch (path_lookup.found_existing) {
+            true => blk: {
+                const result = path_lookup.value_ptr.*;
+                const index = module.files.indexOf(result);
+                break :blk .{
+                    result,
+                    index,
+                };
+            },
             false => blk: {
-                const new_file_index = try module.files.append(allocator, File{
+                const file_allocation = try module.files.append(allocator, File{
                     .relative_path = relative_path,
                     .package = package,
                 });
-                const file = module.files.get(new_file_index);
-                path_lookup.value_ptr.* = file;
-                break :blk file;
+                std.debug.print("Adding file #{}: {s}\n", .{ file_allocation.index.uniqueInteger(), full_path });
+                path_lookup.value_ptr.* = file_allocation.ptr;
+                // break :blk file;
+                break :blk .{
+                    file_allocation.ptr,
+                    file_allocation.index,
+                };
             },
         };
 
         return .{
-            .file = file,
+            .ptr = file,
+            .index = index,
             .is_new = !path_lookup.found_existing,
         };
     }
 
     pub fn importPackage(module: *Module, allocator: Allocator, package: *Package) !ImportPackageResult {
         const full_path = try std.fs.path.resolve(allocator, &.{ package.directory.path, package.source_path });
-        const import = try module.getFile(allocator, full_path, package.source_path, package);
-        try import.file.addPackageReference(allocator, package);
+        const import_file = try module.getFile(allocator, full_path, package.source_path, package);
+        try import_file.ptr.addPackageReference(allocator, package);
 
         return .{
-            .file = import.file,
-            .is_new = import.is_new,
+            .file = import_file,
             .is_package = true,
         };
     }
 
     pub fn generateAbstractSyntaxTreeForFile(module: *Module, allocator: Allocator, file: *File) !void {
         _ = module;
-        const source_file = try file.package.directory.handle.openFile(file.relative_path, .{});
+        const source_file = file.package.directory.handle.openFile(file.relative_path, .{}) catch |err| {
+            std.debug.panic("Can't find file {s} in directory {s} for error {s}", .{ file.relative_path, file.package.directory.path, @errorName(err) });
+        };
 
         const file_size = try source_file.getEndPos();
         var file_buffer = try allocator.alloc(u8, file_size);
@@ -426,7 +486,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
         try module.generateAbstractSyntaxTreeForFile(compilation.base_allocator, import);
     }
 
-    const main_declaration = try semantic_analyzer.initialize(compilation, module, packages[0]);
+    const main_declaration = try semantic_analyzer.initialize(compilation, module, packages[0], .{ .block = 0, .index = 0 });
 
     var ir = try intermediate_representation.initialize(compilation, module, packages[0], main_declaration);
 
@@ -465,6 +525,9 @@ pub const File = struct {
     relative_path: []const u8,
     package: *Package,
 
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+
     const Status = enum {
         not_loaded,
         loaded_into_memory,
@@ -482,15 +545,6 @@ pub const File = struct {
 
     fn addFileReference(file: *File, allocator: Allocator, affected: *File) !void {
         try file.file_references.append(allocator, affected);
-    }
-
-    pub fn fromRelativePath(allocator: Allocator, file_relative_path: []const u8) *File {
-        const file_content = try std.fs.cwd().readFileAlloc(allocator, file_relative_path, std.math.maxInt(usize));
-        _ = file_content;
-        const file = try allocator.create(File);
-        file.* = File{};
-
-        return file;
     }
 
     fn lex(file: *File, allocator: Allocator) !void {

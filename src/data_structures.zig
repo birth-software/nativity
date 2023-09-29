@@ -36,8 +36,8 @@ pub fn BlockList(comptime T: type) type {
         const List = @This();
 
         pub const Index = packed struct(u32) {
-            block: u24,
             index: u6,
+            block: u24,
             _reserved: bool = false,
             valid: bool = true,
 
@@ -49,6 +49,11 @@ pub fn BlockList(comptime T: type) type {
 
             pub fn eq(index: Index, other: Index) bool {
                 return @as(u32, @bitCast(index)) == @as(u32, @bitCast(other));
+            }
+
+            pub fn uniqueInteger(index: Index) u32 {
+                assert(index.valid);
+                return @as(u30, @truncate(@as(u32, @bitCast(index))));
             }
         };
 
@@ -81,6 +86,11 @@ pub fn BlockList(comptime T: type) type {
             }
         };
 
+        pub const Allocation = struct {
+            ptr: *T,
+            index: Index,
+        };
+
         pub fn iterator(list: *const List) Iterator {
             return .{
                 .block_index = 0,
@@ -94,33 +104,50 @@ pub fn BlockList(comptime T: type) type {
             return &list.blocks.items[index.block].items[index.index];
         }
 
-        pub fn append(list: *List, allocator: Allocator, element: T) !Index {
+        pub fn append(list: *List, allocator: Allocator, element: T) !Allocation {
+            const result = try list.addOne(allocator);
+            result.ptr.* = element;
+            return result;
+        }
+
+        pub fn addOne(list: *List, allocator: Allocator) !Allocation {
             try list.ensureCapacity(allocator, list.len + 1);
             const max_allocation = list.blocks.items.len * item_count;
-            if (list.len < max_allocation) {
-                // Follow the guess
-                if (list.blocks.items[list.first_block].allocateIndex()) |index| {
-                    list.blocks.items[list.first_block].items[index] = element;
-                    list.len += 1;
-                    return .{
-                        .index = index,
-                        .block = @intCast(list.first_block),
+            const result = switch (list.len < max_allocation) {
+                true => blk: {
+                    const block = &list.blocks.items[list.first_block];
+                    if (block.allocateIndex()) |index| {
+                        const ptr = &block.items[index];
+                        break :blk Allocation{
+                            .ptr = ptr,
+                            .index = .{
+                                .index = index,
+                                .block = @intCast(list.first_block),
+                            },
+                        };
+                    } else |_| {
+                        @panic("TODO");
+                    }
+                },
+                false => blk: {
+                    const block_index = list.blocks.items.len;
+                    const new_block = list.blocks.addOneAssumeCapacity();
+                    new_block.* = .{};
+                    const index = new_block.allocateIndex() catch unreachable;
+                    const ptr = &new_block.items[index];
+                    break :blk Allocation{
+                        .ptr = ptr,
+                        .index = .{
+                            .index = index,
+                            .block = @intCast(block_index),
+                        },
                     };
-                } else |_| {
-                    @panic("TODO");
-                }
-            } else {
-                const block_index = list.blocks.items.len;
-                const new_block = list.blocks.addOneAssumeCapacity();
-                new_block.* = .{};
-                const index = new_block.allocateIndex() catch unreachable;
-                new_block.items[index] = element;
-                list.len += 1;
-                return .{
-                    .index = index,
-                    .block = @intCast(block_index),
-                };
-            }
+                },
+            };
+
+            list.len += 1;
+
+            return result;
         }
 
         pub fn ensureCapacity(list: *List, allocator: Allocator, new_capacity: usize) !void {
@@ -129,6 +156,24 @@ pub fn BlockList(comptime T: type) type {
                 const block_count = new_capacity / item_count + @intFromBool(new_capacity % item_count != 0);
                 try list.blocks.ensureTotalCapacity(allocator, block_count);
             }
+        }
+
+        pub fn indexOf(list: *List, elem: *T) Index {
+            const address = @intFromPtr(elem);
+            std.debug.print("Items: {}. Block count: {}\n", .{ list.len, list.blocks.items.len });
+            for (list.blocks.items, 0..) |*block, block_index| {
+                const base = @intFromPtr(&block.items[0]);
+                const top = base + @sizeOf(T) * item_count;
+                std.debug.print("Bitset: {}. address: 0x{x}. Base: 0x{x}. Top: 0x{x}\n", .{ block.bitset, address, base, top });
+                if (address >= base and address < top) {
+                    return .{
+                        .block = @intCast(block_index),
+                        .index = @intCast(@divExact(address - base, @sizeOf(T))),
+                    };
+                }
+            }
+
+            @panic("not found");
         }
 
         test "Bitset index allocation" {

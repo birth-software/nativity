@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 const Compilation = @import("Compilation.zig");
 
 pub const seed = std.math.maxInt(u64);
-const default_src_file = "src/test/main.b";
+const default_src_file = "src/test/main.nat";
 
 pub fn main() !void {
     try singleCompilation(default_src_file);

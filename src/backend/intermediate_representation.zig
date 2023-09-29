@@ -19,6 +19,7 @@ pub const Result = struct {
     values: BlockList(Value) = .{},
     syscalls: BlockList(Syscall) = .{},
     loads: BlockList(Load) = .{},
+    phis: BlockList(Phi) = .{},
 };
 
 pub fn initialize(compilation: *Compilation, module: *Module, package: *Package, main_file: Compilation.Type.Index) !Result {
@@ -73,7 +74,10 @@ pub const Instruction = union(enum) {
 };
 
 const Phi = struct {
-    foo: u32 = 0,
+    value: Value.Index,
+    jump: Jump.Index,
+    block: BasicBlock.Index,
+    next: Phi.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
@@ -133,9 +137,10 @@ pub const Builder = struct {
     module: *Module,
     current_basic_block: BasicBlock.Index = BasicBlock.Index.invalid,
     current_function_index: Function.Index = Function.Index.invalid,
+    return_phi_node: Instruction.Index = Instruction.Index.invalid,
 
     fn function(builder: *Builder, sema_function: Compilation.Function) !void {
-        builder.current_function_index = try builder.ir.functions.append(builder.allocator, .{});
+        builder.current_function_index = (try builder.ir.functions.append(builder.allocator, .{})).index;
         // TODO: arguments
         builder.current_basic_block = try builder.newBlock();
 
@@ -143,15 +148,23 @@ pub const Builder = struct {
         const is_noreturn = return_type.* == .noreturn;
         if (!is_noreturn) {
             const exit_block = try builder.newBlock();
-            const phi = try builder.appendToBlock(exit_block, .{
-                .phi = Phi.Index.invalid,
+            const phi = try builder.ir.phis.addOne(builder.allocator);
+            const phi_instruction = try builder.appendToBlock(exit_block, .{
+                .phi = phi.index,
             });
+            phi.ptr.* = .{
+                .value = Value.Index.invalid,
+                .jump = Jump.Index.invalid,
+                .block = exit_block,
+                .next = Phi.Index.invalid,
+            };
             const ret = try builder.appendToBlock(exit_block, .{
                 .ret = .{
-                    .value = phi,
+                    .value = phi_instruction,
                 },
             });
             _ = ret;
+            builder.return_phi_node = phi_instruction;
         }
         const sema_block = sema_function.getBodyBlock(builder.module);
         try builder.block(sema_block, .{ .emit_exit_block = !is_noreturn });
@@ -262,14 +275,35 @@ pub const Builder = struct {
                     }
 
                     _ = try builder.append(.{
-                        .syscall = try builder.ir.syscalls.append(builder.allocator, .{
+                        .syscall = (try builder.ir.syscalls.append(builder.allocator, .{
                             .arguments = arguments,
-                        }),
+                        })).index,
                     });
                 },
                 .@"unreachable" => _ = try builder.append(.{
                     .@"unreachable" = {},
                 }),
+                .@"return" => |sema_ret_index| {
+                    const sema_ret = builder.module.returns.get(sema_ret_index);
+                    const return_value = try builder.emitValue(sema_ret.value);
+                    const phi_instruction = builder.ir.instructions.get(builder.return_phi_node);
+                    const phi = builder.ir.phis.get(phi_instruction.phi);
+                    const exit_jump = try builder.jump(.{ .source = builder.current_basic_block, .destination = phi.block });
+                    phi_instruction.phi = (try builder.ir.phis.append(builder.allocator, .{
+                        .value = return_value,
+                        .jump = exit_jump,
+                        .next = phi_instruction.phi,
+                        .block = phi.block,
+                    })).index;
+
+                    _ = try builder.append(.{
+                        .jump = exit_jump,
+                    });
+                },
+                .declaration => |sema_declaration_index| {
+                    _ = sema_declaration_index;
+                    unreachable;
+                },
                 else => |t| @panic(@tagName(t)),
             }
         }
@@ -295,12 +329,12 @@ pub const Builder = struct {
         const sema_value = builder.module.values.get(sema_value_index).*;
         return switch (sema_value) {
             // TODO
-            .integer => |integer| try builder.ir.values.append(builder.allocator, .{
+            .integer => |integer| (try builder.ir.values.append(builder.allocator, .{
                 .integer = .{
                     .value = integer,
                     .sign = false,
                 },
-            }),
+            })).index,
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -308,7 +342,8 @@ pub const Builder = struct {
     fn jump(builder: *Builder, jump_descriptor: Jump) !Jump.Index {
         const destination_block = builder.ir.blocks.get(jump_descriptor.destination);
         assert(!destination_block.sealed);
-        return try builder.ir.jumps.append(builder.allocator, jump_descriptor);
+        const jump_allocation = try builder.ir.jumps.append(builder.allocator, jump_descriptor);
+        return jump_allocation.index;
     }
 
     fn append(builder: *Builder, instruction: Instruction) !Instruction.Index {
@@ -317,20 +352,20 @@ pub const Builder = struct {
     }
 
     fn appendToBlock(builder: *Builder, block_index: BasicBlock.Index, instruction: Instruction) !Instruction.Index {
-        const instruction_index = try builder.ir.instructions.append(builder.allocator, instruction);
-        try builder.ir.blocks.get(block_index).instructions.append(builder.allocator, instruction_index);
+        const instruction_allocation = try builder.ir.instructions.append(builder.allocator, instruction);
+        try builder.ir.blocks.get(block_index).instructions.append(builder.allocator, instruction_allocation.index);
 
-        return instruction_index;
+        return instruction_allocation.index;
     }
 
     fn newBlock(builder: *Builder) !BasicBlock.Index {
-        const new_block_index = try builder.ir.blocks.append(builder.allocator, .{});
+        const new_block_allocation = try builder.ir.blocks.append(builder.allocator, .{});
         const current_function = builder.ir.functions.get(builder.current_function_index);
         const function_block_index = current_function.blocks.items.len;
-        try current_function.blocks.append(builder.allocator, new_block_index);
+        try current_function.blocks.append(builder.allocator, new_block_allocation.index);
 
         print("Adding block: {}\n", .{function_block_index});
 
-        return new_block_index;
+        return new_block_allocation.index;
     }
 };
