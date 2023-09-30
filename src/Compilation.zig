@@ -76,6 +76,20 @@ pub const Type = union(enum) {
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
+
+    pub fn getSize(type_info: Type) u64 {
+        return switch (type_info) {
+            .integer => |integer| integer.getSize(),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    pub fn getAlignment(type_info: Type) u64 {
+        return switch (type_info) {
+            .integer => |integer| @min(16, integer.getSize()),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
 };
 
 pub const Integer = struct {
@@ -85,6 +99,10 @@ pub const Integer = struct {
         unsigned = 0,
         signed = 1,
     };
+
+    pub fn getSize(integer: Integer) u64 {
+        return integer.bit_count / @bitSizeOf(u8) + @intFromBool(integer.bit_count % @bitSizeOf(u8) != 0);
+    }
 };
 
 /// A scope contains a bunch of declarations
@@ -201,6 +219,7 @@ pub const Syscall = struct {
 pub const Call = struct {
     value: Value.Index,
     arguments: ArgumentList.Index,
+    type: Type.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
@@ -251,11 +270,11 @@ pub const Value = union(enum) {
         };
     }
 
-    pub fn getType(value: *Value) !void {
-        switch (value.*) {
+    pub fn getType(value: *Value, module: *Module) Type.Index {
+        return switch (value.*) {
+            .call => |call_index| module.calls.get(call_index).type,
             else => |t| @panic(@tagName(t)),
-        }
-        unreachable;
+        };
     }
 };
 
@@ -490,10 +509,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     var ir = try intermediate_representation.initialize(compilation, module, packages[0], main_declaration);
 
-    switch (@import("builtin").cpu.arch) {
-        .x86_64 => |arch| try emit.get(arch).initialize(compilation.base_allocator, &ir),
-        else => {},
-    }
+    try emit.get(.x86_64).initialize(compilation.base_allocator, &ir);
 }
 
 fn generateAST() !void {}

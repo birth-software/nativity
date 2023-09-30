@@ -10,16 +10,20 @@ const Package = Compilation.Package;
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
 const BlockList = data_structures.BlockList;
+const AutoHashMap = data_structures.AutoHashMap;
 
 pub const Result = struct {
-    functions: BlockList(Function) = .{},
     blocks: BlockList(BasicBlock) = .{},
+    calls: BlockList(Call) = .{},
+    functions: BlockList(Function) = .{},
     instructions: BlockList(Instruction) = .{},
     jumps: BlockList(Jump) = .{},
-    values: BlockList(Value) = .{},
-    syscalls: BlockList(Syscall) = .{},
     loads: BlockList(Load) = .{},
     phis: BlockList(Phi) = .{},
+    stores: BlockList(Store) = .{},
+    syscalls: BlockList(Syscall) = .{},
+    values: BlockList(Value) = .{},
+    stack_references: BlockList(StackReference) = .{},
 };
 
 pub fn initialize(compilation: *Compilation, module: *Module, package: *Package, main_file: Compilation.Type.Index) !Result {
@@ -62,10 +66,12 @@ pub const BasicBlock = struct {
 };
 
 pub const Instruction = union(enum) {
+    call: Call.Index,
     jump: Jump.Index,
     load: Load.Index,
     phi: Phi.Index,
     ret: Ret,
+    store: Store.Index,
     syscall: Syscall.Index,
     @"unreachable",
 
@@ -106,9 +112,34 @@ const Load = struct {
     pub const Index = List.Index;
 };
 
+const Store = struct {
+    source: Value.Index,
+    destination: StackReference.Index,
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
+const StackReference = struct {
+    size: u64,
+    alignment: u64,
+    offset: u64,
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
+const Call = struct {
+    function: Function.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
 pub const Value = union(enum) {
     integer: Integer,
     load: Load.Index,
+    call: Call.Index,
+    stack_reference: StackReference.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 
@@ -116,6 +147,8 @@ pub const Value = union(enum) {
         return switch (value) {
             .integer => false,
             .load => true,
+            .call => true,
+            .stack_reference => true,
         };
     }
 };
@@ -138,11 +171,15 @@ pub const Builder = struct {
     current_basic_block: BasicBlock.Index = BasicBlock.Index.invalid,
     current_function_index: Function.Index = Function.Index.invalid,
     return_phi_node: Instruction.Index = Instruction.Index.invalid,
+    current_stack_offset: usize = 0,
+    stack_map: AutoHashMap(Compilation.Declaration.Index, StackReference.Index) = .{},
 
     fn function(builder: *Builder, sema_function: Compilation.Function) !void {
         builder.current_function_index = (try builder.ir.functions.append(builder.allocator, .{})).index;
         // TODO: arguments
         builder.current_basic_block = try builder.newBlock();
+        builder.current_stack_offset = 0;
+        builder.stack_map = .{};
 
         const return_type = builder.module.types.get(builder.module.function_prototypes.get(sema_function.prototype).return_type);
         const is_noreturn = return_type.* == .noreturn;
@@ -301,28 +338,77 @@ pub const Builder = struct {
                     });
                 },
                 .declaration => |sema_declaration_index| {
-                    _ = sema_declaration_index;
-                    unreachable;
+                    const sema_declaration = builder.module.declarations.get(sema_declaration_index);
+                    assert(sema_declaration.scope_type == .local);
+                    const sema_init_value = builder.module.values.get(sema_declaration.init_value);
+                    const declaration_type = builder.module.types.get(sema_init_value.getType(builder.module));
+                    const size = declaration_type.getSize();
+                    const alignment = declaration_type.getAlignment();
+                    const stack_offset = switch (size > 0) {
+                        true => builder.allocateStack(size, alignment),
+                        false => 0,
+                    };
+                    var value_index = try builder.emitValue(sema_declaration.init_value);
+                    const value = builder.ir.values.get(value_index);
+                    print("Value: {}\n", .{value.*});
+                    value_index = switch (value.isInMemory()) {
+                        false => try builder.load(value_index),
+                        true => value_index,
+                    };
+
+                    if (stack_offset > 0) {
+                        _ = try builder.store(.{
+                            .source = value_index,
+                            .destination = try builder.stackReference(stack_offset, declaration_type.*, sema_declaration_index),
+                        });
+                    }
                 },
                 else => |t| @panic(@tagName(t)),
             }
         }
     }
 
+    fn stackReference(builder: *Builder, stack_offset: u64, t: Compilation.Type, value: Compilation.Declaration.Index) !StackReference.Index {
+        const stack_reference_allocation = try builder.ir.stack_references.append(builder.allocator, .{
+            .offset = stack_offset,
+            .size = t.getSize(),
+            .alignment = t.getAlignment(),
+        });
+
+        const index = stack_reference_allocation.index;
+
+        try builder.stack_map.put(builder.allocator, value, index);
+
+        return index;
+    }
+
+    fn store(builder: *Builder, descriptor: Store) !void {
+        const store_allocation = try builder.ir.stores.append(builder.allocator, descriptor);
+        _ = try builder.append(.{
+            .store = store_allocation.index,
+        });
+    }
+
+    fn allocateStack(builder: *Builder, size: u64, alignment: u64) u64 {
+        builder.current_stack_offset = std.mem.alignForward(u64, builder.current_stack_offset, alignment);
+        builder.current_stack_offset += size;
+        return builder.current_stack_offset;
+    }
+
     fn load(builder: *Builder, value_index: Value.Index) !Value.Index {
         print("Doing load!\n", .{});
 
-        const load_index = try builder.ir.loads.append(builder.allocator, .{
+        const load_allocation = try builder.ir.loads.append(builder.allocator, .{
             .value = value_index,
         });
         const instruction_index = try builder.append(.{
-            .load = load_index,
+            .load = load_allocation.index,
         });
         _ = instruction_index;
         const result = try builder.ir.values.append(builder.allocator, .{
-            .load = load_index,
+            .load = load_allocation.index,
         });
-        return result;
+        return result.index;
     }
 
     fn emitValue(builder: *Builder, sema_value_index: Compilation.Value.Index) !Value.Index {
@@ -335,14 +421,65 @@ pub const Builder = struct {
                     .sign = false,
                 },
             })).index,
+            .call => |sema_call_index| {
+                const sema_call = builder.module.calls.get(sema_call_index);
+                const argument_list_index = sema_call.arguments;
+                if (argument_list_index.valid) {
+                    unreachable;
+                }
+
+                const call_index = try builder.call(.{
+                    .function = switch (builder.module.values.get(sema_call.value).*) {
+                        .function => |function_index| .{
+                            .index = function_index.index,
+                            .block = function_index.block,
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                });
+
+                _ = try builder.append(.{
+                    .call = call_index,
+                });
+
+                const value_allocation = try builder.ir.values.append(builder.allocator, .{
+                    .call = call_index,
+                });
+
+                return value_allocation.index;
+            },
+            .declaration_reference => |sema_declaration_index| {
+                const sema_declaration = builder.module.declarations.get(sema_declaration_index);
+                const sema_init_value = builder.module.values.get(sema_declaration.init_value);
+                const init_type = sema_init_value.getType(builder.module);
+                _ = init_type;
+                switch (sema_declaration.scope_type) {
+                    .local => {
+                        const stack_reference = builder.stack_map.get(sema_declaration_index).?;
+                        const value = try builder.ir.values.append(builder.allocator, .{
+                            .stack_reference = stack_reference,
+                        });
+                        return value.index;
+                    },
+                    .global => unreachable,
+                }
+                // switch (sema_declaration.*) {
+                //     else => |t| @panic(@tagName(t)),
+                // }
+            },
             else => |t| @panic(@tagName(t)),
         };
     }
 
-    fn jump(builder: *Builder, jump_descriptor: Jump) !Jump.Index {
-        const destination_block = builder.ir.blocks.get(jump_descriptor.destination);
+    fn call(builder: *Builder, descriptor: Call) !Call.Index {
+        const call_allocation = try builder.ir.calls.append(builder.allocator, descriptor);
+        return call_allocation.index;
+    }
+
+    fn jump(builder: *Builder, descriptor: Jump) !Jump.Index {
+        const destination_block = builder.ir.blocks.get(descriptor.destination);
         assert(!destination_block.sealed);
-        const jump_allocation = try builder.ir.jumps.append(builder.allocator, jump_descriptor);
+        const jump_allocation = try builder.ir.jumps.append(builder.allocator, descriptor);
         return jump_allocation.index;
     }
 

@@ -396,10 +396,15 @@ const Analyzer = struct {
             .call_one => blk: {
                 const this_value_node_index = node.left;
                 const this_value_allocation = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, this_value_node_index);
+                const value_type = switch (this_value_allocation.ptr.*) {
+                    .function => |function_index| analyzer.module.function_prototypes.get(analyzer.module.functions.get(function_index).prototype).return_type,
+                    else => |t| @panic(@tagName(t)),
+                };
 
                 const call_allocation = try analyzer.module.calls.append(analyzer.allocator, .{
                     .value = this_value_allocation.index,
                     .arguments = ArgumentList.Index.invalid,
+                    .type = value_type,
                 });
                 break :blk .{
                     .call = call_allocation.index,

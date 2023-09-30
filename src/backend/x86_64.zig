@@ -54,23 +54,6 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
                             });
                             // TODO
                         } else unreachable;
-                        // if (integer.value == 0) {
-                        //     try function.instructions.append(instruction_selector.allocator, .{
-                        //         .xor_reg32_reg32 = .{
-                        //             .destination = syscall_register,
-                        //             .source = syscall_register,
-                        //         },
-                        //     });
-                        // } else if (integer.value < std.math.maxInt(u32)) {
-                        //     try function.instructions.append(instruction_selector.allocator, .{
-                        //         .mov_reg_imm32 = .{
-                        //             .destination = syscall_register,
-                        //             .source = @intCast(integer.value),
-                        //         },
-                        //     });
-                        // } else {
-                        //     unreachable;
-                        // }
                     },
                     else => |t| @panic(@tagName(t)),
                 }
@@ -83,14 +66,14 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
         .phi => unreachable,
         .ret => unreachable,
         .jump => |jump_index| {
-            _ = jump_index;
-            // const jump = intermediate.jumps.get(jump_index);
-            // const relocation = LocalRelative{
-            //     .instruction = .jmp_rel_8,
-            //     .source = @intCast(function.block_map.get(jump.source) orelse unreachable),
-            //     .destination = @intCast(function.block_map.get(jump.destination) orelse unreachable),
-            //     .offset_in_block = function.block_byte_count,
-            // };
+            const jump = intermediate.jumps.get(jump_index);
+            const relocation = Displacement{
+                .size = .one,
+                .source = @intCast(function.block_map.get(jump.source) orelse unreachable),
+                .destination = @intCast(function.block_map.get(jump.destination) orelse unreachable),
+                .offset_in_block = function.block_byte_count,
+            };
+            _ = relocation;
             // const index = function.instructions.items.len;
             // try function.relocations.append(instruction_selector.allocator, @intCast(index));
             // try function.instructions.append(instruction_selector.allocator, .{
@@ -98,6 +81,8 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
             // });
             unreachable;
         },
+        .call => unreachable,
+        .store => unreachable,
     }
 }
 
@@ -113,6 +98,13 @@ const RegisterMemoryRegister = struct {
     source: GPRegister,
     size: Size,
     direct: bool,
+};
+
+const Displacement = struct {
+    size: Size,
+    source: u16,
+    destination: u16,
+    offset_in_block: u16,
 };
 
 const RmResult = struct {
@@ -215,24 +207,7 @@ pub fn emitInstruction(result: *emit.Result, instruction: Instruction, intermedi
             result.appendCodeByte(opcode_byte);
             emitImmediate(result, intermediate, register_immediate.immediate, register_immediate.immediate_size);
         },
-        // .jmp_rel_8 => unreachable, //result.appendOnlyOpcodeSkipInstructionBytes(instruction),
-        // inline .mov_reg_imm32 => |content, tag| {
-        //     _ = tag;
-        //     _ = content;
-        //     // const descriptor = instruction_descriptors.get(tag);
-        //     // result.writeOpcode(descriptor.opcode);
-        //     // result.appendCodeByte(descriptor.getOpcode()[0] | @intFromEnum(content.destination));
-        //     // result.appendCode(std.mem.asBytes(&content.source));
-        //     unreachable;
-        // },
-        // inline .xor_reg32_reg32 => |content, tag| {
-        //     _ = tag;
-        //     _ = content;
-        //     // const descriptor = instruction_descriptors.get(tag);
-        //     // result.appendCodeByte(descriptor.getOpcode()[0]);
-        //     // result.appendCodeByte(0xc0 | @as(u8, @intFromEnum(content.source)) << 4 | @intFromEnum(content.destination));
-        //     unreachable;
-        // },
+        .jmp_rel => unreachable,
         inline .syscall, .ud2 => |_, tag| {
             const opcode = tag.getOpcode(&.{});
             result.appendCode(opcode);
@@ -244,6 +219,7 @@ pub fn emitInstruction(result: *emit.Result, instruction: Instruction, intermedi
 pub const Instruction = union(Id) {
     xor_rm_r: RegisterMemoryRegister,
     mov_r_imm: RegisterImmediate,
+    jmp_rel: Displacement,
     // jmp_rel_8: LocalRelative,
     // mov_reg_imm32: struct {
     //     destination: GPRegister,
@@ -259,7 +235,7 @@ pub const Instruction = union(Id) {
     const Id = enum {
         xor_rm_r,
         mov_r_imm,
-        // jmp_rel_8,
+        jmp_rel,
         // mov_reg_imm32,
         // xor_reg32_reg32,
         syscall,
@@ -276,6 +252,11 @@ pub const Instruction = union(Id) {
                 .xor_rm_r => switch (operands[0].register_memory.size) {
                     .one => &.{0x30},
                     .two, .four, .eight => &.{0x31},
+                },
+                .jmp_rel => switch (operands[0].displacement.size) {
+                    .one => unreachable,
+                    .four => unreachable,
+                    else => unreachable,
                 },
             };
         }

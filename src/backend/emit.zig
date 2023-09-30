@@ -46,13 +46,18 @@ pub const Result = struct {
                 break :blk @as([*]align(0x1000) u8, @ptrCast(@alignCast(try windows.VirtualAlloc(null, size, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE))))[0..size];
             },
             .linux, .macos => |os_tag| blk: {
+                const jit = switch (os_tag) {
+                    .macos => 0x800,
+                    .linux => 0,
+                    else => unreachable,
+                };
                 const execute_flag: switch (os_tag) {
                     .linux => u32,
                     .macos => c_int,
                     else => unreachable,
                 } = if (flags.executable) std.os.PROT.EXEC else 0;
                 const protection_flags: u32 = @intCast(std.os.PROT.READ | std.os.PROT.WRITE | execute_flag);
-                const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE;
+                const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE | jit;
 
                 break :blk std.os.mmap(null, size, protection_flags, mmap_flags, -1, 0);
             },
