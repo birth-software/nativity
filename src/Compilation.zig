@@ -71,11 +71,24 @@ pub const Type = union(enum) {
     void,
     noreturn,
     bool,
-    integer: Integer,
+    integer: Type.Integer,
     @"struct": Struct.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
+
+    pub const Integer = struct {
+        bit_count: u16,
+        signedness: Signedness,
+        pub const Signedness = enum(u1) {
+            unsigned = 0,
+            signed = 1,
+        };
+
+        pub fn getSize(integer: Type.Integer) u64 {
+            return integer.bit_count / @bitSizeOf(u8) + @intFromBool(integer.bit_count % @bitSizeOf(u8) != 0);
+        }
+    };
 
     pub fn getSize(type_info: Type) u64 {
         return switch (type_info) {
@@ -89,19 +102,6 @@ pub const Type = union(enum) {
             .integer => |integer| @min(16, integer.getSize()),
             else => |t| @panic(@tagName(t)),
         };
-    }
-};
-
-pub const Integer = struct {
-    bit_count: u16,
-    signedness: Signedness,
-    pub const Signedness = enum(u1) {
-        unsigned = 0,
-        signed = 1,
-    };
-
-    pub fn getSize(integer: Integer) u64 {
-        return integer.bit_count / @bitSizeOf(u8) + @intFromBool(integer.bit_count % @bitSizeOf(u8) != 0);
     }
 };
 
@@ -253,7 +253,7 @@ pub const Value = union(enum) {
     runtime: Runtime,
     assign: Assignment.Index,
     type: Type.Index,
-    integer: u64,
+    integer: Integer,
     syscall: Syscall.Index,
     call: Call.Index,
     argument_list: ArgumentList,
@@ -276,6 +276,11 @@ pub const Value = union(enum) {
             else => |t| @panic(@tagName(t)),
         };
     }
+};
+
+pub const Integer = struct {
+    value: u64,
+    type: Type.Integer,
 };
 
 pub const Module = struct {

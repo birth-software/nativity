@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 pub const Allocator = std.mem.Allocator;
+pub const AutoArrayHashMap = std.AutoArrayHashMapUnmanaged;
 pub const ArrayList = std.ArrayListUnmanaged;
 pub const AutoHashMap = std.AutoHashMapUnmanaged;
 pub const HashMap = std.HashMapUnmanaged;

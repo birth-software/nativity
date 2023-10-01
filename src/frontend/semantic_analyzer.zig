@@ -94,7 +94,6 @@ const Analyzer = struct {
     }
 
     fn block(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) anyerror!Block.Index {
-        _ = expect_type;
         var reaches_end = true;
         const block_node = analyzer.getNode(scope_index, node_index);
         var statement_nodes = ArrayList(Node.Index){};
@@ -142,9 +141,9 @@ const Analyzer = struct {
                                         },
                                     };
                                     try analyzer.resolveNode(right_value_allocation.ptr, scope_index, ExpectType.none, statement_node.right);
-                                    switch (right_value_allocation.ptr.*) {
-                                        else => |t| std.debug.print("\n\n\n\n\nASSIGN RIGHT: {s}\n\n\n\n", .{@tagName(t)}),
-                                    }
+                                    // switch (right_value_allocation.ptr.*) {
+                                    //     else => |t| std.debug.print("\n\n\n\n\nASSIGN RIGHT: {s}\n\n\n\n", .{@tagName(t)}),
+                                    // }
                                     try statements.append(analyzer.allocator, right_value_allocation.index);
                                     continue;
                                 },
@@ -208,7 +207,7 @@ const Analyzer = struct {
                                     .node_index = statement_node.left,
                                 },
                             };
-                            try analyzer.resolveNode(return_value_allocation.ptr, scope_index, ExpectType.none, statement_node.left);
+                            try analyzer.resolveNode(return_value_allocation.ptr, scope_index, expect_type, statement_node.left);
                             break :ret return_value_allocation.index;
                         },
                         false => @panic("TODO: ret void"),
@@ -299,6 +298,7 @@ const Analyzer = struct {
                             @panic("TODO: compile error");
                         }
                     },
+                    else => unreachable,
                 }
 
                 // TODO
@@ -337,7 +337,11 @@ const Analyzer = struct {
                         var argument_nodes = try analyzer.getArguments(scope_index, node_index);
                         print("Argument count: {}\n", .{argument_nodes.items.len});
                         if (argument_nodes.items.len > 0 and argument_nodes.items.len <= 6 + 1) {
-                            const number_allocation = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, argument_nodes.items[0]);
+                            const number_allocation = try analyzer.unresolvedAllocate(scope_index, .{
+                                .flexible_integer = .{
+                                    .byte_count = 8,
+                                },
+                            }, argument_nodes.items[0]);
                             const number = number_allocation.index;
                             assert(number.valid);
                             var arguments = std.mem.zeroes([6]Value.Index);
@@ -388,8 +392,28 @@ const Analyzer = struct {
                 };
             },
             .number_literal => switch (std.zig.parseNumberLiteral(analyzer.numberBytes(scope_index, node.token))) {
-                .int => |integer| .{
-                    .integer = integer,
+                .int => |integer| blk: {
+                    assert(expect_type != .none);
+                    const int_type = switch (expect_type) {
+                        .flexible_integer => |flexible_integer_type| Compilation.Type.Integer{
+                            .bit_count = flexible_integer_type.byte_count << 3,
+                            .signedness = .unsigned,
+                        },
+                        .type_index => |type_index| a: {
+                            const type_info = analyzer.module.types.get(type_index);
+                            break :a switch (type_info.*) {
+                                .integer => |int| int,
+                                else => |t| @panic(@tagName(t)),
+                            };
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    };
+                    break :blk .{
+                        .integer = .{
+                            .value = integer,
+                            .type = int_type,
+                        },
+                    };
                 },
                 else => |t| @panic(@tagName(t)),
             },
@@ -744,12 +768,18 @@ const Analyzer = struct {
 const ExpectType = union(enum) {
     none,
     type_index: Type.Index,
+    flexible_integer: FlexibleInteger,
 
     pub const none = ExpectType{
         .none = {},
     };
     pub const boolean = ExpectType{
         .type_index = type_boolean,
+    };
+
+    const FlexibleInteger = struct {
+        byte_count: u8,
+        sign: ?bool = null,
     };
 };
 

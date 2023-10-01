@@ -1,10 +1,18 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const print = std.debug.print;
 const emit = @import("emit.zig");
 const ir = @import("./intermediate_representation.zig");
 
+const Compilation = @import("../Compilation.zig");
+
+const data_structures = @import("../data_structures.zig");
+const ArrayList = data_structures.ArrayList;
+const AutoArrayHashMap = data_structures.AutoArrayHashMap;
+
 const InstructionSelector = emit.InstructionSelector(Instruction);
+const x86_64 = @This();
 
 const Size = enum(u2) {
     one = 0,
@@ -13,9 +21,372 @@ const Size = enum(u2) {
     eight = 3,
 };
 
+pub const MIR = struct {
+    functions: ArrayList(Function) = .{},
+    const GPRegister = struct {
+        value: ?x86_64.GPRegister = null,
+        can_omit_if_present: bool = true,
+    };
+    const Stack = struct {
+        offset: u64,
+    };
+    const Function = struct {
+        instructions: ArrayList(MIR.Instruction) = .{},
+        blocks: AutoArrayHashMap(ir.BasicBlock.Index, u32) = .{},
+    };
+    const Instruction = struct {
+        operands: [4]Operand,
+        ir: ir.Instruction.Index,
+        id: Id,
+        operand_count: u8 = 0,
+
+        pub fn getOperands(instruction: *MIR.Instruction) []Operand {
+            return instruction.operands[0..instruction.operand_count];
+        }
+
+        const Id = enum(u16) {
+            call,
+            jmp,
+            mov,
+            push,
+            ret,
+            sub,
+            syscall,
+            ud2,
+        };
+
+        fn new(id: Id, reference: ir.Instruction.Index, operands: []const Operand) MIR.Instruction {
+            var out_operands: [4]Operand = undefined;
+            @memset(std.mem.asBytes(&out_operands), 0);
+            @memcpy(out_operands[0..operands.len], operands);
+
+            return .{
+                .operands = out_operands,
+                .ir = reference,
+                .id = id,
+                .operand_count = @intCast(operands.len),
+            };
+        }
+
+        const Operand = union(enum) {
+            gp_register: MIR.GPRegister,
+            fp_register,
+            memory,
+            relative: union(enum) {
+                block: ir.BasicBlock.Index,
+                function: ir.Function.Index,
+            },
+            immediate: Compilation.Integer,
+            stack: Stack,
+        };
+    };
+
+    const RegisterUse = union(enum) {
+        general,
+        ret,
+        param: x86_64.GPRegister,
+        syscall_param: x86_64.GPRegister,
+    };
+
+    fn movRegImm(function: *Function, allocator: Allocator, integer: Compilation.Integer, instruction_index: ir.Instruction.Index, use: RegisterUse) !void {
+        if (integer.type.bit_count <= @bitSizeOf(u64)) {
+            switch (integer.type.signedness) {
+                .signed, .unsigned => {
+                    if (integer.value <= std.math.maxInt(u32)) {
+                        try function.instructions.append(allocator, MIR.Instruction.new(.mov, instruction_index, &.{
+                            .{
+                                .gp_register = .{
+                                    .value = switch (use) {
+                                        .general => null,
+                                        .ret => .a,
+                                        .param => unreachable,
+                                        .syscall_param => |register| register,
+                                    },
+                                },
+                            },
+                            .{ .immediate = integer },
+                        }));
+                    } else {
+                        unreachable;
+                    }
+                },
+            }
+        } else {
+            unreachable;
+        }
+    }
+
+    fn movRegStack(function: *Function, allocator: Allocator, use: RegisterUse, stack_reference: ir.StackReference, instruction_index: ir.Instruction.Index) !void {
+        if (stack_reference.size <= @sizeOf(u64)) {
+            switch (stack_reference.size) {
+                @sizeOf(u8) => unreachable,
+                @sizeOf(u16) => unreachable,
+                @sizeOf(u32) => {
+                    try function.instructions.append(allocator, MIR.Instruction.new(.mov, instruction_index, &.{
+                        .{
+                            .gp_register = .{
+                                .value = switch (use) {
+                                    .general => null,
+                                    .ret => unreachable,
+                                    .param => unreachable,
+                                    .syscall_param => |syscall_register| syscall_register,
+                                },
+                            },
+                        },
+                        .{
+                            .stack = .{
+                                .offset = stack_reference.offset,
+                            },
+                        },
+                    }));
+                },
+                @sizeOf(u64) => unreachable,
+                else => unreachable,
+            }
+        } else {
+            unreachable;
+        }
+    }
+
+    pub fn generate(allocator: Allocator, intermediate: *ir.Result) !MIR {
+        var mir = MIR{};
+        try mir.functions.ensureTotalCapacity(allocator, intermediate.functions.len);
+        var ir_function_it = intermediate.functions.iterator();
+
+        while (ir_function_it.nextPointer()) |ir_function| {
+            const function = mir.functions.addOneAssumeCapacity();
+            function.* = .{};
+            try function.blocks.ensureTotalCapacity(allocator, ir_function.blocks.items.len);
+            for (ir_function.blocks.items) |block_index| {
+                function.blocks.putAssumeCapacity(block_index, @intCast(function.instructions.items.len));
+                const basic_block = intermediate.blocks.get(block_index);
+
+                if (ir_function.current_stack_offset > 0) {
+                    // TODO: switch on ABI
+                    try function.instructions.append(allocator, MIR.Instruction.new(.push, ir.Instruction.Index.invalid, &.{
+                        .{ .gp_register = .{ .value = .bp } },
+                    }));
+
+                    try function.instructions.append(allocator, MIR.Instruction.new(.mov, ir.Instruction.Index.invalid, &.{
+                        .{ .gp_register = .{ .value = .bp } },
+                        .{ .gp_register = .{ .value = .sp } },
+                    }));
+
+                    try function.instructions.append(allocator, MIR.Instruction.new(.sub, ir.Instruction.Index.invalid, &.{
+                        .{ .gp_register = .{ .value = .sp } },
+                        .{
+                            .immediate = Compilation.Integer{
+                                .value = ir_function.current_stack_offset,
+                                .type = .{
+                                    .bit_count = 8,
+                                    .signedness = .unsigned,
+                                },
+                            },
+                        },
+                    }));
+                }
+
+                for (basic_block.instructions.items) |instruction_index| {
+                    const instruction = intermediate.instructions.get(instruction_index);
+                    switch (instruction.*) {
+                        .jump => |jump_index| {
+                            const jump = intermediate.jumps.get(jump_index);
+                            try function.instructions.append(allocator, MIR.Instruction.new(.jmp, instruction_index, &.{
+                                .{ .relative = .{ .block = jump.destination } },
+                            }));
+                        },
+                        .copy => |copy_value_index| {
+                            const copy_value = intermediate.values.get(copy_value_index);
+                            switch (copy_value.*) {
+                                .integer => |integer| try movRegImm(function, allocator, integer, instruction_index, .general),
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        .ret => |ret_value_index| {
+                            const ret_value = intermediate.values.get(ret_value_index);
+                            switch (ret_value.*) {
+                                .integer => |integer| try movRegImm(function, allocator, integer, instruction_index, .ret),
+                                else => |t| @panic(@tagName(t)),
+                            }
+
+                            if (ir_function.current_stack_offset > 0) {
+                                unreachable;
+                            }
+
+                            try function.instructions.append(allocator, MIR.Instruction.new(.ret, instruction_index, &.{}));
+                        },
+                        .call => |call_value_index| {
+                            // TODO: args
+                            const call = intermediate.calls.get(call_value_index);
+                            try function.instructions.append(allocator, MIR.Instruction.new(.call, instruction_index, &.{
+                                .{ .relative = .{ .function = call.function } },
+                            }));
+                        },
+                        .store => |store_index| {
+                            const store = intermediate.stores.get(store_index);
+                            const source_value = intermediate.values.get(store.source);
+                            const destination_value = intermediate.values.get(store.destination);
+                            switch (destination_value.*) {
+                                .stack_reference => |stack_reference_index| {
+                                    const stack_reference = intermediate.stack_references.get(stack_reference_index);
+                                    print("stack ref: {}\n", .{stack_reference});
+                                    switch (source_value.*) {
+                                        .call => |call_index| {
+                                            try storeFunctionCallResult(allocator, function, intermediate, instruction_index, stack_reference.*, call_index);
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        .syscall => |syscall_value_index| {
+                            const syscall_value = intermediate.values.get(syscall_value_index);
+                            const syscall = intermediate.syscalls.get(syscall_value.syscall);
+                            for (syscall.arguments.items, syscall_registers[0..syscall.arguments.items.len]) |argument_index, syscall_register| {
+                                const argument = intermediate.values.get(argument_index).*;
+                                switch (argument) {
+                                    .integer => |integer| try movRegImm(function, allocator, integer, instruction_index, .{ .syscall_param = syscall_register }),
+                                    .stack_reference => |stack_reference_index| {
+                                        const stack_reference = intermediate.stack_references.get(stack_reference_index);
+                                        try movRegStack(function, allocator, .{ .syscall_param = syscall_register }, stack_reference.*, instruction_index);
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+                            }
+
+                            try function.instructions.append(allocator, MIR.Instruction.new(.syscall, instruction_index, &.{}));
+                        },
+                        .@"unreachable" => try function.instructions.append(allocator, MIR.Instruction.new(.ud2, instruction_index, &.{})),
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+            }
+        }
+
+        return mir;
+    }
+
+    const RegisterAllocator = struct {
+        gp_registers: RegisterSet(x86_64.GPRegister) = .{},
+
+        fn init(allocator: Allocator) !RegisterAllocator {
+            var register_allocator = RegisterAllocator{};
+            try register_allocator.gp_registers.free.ensureTotalCapacity(allocator, @typeInfo(x86_64.GPRegister).Enum.fields.len);
+            inline for (@typeInfo(x86_64.GPRegister).Enum.fields) |enum_field| {
+                register_allocator.gp_registers.free.putAssumeCapacity(@field(x86_64.GPRegister, enum_field.name), {});
+            }
+
+            return register_allocator;
+        }
+    };
+
+    fn RegisterSet(comptime RegisterEnum: type) type {
+        return struct {
+            used: AutoArrayHashMap(RegisterEnum, ir.Value.Index) = .{},
+            free: AutoArrayHashMap(RegisterEnum, void) = .{},
+
+            fn allocate(register_set: *@This(), allocator: Allocator, register: RegisterEnum, intermediate: *ir.Result, instruction: MIR.Instruction, value_index: ir.Value.Index) !void {
+                switch (intermediate.instructions.get(instruction.ir).*) {
+                    .store => {},
+                    else => {
+                        switch (register_set.free.orderedRemove(register)) {
+                            true => try register_set.used.put(allocator, register, value_index),
+                            false => unreachable,
+                        }
+                    },
+                }
+            }
+        };
+    }
+
+    fn getValueFromInstruction(intermediate: *ir.Result, instruction_index: ir.Instruction.Index) ir.Value.Index {
+        const instruction = intermediate.instructions.get(instruction_index);
+        const value_index: ir.Value.Index = switch (instruction.*) {
+            .copy, .ret, .syscall => |value_index| value_index,
+            .store => |store_index| blk: {
+                const store = intermediate.stores.get(store_index);
+                break :blk store.source;
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+
+        return value_index;
+    }
+
+    pub fn allocateRegisters(mir: *MIR, allocator: Allocator, intermediate: *ir.Result) !void {
+        for (mir.functions.items) |*function| {
+            var register_allocator = try RegisterAllocator.init(allocator);
+            for (function.instructions.items) |*instruction| {
+                for (instruction.getOperands()) |*operand| {
+                    switch (operand.*) {
+                        .relative, .immediate, .stack => {},
+                        .gp_register => |gp_register| switch (instruction.ir.valid) {
+                            true => operand.gp_register.value = blk: {
+                                const value_index = getValueFromInstruction(intermediate, instruction.ir);
+
+                                if (gp_register.value) |expected_register| {
+                                    if (register_allocator.gp_registers.used.get(expected_register)) |allocated_value| {
+                                        const allocated = intermediate.values.get(allocated_value);
+                                        const value = intermediate.values.get(value_index);
+                                        print("\nAllocated: {}.\nValue: {}\n", .{ allocated.*, value.* });
+                                        switch (value_index.eq(allocated_value)) {
+                                            true => {},
+                                            false => unreachable,
+                                        }
+                                    } else {
+                                        if (register_allocator.gp_registers.free.get(expected_register)) |_| {
+                                            try register_allocator.gp_registers.allocate(allocator, expected_register, intermediate, instruction.*, value_index);
+                                        } else {
+                                            unreachable;
+                                        }
+                                    }
+
+                                    break :blk expected_register;
+                                } else {
+                                    for (register_allocator.gp_registers.free.keys()) |register| {
+                                        try register_allocator.gp_registers.allocate(allocator, register, intermediate, instruction.*, value_index);
+                                        break :blk register;
+                                    } else {
+                                        unreachable;
+                                    }
+                                }
+                            },
+                            false => {},
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+            }
+        }
+    }
+
+    fn storeFunctionCallResult(allocator: Allocator, function: *MIR.Function, intermediate: *ir.Result, instruction: ir.Instruction.Index, stack_reference: ir.StackReference, call_index: ir.Call.Index) !void {
+        _ = call_index;
+        _ = intermediate;
+        if (stack_reference.size <= @sizeOf(u64)) {
+            switch (stack_reference.size) {
+                @sizeOf(u8) => unreachable,
+                @sizeOf(u16) => unreachable,
+                @sizeOf(u32) => try function.instructions.append(allocator, MIR.Instruction.new(.mov, instruction, &.{
+                    .{ .stack = .{ .offset = stack_reference.offset } }, .{ .gp_register = .{ .value = .a } },
+                })),
+                @sizeOf(u64) => unreachable,
+                else => unreachable,
+            }
+        } else {
+            unreachable;
+        }
+    }
+};
+
 pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *InstructionSelector.Function, intermediate: *ir.Result, instruction: ir.Instruction) !void {
     switch (instruction) {
-        .@"unreachable" => try function.instructions.append(instruction_selector.allocator, .{ .ud2 = {} }),
+        .copy => |copy_value| {
+            _ = copy_value;
+            unreachable;
+        },
+        .@"unreachable" => _ = try function.addInstruction(instruction_selector.allocator, .{ .ud2 = {} }),
         .load => |load_index| {
             const load = intermediate.loads.get(load_index).*;
             const load_value = intermediate.values.get(load.value).*;
@@ -35,7 +406,7 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
                 switch (argument) {
                     .integer => |integer| {
                         if (integer.value == 0) {
-                            try function.instructions.append(instruction_selector.allocator, .{
+                            _ = try function.addInstruction(instruction_selector.allocator, .{
                                 .xor_rm_r = .{
                                     .destination = @enumFromInt(@intFromEnum(syscall_register)),
                                     .source = @enumFromInt(@intFromEnum(syscall_register)),
@@ -44,7 +415,7 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
                                 },
                             });
                         } else if (integer.value <= std.math.maxInt(u32)) {
-                            try function.instructions.append(instruction_selector.allocator, .{
+                            _ = try function.addInstruction(instruction_selector.allocator, .{
                                 .mov_r_imm = .{
                                     .register_size = .four,
                                     .register = @enumFromInt(@intFromEnum(syscall_register)),
@@ -59,7 +430,7 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
                 }
             }
 
-            try function.instructions.append(instruction_selector.allocator, .{
+            _ = try function.addInstruction(instruction_selector.allocator, .{
                 .syscall = {},
             });
         },
@@ -67,19 +438,15 @@ pub fn selectInstruction(instruction_selector: *InstructionSelector, function: *
         .ret => unreachable,
         .jump => |jump_index| {
             const jump = intermediate.jumps.get(jump_index);
-            const relocation = Displacement{
-                .size = .one,
-                .source = @intCast(function.block_map.get(jump.source) orelse unreachable),
-                .destination = @intCast(function.block_map.get(jump.destination) orelse unreachable),
-                .offset_in_block = function.block_byte_count,
-            };
-            _ = relocation;
-            // const index = function.instructions.items.len;
-            // try function.relocations.append(instruction_selector.allocator, @intCast(index));
-            // try function.instructions.append(instruction_selector.allocator, .{
-            //     .jmp_rel_8 = relocation,
-            // });
-            unreachable;
+            const instruction_index = try function.addInstruction(instruction_selector.allocator, .{
+                .jmp_rel = Displacement{
+                    .size = .one,
+                    .source = @intCast(function.block_map.get(jump.source) orelse unreachable),
+                    .destination = @intCast(function.block_map.get(jump.destination) orelse unreachable),
+                    .instruction_index = @intCast(function.instructions.items.len),
+                },
+            });
+            try function.relocations.append(instruction_selector.allocator, instruction_index);
         },
         .call => unreachable,
         .store => unreachable,
@@ -101,10 +468,10 @@ const RegisterMemoryRegister = struct {
 };
 
 const Displacement = struct {
+    instruction_index: u16,
     size: Size,
     source: u16,
     destination: u16,
-    offset_in_block: u16,
 };
 
 const RmResult = struct {

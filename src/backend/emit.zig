@@ -107,16 +107,14 @@ pub fn InstructionSelector(comptime Instruction: type) type {
 
         pub const Function = struct {
             instructions: ArrayList(Instruction) = .{},
-            block_byte_counts: ArrayList(u16),
-            block_offsets: ArrayList(u32),
             relocations: ArrayList(u32) = .{},
             block_map: AutoHashMap(ir.BasicBlock.Index, u32) = .{},
-            byte_count: u32 = 0,
-            block_byte_count: u16 = 0,
 
-            pub fn selectInstruction(function: *Function, allocator: Allocator, instruction: Instruction) !void {
+            pub fn addInstruction(function: *Function, allocator: Allocator, instruction: Instruction) !u32 {
+                const index = function.instructions.items.len;
                 try function.instructions.append(allocator, instruction);
-                function.block_byte_count += Instruction.descriptors.get(instruction).size;
+
+                return @intCast(index);
             }
         };
 
@@ -130,45 +128,43 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
         else => @compileError("Architecture not supported"),
     };
     const Instruction = backend.Instruction;
+    _ = Instruction;
 
     return struct {
         pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
             var result = try Result.create();
-            var function_iterator = intermediate.functions.iterator();
-            const IS = InstructionSelector(Instruction);
-            var instruction_selector = IS{
-                .functions = try ArrayList(IS.Function).initCapacity(allocator, intermediate.functions.len),
-                .allocator = allocator,
-            };
-
-            while (function_iterator.next()) |ir_function| {
-                const function = instruction_selector.functions.addOneAssumeCapacity();
-                function.* = .{
-                    .block_byte_counts = try ArrayList(u16).initCapacity(allocator, ir_function.blocks.items.len),
-                    .block_offsets = try ArrayList(u32).initCapacity(allocator, ir_function.blocks.items.len),
-                };
-                try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
-                for (ir_function.blocks.items, 0..) |block_index, index| {
-                    function.block_map.putAssumeCapacity(block_index, @intCast(index));
-                }
-
-                for (ir_function.blocks.items) |block_index| {
-                    const block = intermediate.blocks.get(block_index);
-                    function.block_offsets.appendAssumeCapacity(function.byte_count);
-                    function.block_byte_count = 0;
-                    for (block.instructions.items) |instruction_index| {
-                        const instruction = intermediate.instructions.get(instruction_index).*;
-                        try backend.selectInstruction(&instruction_selector, function, intermediate, instruction);
-                    }
-
-                    function.block_byte_counts.appendAssumeCapacity(function.block_byte_count);
-                    function.byte_count += function.block_byte_count;
-                }
-            }
-
-            for (instruction_selector.functions.items) |function| {
-                for (function.instructions.items) |instruction| backend.emitInstruction(&result, instruction, intermediate);
-            }
+            var mir = try backend.MIR.generate(allocator, intermediate);
+            try mir.allocateRegisters(allocator, intermediate);
+            // var function_iterator = intermediate.functions.iterator();
+            // const IS = InstructionSelector(Instruction);
+            // var instruction_selector = IS{
+            //     .functions = try ArrayList(IS.Function).initCapacity(allocator, intermediate.functions.len),
+            //     .allocator = allocator,
+            // };
+            //
+            // while (function_iterator.next()) |ir_function| {
+            //     const function = instruction_selector.functions.addOneAssumeCapacity();
+            //     function.* = .{};
+            //     try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
+            //     for (ir_function.blocks.items, 0..) |block_index, index| {
+            //         function.block_map.putAssumeCapacity(block_index, @intCast(index));
+            //     }
+            //
+            //     for (ir_function.blocks.items) |block_index| {
+            //         const block = intermediate.blocks.get(block_index);
+            //         for (block.instructions.items) |instruction_index| {
+            //             const instruction = intermediate.instructions.get(instruction_index).*;
+            //             try backend.selectInstruction(&instruction_selector, function, intermediate, instruction);
+            //         }
+            //
+            //         // function.block_byte_counts.appendAssumeCapacity(function.block_byte_count);
+            //         // function.byte_count += function.block_byte_count;
+            //     }
+            // }
+            //
+            // for (instruction_selector.functions.items) |function| {
+            //     for (function.instructions.items) |instruction| backend.emitInstruction(&result, instruction, intermediate);
+            // }
 
             // for (instruction_selector.functions.items) |function| {
             //     var fix_size: bool = false;
