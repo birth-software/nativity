@@ -3,6 +3,7 @@ comptime {
 }
 
 const _start = fn () noreturn {
-    _ = #syscall(231, 0);
+    const result = #import("main").main();
+    _ = #syscall(231, result);
     unreachable;
 };

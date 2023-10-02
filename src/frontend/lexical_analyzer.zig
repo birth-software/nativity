@@ -34,6 +34,9 @@ pub const Token = packed struct(u64) {
         fixed_keyword_false = 0x0d,
         fixed_keyword_fn = 0x0e,
         fixed_keyword_unreachable = 0x0f,
+        fixed_keyword_return = 0x10,
+        keyword_unsigned_integer = 0x1f,
+        keyword_signed_integer = 0x20,
         bang = '!', // 0x21
         hash = '#', // 0x23
         dollar_sign = '$', // 0x24
@@ -82,6 +85,7 @@ pub const FixedKeyword = enum {
     false,
     @"fn",
     @"unreachable",
+    @"return",
 };
 
 pub const Result = struct {
@@ -109,8 +113,9 @@ pub fn analyze(allocator: Allocator, text: []const u8) !Result {
                     break;
                 }
 
-                const identifier = text[start_index..][0 .. index - start_index];
-                std.debug.print("Identifier: {s}\n", .{identifier});
+                // const identifier = text[start_index..][0 .. index - start_index];
+                // _ = identifier;
+                // std.debug.print("Identifier: {s}\n", .{identifier});
 
                 if (start_character == 'u' or start_character == 's') {
                     var index_integer = start_index + 1;
@@ -119,7 +124,13 @@ pub fn analyze(allocator: Allocator, text: []const u8) !Result {
                     }
 
                     if (index_integer == index) {
-                        unreachable;
+                        const id: Token.Id = switch (start_character) {
+                            'u' => .keyword_unsigned_integer,
+                            's' => .keyword_signed_integer,
+                            else => unreachable,
+                        };
+
+                        break :blk id;
                     }
                 }
 
@@ -127,7 +138,7 @@ pub fn analyze(allocator: Allocator, text: []const u8) !Result {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else .identifier;
             },
-            '(', ')', '{', '}', '-', '=', ';', '#', '@', ',' => |operator| blk: {
+            '(', ')', '{', '}', '-', '=', ';', '#', '@', ',', '.' => |operator| blk: {
                 index += 1;
                 break :blk @enumFromInt(operator);
             },

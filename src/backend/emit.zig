@@ -27,7 +27,7 @@ pub const Result = struct {
     },
     entry_point: u32 = 0,
 
-    fn create() !Result {
+    pub fn create() !Result {
         return Result{
             .sections = .{
                 .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
@@ -46,13 +46,18 @@ pub const Result = struct {
                 break :blk @as([*]align(0x1000) u8, @ptrCast(@alignCast(try windows.VirtualAlloc(null, size, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE))))[0..size];
             },
             .linux, .macos => |os_tag| blk: {
+                const jit = switch (os_tag) {
+                    .macos => 0x800,
+                    .linux => 0,
+                    else => unreachable,
+                };
                 const execute_flag: switch (os_tag) {
                     .linux => u32,
                     .macos => c_int,
                     else => unreachable,
                 } = if (flags.executable) std.os.PROT.EXEC else 0;
                 const protection_flags: u32 = @intCast(std.os.PROT.READ | std.os.PROT.WRITE | execute_flag);
-                const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE;
+                const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE | jit;
 
                 break :blk std.os.mmap(null, size, protection_flags, mmap_flags, -1, 0);
             },
@@ -77,14 +82,6 @@ pub const Result = struct {
         image.sections.text.index += 1;
     }
 
-    // fn appendOnlyOpcodeSkipInstructionBytes(image: *Result, instruction: Instruction) void {
-    //     const instruction_descriptor = instruction_descriptors.get(instruction);
-    //     assert(instruction_descriptor.opcode_byte_count == instruction_descriptor.operand_offset);
-    //     image.appendCode(instruction_descriptor.getOpcode());
-    //
-    //     image.sections.text.index += instruction_descriptor.size - instruction_descriptor.opcode_byte_count;
-    // }
-
     fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {
         comptime {
             assert(@typeInfo(FunctionType) == .Fn);
@@ -102,16 +99,14 @@ pub fn InstructionSelector(comptime Instruction: type) type {
 
         pub const Function = struct {
             instructions: ArrayList(Instruction) = .{},
-            block_byte_counts: ArrayList(u16),
-            block_offsets: ArrayList(u32),
             relocations: ArrayList(u32) = .{},
             block_map: AutoHashMap(ir.BasicBlock.Index, u32) = .{},
-            byte_count: u32 = 0,
-            block_byte_count: u16 = 0,
 
-            pub fn selectInstruction(function: *Function, allocator: Allocator, instruction: Instruction) !void {
+            pub fn addInstruction(function: *Function, allocator: Allocator, instruction: Instruction) !u32 {
+                const index = function.instructions.items.len;
                 try function.instructions.append(allocator, instruction);
-                function.block_byte_count += Instruction.descriptors.get(instruction).size;
+
+                return @intCast(index);
             }
         };
 
@@ -124,81 +119,13 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
         .x86_64 => @import("x86_64.zig"),
         else => @compileError("Architecture not supported"),
     };
-    const Instruction = backend.Instruction;
 
     return struct {
         pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
-            var result = try Result.create();
-            var function_iterator = intermediate.functions.iterator();
-            const IS = InstructionSelector(Instruction);
-            var instruction_selector = IS{
-                .functions = try ArrayList(IS.Function).initCapacity(allocator, intermediate.functions.len),
-                .allocator = allocator,
-            };
-
-            while (function_iterator.next()) |ir_function| {
-                const function = instruction_selector.functions.addOneAssumeCapacity();
-                function.* = .{
-                    .block_byte_counts = try ArrayList(u16).initCapacity(allocator, ir_function.blocks.items.len),
-                    .block_offsets = try ArrayList(u32).initCapacity(allocator, ir_function.blocks.items.len),
-                };
-                try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
-                for (ir_function.blocks.items, 0..) |block_index, index| {
-                    function.block_map.putAssumeCapacity(block_index, @intCast(index));
-                }
-
-                for (ir_function.blocks.items) |block_index| {
-                    const block = intermediate.blocks.get(block_index);
-                    function.block_offsets.appendAssumeCapacity(function.byte_count);
-                    function.block_byte_count = 0;
-                    for (block.instructions.items) |instruction_index| {
-                        const instruction = intermediate.instructions.get(instruction_index).*;
-                        try backend.selectInstruction(&instruction_selector, function, intermediate, instruction);
-                    }
-
-                    function.block_byte_counts.appendAssumeCapacity(function.block_byte_count);
-                    function.byte_count += function.block_byte_count;
-                }
-            }
-
-            for (instruction_selector.functions.items) |function| {
-                for (function.instructions.items) |instruction| backend.emitInstruction(&result, instruction, intermediate);
-            }
-
-            // for (instruction_selector.functions.items) |function| {
-            //     var fix_size: bool = false;
-            //     _ = fix_size;
-            //     for (function.relocations.items) |instruction_index| {
-            //         const instruction = function.instructions.items[instruction_index];
-            //         const relative = instruction.jmp_rel_8;
-            //         const source_block = relative.source;
-            //         const destination_block = relative.destination;
-            //         const source_offset = function.block_offsets.items[source_block];
-            //         const destination_offset = function.block_offsets.items[destination_block];
-            //         std.debug.print("Source offset: {}. Destination: {}\n", .{ source_offset, destination_offset });
-            //         const instruction_descriptor = instruction_descriptors.get(relative.instruction);
-            //         const instruction_offset = source_offset + relative.block_offset;
-            //         const really_source_offset = instruction_offset + instruction_descriptor.size;
-            //         const displacement = @as(i64, destination_offset) - @as(i64, really_source_offset);
-            //
-            //         const operands = instruction_descriptor.getOperands();
-            //         switch (operands.len) {
-            //             1 => switch (operands[0].size) {
-            //                 @sizeOf(u8) => {
-            //                     if (displacement >= std.math.minInt(i8) and displacement <= std.math.maxInt(i8)) {
-            //                         const writer_index = instruction_offset + instruction_descriptor.operand_offset;
-            //                         std.debug.print("Instruction offset: {}. Operand offset: {}. Writer index: {}. displacement: {}\n", .{ instruction_offset, instruction_descriptor.operand_offset, writer_index, displacement });
-            //                         result.sections.text.content[writer_index] = @bitCast(@as(i8, @intCast(displacement)));
-            //                     } else {
-            //                         unreachable;
-            //                     }
-            //                 },
-            //                 else => unreachable,
-            //             },
-            //             else => unreachable,
-            //         }
-            //     }
-            // }
+            std.debug.print("Entry point: {}\n", .{intermediate.entry_point});
+            var mir = try backend.MIR.generate(allocator, intermediate);
+            try mir.allocateRegisters(allocator, intermediate);
+            const result = try mir.encode(intermediate);
 
             const text_section = result.sections.text.content[0..result.sections.text.index];
             for (text_section) |byte| {
