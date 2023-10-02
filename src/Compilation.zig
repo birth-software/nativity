@@ -207,7 +207,7 @@ pub const Syscall = struct {
     arguments: [6]Value.Index,
     argument_count: u8,
 
-    pub fn getArguments(syscall: Syscall) []const Value.Index {
+    pub fn getArguments(syscall: *const Syscall) []const Value.Index {
         return syscall.arguments[0..syscall.argument_count];
     }
 
