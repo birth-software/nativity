@@ -27,7 +27,7 @@ pub const Result = struct {
     },
     entry_point: u32 = 0,
 
-    fn create() !Result {
+    pub fn create() !Result {
         return Result{
             .sections = .{
                 .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
@@ -82,14 +82,6 @@ pub const Result = struct {
         image.sections.text.index += 1;
     }
 
-    // fn appendOnlyOpcodeSkipInstructionBytes(image: *Result, instruction: Instruction) void {
-    //     const instruction_descriptor = instruction_descriptors.get(instruction);
-    //     assert(instruction_descriptor.opcode_byte_count == instruction_descriptor.operand_offset);
-    //     image.appendCode(instruction_descriptor.getOpcode());
-    //
-    //     image.sections.text.index += instruction_descriptor.size - instruction_descriptor.opcode_byte_count;
-    // }
-
     fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {
         comptime {
             assert(@typeInfo(FunctionType) == .Fn);
@@ -127,79 +119,13 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
         .x86_64 => @import("x86_64.zig"),
         else => @compileError("Architecture not supported"),
     };
-    const Instruction = backend.Instruction;
-    _ = Instruction;
 
     return struct {
         pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
-            var result = try Result.create();
+            std.debug.print("Entry point: {}\n", .{intermediate.entry_point});
             var mir = try backend.MIR.generate(allocator, intermediate);
             try mir.allocateRegisters(allocator, intermediate);
-            // var function_iterator = intermediate.functions.iterator();
-            // const IS = InstructionSelector(Instruction);
-            // var instruction_selector = IS{
-            //     .functions = try ArrayList(IS.Function).initCapacity(allocator, intermediate.functions.len),
-            //     .allocator = allocator,
-            // };
-            //
-            // while (function_iterator.next()) |ir_function| {
-            //     const function = instruction_selector.functions.addOneAssumeCapacity();
-            //     function.* = .{};
-            //     try function.block_map.ensureTotalCapacity(allocator, @intCast(ir_function.blocks.items.len));
-            //     for (ir_function.blocks.items, 0..) |block_index, index| {
-            //         function.block_map.putAssumeCapacity(block_index, @intCast(index));
-            //     }
-            //
-            //     for (ir_function.blocks.items) |block_index| {
-            //         const block = intermediate.blocks.get(block_index);
-            //         for (block.instructions.items) |instruction_index| {
-            //             const instruction = intermediate.instructions.get(instruction_index).*;
-            //             try backend.selectInstruction(&instruction_selector, function, intermediate, instruction);
-            //         }
-            //
-            //         // function.block_byte_counts.appendAssumeCapacity(function.block_byte_count);
-            //         // function.byte_count += function.block_byte_count;
-            //     }
-            // }
-            //
-            // for (instruction_selector.functions.items) |function| {
-            //     for (function.instructions.items) |instruction| backend.emitInstruction(&result, instruction, intermediate);
-            // }
-
-            // for (instruction_selector.functions.items) |function| {
-            //     var fix_size: bool = false;
-            //     _ = fix_size;
-            //     for (function.relocations.items) |instruction_index| {
-            //         const instruction = function.instructions.items[instruction_index];
-            //         const relative = instruction.jmp_rel_8;
-            //         const source_block = relative.source;
-            //         const destination_block = relative.destination;
-            //         const source_offset = function.block_offsets.items[source_block];
-            //         const destination_offset = function.block_offsets.items[destination_block];
-            //         std.debug.print("Source offset: {}. Destination: {}\n", .{ source_offset, destination_offset });
-            //         const instruction_descriptor = instruction_descriptors.get(relative.instruction);
-            //         const instruction_offset = source_offset + relative.block_offset;
-            //         const really_source_offset = instruction_offset + instruction_descriptor.size;
-            //         const displacement = @as(i64, destination_offset) - @as(i64, really_source_offset);
-            //
-            //         const operands = instruction_descriptor.getOperands();
-            //         switch (operands.len) {
-            //             1 => switch (operands[0].size) {
-            //                 @sizeOf(u8) => {
-            //                     if (displacement >= std.math.minInt(i8) and displacement <= std.math.maxInt(i8)) {
-            //                         const writer_index = instruction_offset + instruction_descriptor.operand_offset;
-            //                         std.debug.print("Instruction offset: {}. Operand offset: {}. Writer index: {}. displacement: {}\n", .{ instruction_offset, instruction_descriptor.operand_offset, writer_index, displacement });
-            //                         result.sections.text.content[writer_index] = @bitCast(@as(i8, @intCast(displacement)));
-            //                     } else {
-            //                         unreachable;
-            //                     }
-            //                 },
-            //                 else => unreachable,
-            //             },
-            //             else => unreachable,
-            //         }
-            //     }
-            // }
+            const result = try mir.encode(intermediate);
 
             const text_section = result.sections.text.content[0..result.sections.text.index];
             for (text_section) |byte| {

@@ -25,6 +25,7 @@ pub const Result = struct {
     syscalls: BlockList(Syscall) = .{},
     values: BlockList(Value) = .{},
     stack_references: BlockList(StackReference) = .{},
+    entry_point: u32 = 0,
 };
 
 pub fn initialize(compilation: *Compilation, module: *Module, package: *Package, main_file: Compilation.Type.Index) !Result {
@@ -37,6 +38,8 @@ pub fn initialize(compilation: *Compilation, module: *Module, package: *Package,
         .allocator = compilation.base_allocator,
         .module = module,
     };
+
+    builder.ir.entry_point = module.entry_point orelse unreachable;
 
     while (function_iterator.next()) |sema_function| {
         const function_index = try builder.buildFunction(sema_function);
@@ -284,8 +287,27 @@ pub const Builder = struct {
                 for (basic_block.instructions.items) |instruction_index| {
                     did_something = did_something or try builder.removeUnreachablePhis(reachable_blocks, instruction_index);
                     did_something = did_something or try builder.removeTrivialPhis(instruction_index);
-                    did_something = did_something or try builder.removeCopies(instruction_index);
+                    const copy = try builder.removeCopyReferences(instruction_index);
+                    did_something = did_something or copy;
                 }
+            }
+        }
+
+        var instructions_to_delete = ArrayList(u32){};
+        for (reachable_blocks) |basic_block_index| {
+            instructions_to_delete.clearRetainingCapacity();
+            const basic_block = builder.ir.blocks.get(basic_block_index);
+            for (basic_block.instructions.items, 0..) |instruction_index, index| {
+                const instruction = builder.ir.instructions.get(instruction_index);
+                switch (instruction.*) {
+                    .copy => try instructions_to_delete.append(builder.allocator, @intCast(index)),
+                    else => {},
+                }
+            }
+
+            var deleted_instruction_count: usize = 0;
+            for (instructions_to_delete.items) |instruction_to_delete| {
+                _ = basic_block.instructions.orderedRemove(instruction_to_delete - deleted_instruction_count);
             }
         }
     }
@@ -367,7 +389,7 @@ pub const Builder = struct {
         };
     }
 
-    fn removeCopies(builder: *Builder, instruction_index: Instruction.Index) !bool {
+    fn removeCopyReferences(builder: *Builder, instruction_index: Instruction.Index) !bool {
         const instruction = builder.ir.instructions.get(instruction_index);
         return switch (instruction.*) {
             .copy => false,

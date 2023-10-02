@@ -518,37 +518,6 @@ const Analyzer = struct {
         }
     }
 
-    fn analyzeDeclaration(analyzer: *Analyzer, scope_index: Scope.Index, declaration: *Declaration) !Value.Index {
-        _ = scope_index;
-        _ = declaration;
-        _ = analyzer;
-        // switch (declaration.*) {
-        //     .unresolved => |node_index| {
-        //         const declaration_node = analyzer.nodes[node_index.unwrap()];
-        //         return switch (declaration_node.id) {
-        //             .simple_variable_declaration => blk: {
-        //                 const expect_type = switch (declaration_node.left.valid) {
-        //                     true => unreachable,
-        //                     false => @unionInit(ExpectType, "none", {}),
-        //                 };
-        //
-        //                 const initialization_expression = try analyzer.expression(scope, expect_type, declaration_node.right);
-        //                 const value = analyzer.module.values.get(initialization_expression);
-        //                 if (value.is_comptime and value.is_const) {
-        //                     break :blk initialization_expression;
-        //                 }
-        //
-        //                 unreachable;
-        //             },
-        //             else => |t| @panic(@tagName(t)),
-        //         };
-        //     },
-        //     .struct_type => unreachable,
-        // }
-
-        @panic("TODO: analyzeDeclaration");
-    }
-
     fn structType(analyzer: *Analyzer, value: *Value, parent_scope_index: Scope.Index, index: Node.Index, file_index: File.Index) !Type.Index {
         var node_buffer: [2]Node.Index = undefined;
         // We have the file because this might be the first file
@@ -892,7 +861,23 @@ pub fn initialize(compilation: *Compilation, module: *Module, package: *Package,
         },
     });
 
-    return analyzeExistingPackage(value_allocation.ptr, compilation, module, package);
+    const result = analyzeExistingPackage(value_allocation.ptr, compilation, module, package);
+
+    var decl_iterator = module.declarations.iterator();
+    while (decl_iterator.nextPointer()) |decl| {
+        if (equal(u8, decl.name, "_start")) {
+            const value = module.values.get(decl.init_value);
+            module.entry_point = switch (value.*) {
+                .function => |function_index| function_index.uniqueInteger(),
+                else => |t| @panic(@tagName(t)),
+            };
+            break;
+        }
+    } else {
+        @panic("Entry point not found");
+    }
+
+    return result;
 }
 
 pub fn analyzeExistingPackage(value: *Value, compilation: *Compilation, module: *Module, package: *Package) !Type.Index {

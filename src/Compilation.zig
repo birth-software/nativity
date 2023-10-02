@@ -303,6 +303,7 @@ pub const Module = struct {
     calls: BlockList(Call) = .{},
     argument_list: BlockList(ArgumentList) = .{},
     returns: BlockList(Return) = .{},
+    entry_point: ?u32 = null,
 
     pub const Descriptor = struct {
         main_package_path: []const u8,
