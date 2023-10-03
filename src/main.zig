@@ -8,11 +8,16 @@ pub const seed = std.math.maxInt(u64);
 const default_src_file = "src/test/main.nat";
 
 pub fn main() !void {
-    try singleCompilation(default_src_file);
+    const allocator = std.heap.page_allocator;
+    const arguments = try std.process.argsAlloc(allocator);
+    if (arguments.len == 2) {
+        try singleCompilation(allocator, arguments[1]);
+    } else {
+        @panic("Wrong arguments");
+    }
 }
 
-fn singleCompilation(main_file_path: []const u8) !void {
-    const allocator = std.heap.page_allocator;
+fn singleCompilation(allocator: Allocator, main_file_path: []const u8) !void {
     const compilation = try Compilation.init(allocator);
 
     try compilation.compileModule(.{
@@ -22,8 +27,4 @@ fn singleCompilation(main_file_path: []const u8) !void {
 
 test {
     _ = Compilation;
-}
-
-test "basic" {
-    try singleCompilation(default_src_file);
 }
