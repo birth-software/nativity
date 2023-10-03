@@ -39,4 +39,4 @@ jobs:
       - name: Zig environment variables
         run: zig env
       - name: Test
-        run: zig build test
+        run: zig build test -Dall --summary all
