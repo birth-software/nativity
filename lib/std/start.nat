@@ -1,9 +1,9 @@
+const std = #import("std");
 comptime {
     _ = _start;
 }
 
 const _start = fn () noreturn {
     const result = #import("main").main();
-    _ = #syscall(231, result);
-    unreachable;
-};
+    std.os.exit(0);
+}

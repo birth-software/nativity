@@ -10,6 +10,7 @@ const ArrayList = data_structures.ArrayList;
 const enumFromString = data_structures.enumFromString;
 
 const Compilation = @import("../Compilation.zig");
+const File = Compilation.File;
 const fs = @import("../fs.zig");
 
 pub const Token = packed struct(u64) {
@@ -35,6 +36,15 @@ pub const Token = packed struct(u64) {
         fixed_keyword_fn = 0x0e,
         fixed_keyword_unreachable = 0x0f,
         fixed_keyword_return = 0x10,
+        fixed_keyword_ssize = 0x11,
+        fixed_keyword_usize = 0x12,
+        fixed_keyword_switch = 0x13,
+        fixed_keyword_if = 0x14,
+        fixed_keyword_else = 0x15,
+        fixed_keyword_struct = 0x16,
+        fixed_keyword_enum = 0x17,
+        fixed_keyword_union = 0x18,
+        fixed_keyword_extern = 0x19,
         keyword_unsigned_integer = 0x1f,
         keyword_signed_integer = 0x20,
         bang = '!', // 0x21
@@ -86,6 +96,15 @@ pub const FixedKeyword = enum {
     @"fn",
     @"unreachable",
     @"return",
+    ssize,
+    usize,
+    @"switch",
+    @"if",
+    @"else",
+    @"struct",
+    @"enum",
+    @"union",
+    @"extern",
 };
 
 pub const Result = struct {
@@ -93,7 +112,8 @@ pub const Result = struct {
     time: u64,
 };
 
-pub fn analyze(allocator: Allocator, text: []const u8) !Result {
+pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !Result {
+    _ = file_index;
     const time_start = std.time.Instant.now() catch unreachable;
     var tokens = try ArrayList(Token).initCapacity(allocator, text.len / 8);
     var index: usize = 0;
@@ -138,7 +158,7 @@ pub fn analyze(allocator: Allocator, text: []const u8) !Result {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else .identifier;
             },
-            '(', ')', '{', '}', '-', '=', ';', '#', '@', ',', '.' => |operator| blk: {
+            '(', ')', '{', '}', '[', ']', '-', '=', ';', '#', '@', ',', '.', ':', '>', '<', '*', '!' => |operator| blk: {
                 index += 1;
                 break :blk @enumFromInt(operator);
             },

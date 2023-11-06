@@ -1,0 +1,3 @@
+const FileDescriptor = s32;
+const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [@]const u8, bytes_len: usize) ssize extern;
+const exit = fn (exit_code: u32) noreturn extern;

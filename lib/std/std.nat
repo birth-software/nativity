@@ -2,4 +2,7 @@ comptime {
     _ = start;
 }
 
+const builtin = #import("builtin.nat");
+const os = #import("os.nat");
+const print = os.print;
 const start = #import("start.nat");
