@@ -214,23 +214,23 @@ const Analyzer = struct {
     fn processCall(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Call.Index {
         const node = analyzer.getScopeNode(scope_index, node_index);
         print("Node index: {}. Left index: {}\n", .{ node_index.uniqueInteger(), node.left.uniqueInteger() });
-        assert(node.left.valid);
-        const left_value_index = switch (node.left.valid) {
+        assert(!node.left.invalid);
+        const left_value_index = switch (!node.left.invalid) {
             true => blk: {
                 const member_or_namespace_node_index = node.left;
-                assert(member_or_namespace_node_index.valid);
+                assert(!member_or_namespace_node_index.invalid);
                 const this_value_allocation = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, member_or_namespace_node_index);
                 break :blk this_value_allocation.index;
             },
             false => unreachable, //Value.Index.invalid,
         };
 
-        const left_type = switch (left_value_index.valid) {
-            true => switch (analyzer.module.values.get(left_value_index).*) {
+        const left_type = switch (left_value_index.invalid) {
+            false => switch (analyzer.module.values.get(left_value_index).*) {
                 .function => |function_index| analyzer.module.function_prototypes.get(analyzer.module.types.get(analyzer.module.functions.get(function_index).prototype).function).return_type,
                 else => |t| @panic(@tagName(t)),
             },
-            false => Type.Index.invalid,
+            true => Type.Index.invalid,
         };
         const arguments_index = switch (node.id) {
             .call, .call_two => |call_tag| (try analyzer.module.argument_lists.append(analyzer.allocator, .{
@@ -340,8 +340,8 @@ const Analyzer = struct {
                 for (switch_case_node_list, 0..) |switch_case_node_index, index| {
                     _ = index;
                     const switch_case_node = analyzer.getScopeNode(scope_index, switch_case_node_index);
-                    switch (switch_case_node.left.valid) {
-                        true => {
+                    switch (switch_case_node.left.invalid) {
+                        false => {
                             const switch_case_condition_node = analyzer.getScopeNode(scope_index, switch_case_node.left);
                             var switch_case_group = ArrayList(u32){};
                             switch (switch_case_condition_node.id) {
@@ -390,7 +390,7 @@ const Analyzer = struct {
 
                             switch_case_groups.appendAssumeCapacity(switch_case_group);
                         },
-                        false => {
+                        true => {
                             unreachable;
                             // if (existing_enums.items.len == enum_type.fields.items.len) {
                             //     unreachable;
@@ -433,9 +433,9 @@ const Analyzer = struct {
     fn processAssignment(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Value {
         const node = analyzer.getScopeNode(scope_index, node_index);
         assert(node.id == .assign);
-        const assignment = switch (node.left.valid) {
+        const assignment = switch (node.left.invalid) {
             // In an assignment, the node being invalid means a discarding underscore, like this: ```_ = result```
-            false => {
+            true => {
                 var result = Value{
                     .unresolved = .{
                         .node_index = node.right,
@@ -446,7 +446,7 @@ const Analyzer = struct {
 
                 return result;
             },
-            true => {
+            false => {
                 // const id = analyzer.tokenIdentifier(.token);
                 // print("id: {s}\n", .{id});
                 // const left = try analyzer.expression(scope_index, ExpectType.none, statement_node.left);
@@ -470,9 +470,9 @@ const Analyzer = struct {
 
     fn processReturn(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) !Value {
         const node = analyzer.getScopeNode(scope_index, node_index);
-        const return_expression: Value.Index = switch (node_index.valid) {
+        const return_expression: Value.Index = switch (node_index.invalid) {
             // TODO: expect type
-            true => ret: {
+            false => ret: {
                 const return_value_allocation = try analyzer.module.values.addOne(analyzer.allocator);
                 return_value_allocation.ptr.* = .{
                     .unresolved = .{
@@ -482,7 +482,7 @@ const Analyzer = struct {
                 try analyzer.resolveNode(return_value_allocation.ptr, scope_index, expect_type, node.left);
                 break :ret return_value_allocation.index;
             },
-            false => @panic("TODO: ret void"),
+            true => @panic("TODO: ret void"),
         };
 
         const return_value_allocation = try analyzer.module.returns.append(analyzer.allocator, .{
@@ -501,7 +501,7 @@ const Analyzer = struct {
 
     fn lookupDeclarationInCurrentAndParentScopes(analyzer: *Analyzer, scope_index: Scope.Index, identifier_hash: u32) ?DeclarationLookup {
         var scope_iterator = scope_index;
-        while (scope_iterator.valid) {
+        while (!scope_iterator.invalid) {
             const scope = analyzer.module.scopes.get(scope_iterator);
             if (scope.declarations.get(identifier_hash)) |declaration_index| {
                 return .{
@@ -535,8 +535,8 @@ const Analyzer = struct {
             const declaration = analyzer.module.declarations.get(declaration_index);
 
             // Up until now, only arguments have no initialization value
-            const typecheck_result = switch (declaration.init_value.valid) {
-                true => blk: {
+            const typecheck_result = switch (declaration.init_value.invalid) {
+                false => blk: {
                     const init_value = analyzer.module.values.get(declaration.init_value);
                     print("Declaration found: {}\n", .{init_value});
                     const is_unresolved = init_value.* == .unresolved;
@@ -560,14 +560,14 @@ const Analyzer = struct {
                     const typecheck_result = try analyzer.typeCheck(expect_type, declaration.type);
 
                     if (init_value.isComptime() and declaration.mutability == .@"const") {
-                        assert(declaration.init_value.valid);
+                        assert(!declaration.init_value.invalid);
                         assert(typecheck_result == .success);
                         return declaration.init_value;
                     }
 
                     break :blk typecheck_result;
                 },
-                false => try analyzer.typeCheck(expect_type, declaration.type),
+                true => try analyzer.typeCheck(expect_type, declaration.type),
             };
 
             const ref_allocation = try analyzer.module.values.append(analyzer.allocator, .{
@@ -580,7 +580,7 @@ const Analyzer = struct {
                             else => declaration.type,
                         },
                         .flexible_integer => blk: {
-                            assert(declaration.type.valid);
+                            assert(!declaration.type.invalid);
                             break :blk declaration.type;
                         },
                     },
@@ -627,7 +627,7 @@ const Analyzer = struct {
             },
             .compiler_intrinsic => {
                 const argument_list_node_index = node.left;
-                assert(argument_list_node_index.valid);
+                assert(!argument_list_node_index.invalid);
                 const node_list_node = analyzer.getScopeNode(scope_index, argument_list_node_index);
                 const node_list = analyzer.getScopeNodeList(scope_index, node_list_node);
 
@@ -692,7 +692,7 @@ const Analyzer = struct {
                                         },
                                         false => false_block: {
                                             const file_type = import_file.file.ptr.type;
-                                            assert(file_type.valid);
+                                            assert(!file_type.invalid);
                                             break :false_block file_type;
                                         },
                                     },
@@ -714,7 +714,7 @@ const Analyzer = struct {
                             };
                             const number_allocation = try analyzer.unresolvedAllocate(scope_index, argument_expect_type, argument_nodes.items[0]);
                             const number = number_allocation.index;
-                            assert(number.valid);
+                            assert(!number.invalid);
                             var arguments = std.mem.zeroes([6]Value.Index);
                             for (argument_nodes.items[1..], 0..) |argument_node_index, argument_index| {
                                 const argument_allocation = try analyzer.unresolvedAllocate(scope_index, argument_expect_type, argument_node_index);
@@ -840,7 +840,7 @@ const Analyzer = struct {
                 const left_allocation = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
                 switch (left_allocation.ptr.*) {
                     .type => |type_index| {
-                        if (type_index.valid) {
+                        if (!type_index.invalid) {
                             const left_type = analyzer.module.types.get(type_index);
                             switch (left_type.*) {
                                 .@"struct" => |struct_index| {
@@ -930,7 +930,7 @@ const Analyzer = struct {
                     const field_node = analyzer.getScopeNode(scope_index, field_node_index);
                     const identifier = analyzer.tokenIdentifier(scope_index, field_node.token);
                     print("Enum field: {s}\n", .{identifier});
-                    assert(!field_node.left.valid);
+                    assert(field_node.left.invalid);
 
                     const enum_hash_name = try analyzer.processIdentifier(identifier);
 
@@ -1049,9 +1049,9 @@ const Analyzer = struct {
         const arguments_node_index = simple_function_prototype_node.left;
         const return_type_node_index = simple_function_prototype_node.right;
 
-        const arguments: ?[]const Declaration.Index = switch (arguments_node_index.valid) {
-            false => null,
-            true => blk: {
+        const arguments: ?[]const Declaration.Index = switch (arguments_node_index.invalid) {
+            true => null,
+            false => blk: {
                 const argument_list_node = analyzer.getScopeNode(scope_index, arguments_node_index);
                 // print("Function prototype argument list node: {}\n", .{function_prototype_node.left.uniqueInteger()});
                 const argument_node_list = switch (argument_list_node.id) {
@@ -1161,7 +1161,7 @@ const Analyzer = struct {
             const scope = new_scope.ptr;
             const scope_index = new_scope.index;
 
-            const is_file = !parent_scope_index.valid;
+            const is_file = parent_scope_index.invalid;
             assert(is_file);
 
             const struct_allocation = try analyzer.module.structs.append(analyzer.allocator, .{
@@ -1171,7 +1171,7 @@ const Analyzer = struct {
                 .@"struct" = struct_allocation.index,
             });
 
-            if (!parent_scope_index.valid) {
+            if (parent_scope_index.invalid) {
                 file.type = type_allocation.index;
             }
 
@@ -1270,14 +1270,14 @@ const Analyzer = struct {
     fn symbolDeclaration(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index, scope_type: ScopeType) !Declaration.Index {
         const declaration_node = analyzer.getScopeNode(scope_index, node_index);
         assert(declaration_node.id == .simple_symbol_declaration);
-        const expect_type = switch (declaration_node.left.valid) {
-            true => switch (scope_type) {
+        const expect_type = switch (declaration_node.left.invalid) {
+            false => switch (scope_type) {
                 .local => ExpectType{
                     .type_index = try analyzer.resolveType(scope_index, declaration_node.left),
                 },
                 .global => ExpectType.none,
             },
-            false => ExpectType.none,
+            true => ExpectType.none,
         };
         const mutability: Compilation.Mutability = switch (analyzer.getScopeToken(scope_index, declaration_node.token).id) {
             .fixed_keyword_const => .@"const",
@@ -1292,7 +1292,7 @@ const Analyzer = struct {
         }
         // TODO: Check if it is a keyword
 
-        assert(declaration_node.right.valid);
+        assert(!declaration_node.right.invalid);
 
         const argument = null;
         assert(argument == null);

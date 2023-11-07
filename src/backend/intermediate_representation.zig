@@ -307,12 +307,12 @@ pub const Function = struct {
                     .phi => {},
                     .ret => |ret_index| {
                         const ret = function.ir.returns.get(ret_index);
-                        switch (ret.instruction.valid) {
-                            true => {
+                        switch (ret.instruction.invalid) {
+                            false => {
                                 const ret_value = function.ir.instructions.get(ret.instruction).*;
                                 try writer.print(" {s}", .{@tagName(ret_value)});
                             },
-                            false => try writer.writeAll(" void"),
+                            true => try writer.writeAll(" void"),
                         }
                     },
                     // .load => |load_index| {
@@ -518,13 +518,13 @@ pub const Builder = struct {
                     const function_declaration_index = ir_call.function;
                     const function_declaration = builder.ir.function_declarations.get(function_declaration_index);
                     const function_definition_index = function_declaration.definition;
-                    switch (function_definition_index.valid) {
-                        true => {
+                    switch (function_definition_index.invalid) {
+                        false => {
                             const function = builder.ir.function_definitions.get(function_definition_index);
                             const first_block = function.blocks.items[0];
                             break :blk first_block;
                         },
-                        false => continue,
+                        true => continue,
                     }
                 },
                 .@"unreachable", .ret, .store => continue,
@@ -625,10 +625,10 @@ pub const Builder = struct {
             .phi => blk: {
                 var did_something = false;
                 var head = &instruction.phi;
-                next: while (head.valid) {
+                next: while (!head.invalid) {
                     const phi = builder.ir.phis.get(head.*);
                     const phi_jump = builder.ir.jumps.get(phi.jump);
-                    assert(phi_jump.source.valid);
+                    assert(!phi_jump.source.invalid);
 
                     for (reachable_blocks) |block_index| {
                         if (phi_jump.source.eq(block_index)) {
@@ -655,12 +655,12 @@ pub const Builder = struct {
                     var only_value = Instruction.Index.invalid;
                     var it = phi_index;
 
-                    while (it.valid) {
+                    while (!it.invalid) {
                         const phi = builder.ir.phis.get(it);
                         const phi_value = builder.ir.instructions.get(phi.instruction);
                         if (phi_value.* == .phi) unreachable;
                         // TODO: undefined
-                        if (only_value.valid) {
+                        if (!only_value.invalid) {
                             if (!only_value.eq(phi.instruction)) {
                                 break :trivial_blk null;
                             }
@@ -675,7 +675,7 @@ pub const Builder = struct {
                 };
 
                 if (trivial_phi) |trivial_value| {
-                    if (trivial_value.valid) {
+                    if (!trivial_value.invalid) {
                         // Option to delete
                         const delete = false;
                         if (delete) {
@@ -740,8 +740,8 @@ pub const Builder = struct {
                 };
 
                 for (operands) |operand_instruction_index_pointer| {
-                    switch (operand_instruction_index_pointer.valid) {
-                        true => {
+                    switch (operand_instruction_index_pointer.invalid) {
+                        false => {
                             const operand_value = builder.ir.instructions.get(operand_instruction_index_pointer.*);
                             switch (operand_value.*) {
                                 .copy => |copy_value| {
@@ -759,7 +759,7 @@ pub const Builder = struct {
                                 else => |t| @panic(@tagName(t)),
                             }
                         },
-                        false => {},
+                        true => {},
                     }
                 }
 
@@ -847,13 +847,13 @@ pub const Builder = struct {
         var arguments = try ArrayList(Instruction.Index).initCapacity(builder.allocator, sema_syscall.argument_count + 1);
 
         const sema_syscall_number = sema_syscall.number;
-        assert(sema_syscall_number.valid);
+        assert(!sema_syscall_number.invalid);
         const number_value_index = try builder.emitSyscallArgument(sema_syscall_number);
 
         arguments.appendAssumeCapacity(number_value_index);
 
         for (sema_syscall.getArguments()) |sema_syscall_argument| {
-            assert(sema_syscall_argument.valid);
+            assert(!sema_syscall_argument.invalid);
             const argument_value_index = try builder.emitSyscallArgument(sema_syscall_argument);
             arguments.appendAssumeCapacity(argument_value_index);
         }
@@ -890,7 +890,7 @@ pub const Builder = struct {
                     const loop_body_block = try builder.newBlock();
                     const loop_prologue_block = if (options.emit_exit_block) try builder.newBlock() else BasicBlock.Index.invalid;
 
-                    const loop_head_block = switch (condition.valid) {
+                    const loop_head_block = switch (!condition.invalid) {
                         false => loop_body_block,
                         true => unreachable,
                     };
@@ -902,7 +902,7 @@ pub const Builder = struct {
 
                     const sema_body_block = builder.module.blocks.get(sema_loop_body.block);
                     builder.currentFunction().current_basic_block = try builder.blockInsideBasicBlock(sema_body_block, loop_body_block);
-                    if (loop_prologue_block.valid) {
+                    if (!loop_prologue_block.invalid) {
                         builder.ir.blocks.get(loop_prologue_block).seal();
                     }
 
@@ -921,7 +921,7 @@ pub const Builder = struct {
                         unreachable;
                     }
 
-                    if (loop_prologue_block.valid) {
+                    if (!loop_prologue_block.invalid) {
                         builder.currentFunction().current_basic_block = loop_prologue_block;
                     }
                 },
@@ -933,13 +933,13 @@ pub const Builder = struct {
                     const sema_ret = builder.module.returns.get(sema_ret_index);
                     const return_value = try builder.emitReturnValue(sema_ret.value);
                     const phi_instruction = builder.ir.instructions.get(builder.currentFunction().return_phi_node);
-                    const phi = switch (phi_instruction.phi.valid) {
-                        true => unreachable,
-                        false => (try builder.ir.phis.append(builder.allocator, std.mem.zeroes(Phi))).ptr,
+                    const phi = switch (phi_instruction.phi.invalid) {
+                        false => unreachable,
+                        true => (try builder.ir.phis.append(builder.allocator, std.mem.zeroes(Phi))).ptr,
                     }; //builder.ir.phis.get(phi_instruction.phi);
                     const exit_jump = try builder.jump(.{
                         .source = builder.currentFunction().current_basic_block,
-                        .destination = switch (phi_instruction.phi.valid) {
+                        .destination = switch (!phi_instruction.phi.invalid) {
                             true => phi.block,
                             false => builder.currentFunction().return_phi_block,
                         },
@@ -1056,8 +1056,8 @@ pub const Builder = struct {
     fn processCall(builder: *Builder, sema_call_index: Compilation.Call.Index) anyerror!Instruction.Index {
         const sema_call = builder.module.calls.get(sema_call_index);
         const sema_argument_list_index = sema_call.arguments;
-        const argument_list: []const Instruction.Index = switch (sema_argument_list_index.valid) {
-            true => blk: {
+        const argument_list: []const Instruction.Index = switch (sema_argument_list_index.invalid) {
+            false => blk: {
                 var argument_list = ArrayList(Instruction.Index){};
                 const sema_argument_list = builder.module.argument_lists.get(sema_argument_list_index);
                 try argument_list.ensureTotalCapacity(builder.allocator, sema_argument_list.array.items.len);
@@ -1067,7 +1067,7 @@ pub const Builder = struct {
                 }
                 break :blk argument_list.items;
             },
-            false => &.{},
+            true => &.{},
         };
 
         const call_index = try builder.call(.{
@@ -1172,15 +1172,15 @@ pub const Builder = struct {
     fn jump(builder: *Builder, descriptor: Jump) !Jump.Index {
         const destination_block = builder.ir.blocks.get(descriptor.destination);
         assert(!destination_block.sealed);
-        assert(descriptor.source.valid);
+        assert(!descriptor.source.invalid);
         const jump_allocation = try builder.ir.jumps.append(builder.allocator, descriptor);
         return jump_allocation.index;
     }
 
     fn append(builder: *Builder, instruction: Instruction) !Instruction.Index {
-        assert(builder.current_function_index.valid);
+        assert(!builder.current_function_index.invalid);
         const current_function = builder.currentFunction();
-        assert(current_function.current_basic_block.valid);
+        assert(!current_function.current_basic_block.invalid);
         return builder.appendToBlock(current_function.current_basic_block, instruction);
     }
 

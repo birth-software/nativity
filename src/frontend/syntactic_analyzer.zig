@@ -36,24 +36,24 @@ pub const Node = packed struct(u128) {
 
     pub const Index = packed struct(u32) {
         value: u31,
-        valid: bool = true,
+        invalid: bool = false,
 
         pub const invalid = Index{
             .value = 0,
-            .valid = false,
+            .invalid = true,
         };
 
         pub fn get(index: Index) ?u32 {
-            return if (index.valid) index.value else null;
+            return if (index.invvalid) null else index.value;
         }
 
         pub fn unwrap(index: Index) u32 {
-            assert(index.valid);
+            assert(!index.invalid);
             return index.value;
         }
 
         pub fn uniqueInteger(index: Index) u32 {
-            assert(index.valid);
+            assert(!index.invalid);
             return index.value;
         }
     };
@@ -677,7 +677,7 @@ const Analyzer = struct {
 
     fn expressionPrecedence(analyzer: *Analyzer, minimum_precedence: i32) !Node.Index {
         var result = try analyzer.prefixExpression();
-        if (result.valid) {
+        if (!result.invalid) {
             const prefix_node = analyzer.nodes.items[result.unwrap()];
             std.debug.print("Prefix: {}\n", .{prefix_node.id});
         }
@@ -906,7 +906,7 @@ const Analyzer = struct {
 
         while (true) {
             const suffix_operator = try analyzer.suffixOperator(result);
-            if (suffix_operator.valid) {
+            if (!suffix_operator.invalid) {
                 result = suffix_operator;
             } else {
                 if (analyzer.tokens[analyzer.token_i].id == .left_parenthesis) {
@@ -1183,7 +1183,7 @@ pub fn analyze(allocator: Allocator, tokens: []const Token, source_file: []const
     });
 
     assert(node_index.value == 0);
-    assert(node_index.valid);
+    assert(!node_index.invalid);
 
     std.debug.print("Start Parsing file root members\n", .{});
     const members = try analyzer.containerMembers();

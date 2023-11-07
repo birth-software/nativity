@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const print = std.debug.print;
 const emit = @import("emit.zig");
-const ir = @import("./intermediate_representation.zig");
+const ir = @import("intermediate_representation.zig");
 
 const Compilation = @import("../Compilation.zig");
 
@@ -17,6 +17,19 @@ const x86_64 = @This();
 const Register = struct {
     list: List = .{},
     index: Index,
+
+    const invalid = Register{
+        .index = .{
+            .physical = .no_register,
+        },
+    };
+
+    fn isValid(register: Register) bool {
+        return switch (register.index) {
+            .physical => |physical| physical != .no_register,
+            .virtual => true,
+        };
+    }
 
     const Index = union(enum) {
         physical: Register.Physical,
@@ -929,6 +942,7 @@ const StackObject = struct {
 
 const InstructionSelection = struct {
     local_value_map: data_structures.AutoArrayHashMap(ir.Instruction.Index, Register) = .{},
+    value_map: data_structures.AutoArrayHashMap(ir.Instruction.Index, Register) = .{},
     block_map: data_structures.AutoHashMap(ir.BasicBlock.Index, BasicBlock.Index) = .{},
     liveins: data_structures.AutoArrayHashMap(Register.Physical, Register.Virtual.Index) = .{},
     memory_map: data_structures.AutoArrayHashMap(ir.Instruction.Index, Memory.Index) = .{},
@@ -994,6 +1008,7 @@ const InstructionSelection = struct {
     fn loadRegisterFromStackSlot(instruction_selection: *InstructionSelection, mir: *MIR, insert_before_instruction_index: usize, destination_register: Register.Physical, frame_index: u32, register_class: Register.Class, virtual_register: Register.Virtual.Index) !void {
         _ = virtual_register;
         const stack_object = instruction_selection.stack_objects.items[frame_index];
+        print("Stack object size: {}\n", .{stack_object.size});
         switch (@divExact(stack_object.size, 8)) {
             @sizeOf(u64) => {
                 switch (register_class) {
@@ -1034,31 +1049,74 @@ const InstructionSelection = struct {
                     else => |t| @panic(@tagName(t)),
                 }
             },
+            @sizeOf(u32) => switch (register_class) {
+                .gp32 => {
+                    const instruction_id = Instruction.Id.mov32rm;
+                    const instruction_descriptor = comptime instruction_descriptors.get(instruction_id);
+                    const source_operand_id = instruction_descriptor.operands[1].id;
+                    const addressing_mode = AddressingMode{
+                        .base = .{
+                            .frame_index = frame_index,
+                        },
+                    };
+                    const source_operand = Operand{
+                        .id = source_operand_id,
+                        .u = .{
+                            .memory = .{ .addressing_mode = addressing_mode },
+                        },
+                        .flags = .{},
+                    };
+                    const destination_operand = Operand{
+                        .id = .gp32,
+                        .u = .{
+                            .register = .{
+                                .index = .{
+                                    .physical = destination_register,
+                                },
+                            },
+                        },
+                        .flags = .{ .type = .def },
+                    };
+                    const instruction_index = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                        destination_operand,
+                        source_operand,
+                    });
+                    print("Inserting instruction at index {}\n", .{insert_before_instruction_index});
+                    try mir.blocks.get(instruction_selection.current_block).instructions.insert(mir.allocator, insert_before_instruction_index, instruction_index);
+                },
+                else => |t| @panic(@tagName(t)),
+            },
             else => std.debug.panic("Stack object size: {}\n", .{stack_object.size}),
         }
     }
 
     // TODO: add value map on top of local value map?
-    fn lookupRegisterForValue(instruction_selection: *InstructionSelection, ir_instruction_index: ir.Instruction.Index) ?Register {
-        if (instruction_selection.local_value_map.get(ir_instruction_index)) |register| {
+    fn lookupRegisterForValue(instruction_selection: *InstructionSelection, mir: *MIR, ir_instruction_index: ir.Instruction.Index) !Register {
+        if (instruction_selection.value_map.get(ir_instruction_index)) |register| {
             return register;
         }
 
-        return null;
+        const gop = try instruction_selection.local_value_map.getOrPutValue(mir.allocator, ir_instruction_index, Register.invalid);
+        return gop.value_ptr.*;
     }
 
     fn getRegisterForValue(instruction_selection: *InstructionSelection, mir: *MIR, ir_instruction_index: ir.Instruction.Index) !Register {
-        if (instruction_selection.lookupRegisterForValue(ir_instruction_index)) |register| {
+        const register = try instruction_selection.lookupRegisterForValue(mir, ir_instruction_index);
+        if (register.isValid()) {
             return register;
         }
 
-        const ir_type = getIrType(mir.ir, ir_instruction_index);
-        const value_type = resolveType(ir_type);
+        const instruction = mir.ir.instructions.get(ir_instruction_index);
+        if (instruction.* != .stack or !instruction_selection.stack_map.contains(ir_instruction_index)) {
+            const ir_type = getIrType(mir.ir, ir_instruction_index);
+            const value_type = resolveType(ir_type);
+            const register_class = register_classes.get(value_type);
+            const new_register = try mir.createVirtualRegister(register_class);
+            try instruction_selection.value_map.putNoClobber(mir.allocator, ir_instruction_index, new_register);
+            return new_register;
+        }
 
-        const register_class = register_classes.get(value_type);
-        const virtual_register = try mir.createVirtualRegister(register_class);
-        try instruction_selection.local_value_map.putNoClobber(mir.allocator, ir_instruction_index, virtual_register);
-        return virtual_register;
+        unreachable;
     }
 
     // Moving an immediate to a register
@@ -1187,18 +1245,28 @@ const InstructionSelection = struct {
         }
     }
 
-    fn updateValueMap(instruction_selection: *InstructionSelection, allocator: Allocator, ir_instruction_index: ir.Instruction.Index, register: Register) !void {
-        const gop = try instruction_selection.local_value_map.getOrPut(allocator, ir_instruction_index);
-        if (gop.found_existing) {
-            const stored_register = gop.value_ptr.*;
-            if (std.meta.eql(stored_register, register)) {
-                unreachable;
-            } else {
-                std.debug.panic("Register mismatch: Stored: {} Got: {}\n", .{ stored_register, register });
-            }
+    fn updateValueMap(instruction_selection: *InstructionSelection, allocator: Allocator, ir_instruction_index: ir.Instruction.Index, register: Register, local: bool) !void {
+        if (local) {
+            try instruction_selection.local_value_map.putNoClobber(allocator, ir_instruction_index, register);
         } else {
-            gop.value_ptr.* = register;
+            const gop = try instruction_selection.value_map.getOrPutValue(allocator, ir_instruction_index, Register.invalid);
+            if (!gop.value_ptr.isValid()) {
+                gop.value_ptr.* = register;
+            } else if (!std.meta.eql(gop.value_ptr.index, register.index)) {
+                unreachable;
+            }
         }
+        // const gop = try instruction_selection.local_value_map.getOrPut(allocator, ir_instruction_index);
+        // if (gop.found_existing) {
+        //     const stored_register = gop.value_ptr.*;
+        //     if (std.meta.eql(stored_register, register)) {
+        //         unreachable;
+        //     } else {
+        //         std.debug.panic("Register mismatch: Stored: {} Got: {}\n", .{ stored_register, register });
+        //     }
+        // } else {
+        //     gop.value_ptr.* = register;
+        // }
     }
 
     fn lowerArguments(instruction_selection: *InstructionSelection, mir: *MIR, ir_function: *ir.Function) !void {
@@ -1253,18 +1321,16 @@ const InstructionSelection = struct {
             // const operand_register_class = register_class_operand_matcher.get(operand_reference.id);
 
             const virtual_register_index = try instruction_selection.createLiveIn(mir, physical_register, register_class);
+            const result_register = try mir.createVirtualRegister(register_class);
             try mir.append(instruction_selection, .copy, &.{
                 Operand{
                     .id = operand_id,
                     .u = .{
-                        .register = .{
-                            .index = .{
-                                .virtual = virtual_register_index,
-                            },
-                        },
+                        .register = result_register,
                     },
                     .flags = .{
                         .dead_or_kill = true,
+                        .type = .def,
                     },
                 },
                 Operand{
@@ -1272,7 +1338,7 @@ const InstructionSelection = struct {
                     .u = .{
                         .register = .{
                             .index = .{
-                                .physical = physical_register,
+                                .virtual = virtual_register_index,
                             },
                         },
                     },
@@ -1284,11 +1350,8 @@ const InstructionSelection = struct {
 
             mir.blocks.get(instruction_selection.current_block).current_stack_index += 1;
 
-            try instruction_selection.local_value_map.putNoClobber(mir.allocator, ir_argument_instruction_index, Register{
-                .index = .{
-                    .virtual = virtual_register_index,
-                },
-            });
+            try instruction_selection.updateValueMap(mir.allocator, ir_argument_instruction_index, result_register, true);
+            try instruction_selection.value_map.putNoClobber(mir.allocator, ir_argument_instruction_index, result_register);
         }
     }
 
@@ -1314,7 +1377,56 @@ const InstructionSelection = struct {
 
         return virtual_register_index;
     }
+
+    fn emitLiveInCopies(instruction_selection: *InstructionSelection, mir: *MIR, entry_block_index: BasicBlock.Index) !void {
+        const entry_block = mir.blocks.get(entry_block_index);
+        for (instruction_selection.liveins.keys(), instruction_selection.liveins.values()) |livein_physical_register, livein_virtual_register| {
+            const vr = mir.virtual_registers.get(livein_virtual_register);
+            const destination_operand = Operand{
+                .id = switch (vr.register_class) {
+                    .gp32 => .gp32,
+                    .gp64 => .gp64,
+                    else => |t| @panic(@tagName(t)),
+                },
+                .u = .{
+                    .register = .{
+                        .index = .{
+                            .virtual = livein_virtual_register,
+                        },
+                    },
+                },
+                .flags = .{
+                    .type = .def,
+                },
+            };
+            const source_operand = Operand{
+                .id = destination_operand.id,
+                .u = .{
+                    .register = .{
+                        .index = .{
+                            .physical = livein_physical_register,
+                        },
+                    },
+                },
+                .flags = .{},
+            };
+
+            const instruction_index = try mir.buildInstruction(instruction_selection, .copy, &.{
+                destination_operand,
+                source_operand,
+            });
+
+            try entry_block.instructions.insert(mir.allocator, 0, instruction_index);
+
+            // TODO: addLiveIn MachineBasicBlock ? unreachable;
+        }
+        print("After livein: {}\n", .{instruction_selection.function});
+    }
 };
+
+fn getRegisterClass(register: Register.Physical) Register.Class {
+    _ = register;
+}
 
 const Instruction = struct {
     id: Id,
@@ -1332,6 +1444,7 @@ const Instruction = struct {
         mov64mr,
         mov32ri,
         mov32ri64,
+        movsx64rm32,
         movsx64rr32,
         ret,
         syscall,
@@ -1385,7 +1498,7 @@ const Instruction = struct {
                         .mir = mir,
                     };
 
-                    if (index.valid) {
+                    if (!index.invalid) {
                         const operand = mir.operands.get(index);
                         if ((!arguments.use and operand.flags.type == .use) or (!arguments.def and operand.flags.type == .def)) {
                             it.advance();
@@ -1395,39 +1508,54 @@ const Instruction = struct {
                     return it;
                 }
 
-                fn next(it: *I) switch (arguments.element) {
-                    .instruction => ?*Instruction,
-                    .operand => ?*Operand,
-                } {
-                    if (it.index.valid) {
-                        var operand = it.mir.operands.get(it.index);
-                        switch (arguments.element) {
+                const ReturnValue = switch (arguments.element) {
+                    .instruction => Instruction,
+                    .operand => Operand,
+                };
+
+                fn next(it: *I) ?ReturnValue.Index {
+                    const original_operand_index = it.index;
+                    switch (it.index.invalid) {
+                        false => switch (arguments.element) {
                             .instruction => {
-                                const instruction = operand.parent;
-                                const i_desc = it.mir.instructions.get(instruction);
-                                print("Instruction: {}\n", .{i_desc.id});
+                                const original_operand = it.mir.operands.get(original_operand_index);
+                                const instruction = original_operand.parent;
+                                // const i_desc = it.mir.instructions.get(instruction);
+                                // print("Instruction: {}\n", .{i_desc.id});
                                 while (true) {
                                     it.advance();
-                                    if (!it.index.valid) return null;
-                                    operand = it.mir.operands.get(it.index);
-                                    if (!operand.parent.eq(instruction)) break;
+                                    if (it.index.invalid) break;
+                                    const it_operand = it.mir.operands.get(it.index);
+                                    if (!it_operand.parent.eq(instruction)) break;
                                 }
 
-                                return it.mir.instructions.get(operand.parent);
+                                return instruction;
                             },
-                            .operand => return operand,
-                        }
-                    } else {
-                        return null;
+                            .operand => {
+                                it.advance();
+                                return original_operand_index;
+                            },
+                        },
+                        true => return null,
                     }
                 }
 
+                fn nextPointer(it: *I) ?*ReturnValue {
+                    if (it.next()) |next_index| {
+                        const result = switch (arguments.element) {
+                            .instruction => it.mir.instructions.get(next_index),
+                            .operand => it.mir.operands.get(next_index),
+                        };
+                        return result;
+                    } else return null;
+                }
+
                 fn advance(it: *I) void {
-                    assert(it.index.valid);
+                    assert(!it.index.invalid);
                     it.advanceRaw();
 
                     if (!arguments.use) {
-                        if (it.index.valid) {
+                        if (!it.index.invalid) {
                             const operand = it.mir.operands.get(it.index);
                             if (operand.flags.type == .use) {
                                 it.index = Operand.Index.invalid;
@@ -1436,7 +1564,7 @@ const Instruction = struct {
                             }
                         }
                     } else {
-                        while (it.index.valid) {
+                        while (!it.index.invalid) {
                             const operand = it.mir.operands.get(it.index);
                             if (!arguments.def and operand.flags.type == .def) {
                                 it.advanceRaw();
@@ -1448,7 +1576,7 @@ const Instruction = struct {
                 }
 
                 fn advanceRaw(it: *I) void {
-                    assert(it.index.valid);
+                    assert(!it.index.invalid);
                     const current_operand = it.mir.operands.get(it.index);
                     assert(current_operand.u == .register);
                     const next_index = current_operand.u.register.list.next;
@@ -1480,7 +1608,7 @@ pub const Operand = struct {
 
     fn isOnRegisterUseList(operand: *const Operand) bool {
         assert(operand.u == .register);
-        return operand.u.register.list.previous.valid;
+        return !operand.u.register.list.previous.invalid;
     }
 
     const Id = enum {
@@ -1764,6 +1892,22 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
             .implicit_def = false,
         },
     },
+    .movsx64rm32 = .{
+        .format = .mrm_source_reg,
+        .operands = &.{
+            .{
+                .id = .gp64,
+                .kind = .dst,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+        },
+        .flags = .{
+            .implicit_def = false,
+        },
+    },
     .movsx64rr32 = .{
         .format = .mrm_source_reg,
         .operands = &.{
@@ -1935,11 +2079,15 @@ pub const MIR = struct {
                 var instruction_i: usize = ir_block.instructions.items.len;
                 print("Instruction count: {}\n", .{instruction_i});
 
+                var folded_load = false;
+
                 while (instruction_i > 0) {
                     instruction_i -= 1;
 
                     const ir_instruction_index = ir_block.instructions.items[instruction_i];
                     const ir_instruction = mir.ir.instructions.get(ir_instruction_index);
+
+                    instruction_selection.local_value_map.clearRetainingCapacity();
 
                     print("Instruction #{}\n", .{instruction_i});
 
@@ -1972,7 +2120,9 @@ pub const MIR = struct {
                                     .u = .{
                                         .register = physical_register,
                                     },
-                                    .flags = .{},
+                                    .flags = .{
+                                        .type = .def,
+                                    },
                                 },
                                 Operand{
                                     .id = operand_id,
@@ -2040,73 +2190,134 @@ pub const MIR = struct {
                             const syscall = try mir.buildInstruction(instruction_selection, .syscall, &.{});
                             try instruction_selection.instruction_cache.append(mir.allocator, syscall);
 
-                            const physical_return_register = Register{
-                                .index = .{
-                                    .physical = .rax,
+                            const produce_syscall_return_value = switch (instruction_i == ir_block.instructions.items.len - 2) {
+                                true => blk: {
+                                    const last_block_instruction = mir.ir.instructions.get(ir_block.instructions.items[ir_block.instructions.items.len - 1]);
+                                    break :blk switch (last_block_instruction.*) {
+                                        .@"unreachable" => false,
+                                        else => |t| @panic(@tagName(t)),
+                                    };
                                 },
-                            };
-                            const physical_return_operand = Operand{
-                                .id = .gp64,
-                                .u = .{
-                                    .register = physical_return_register,
-                                },
-                                .flags = .{ .type = .def },
+                                false => true,
                             };
 
-                            const virtual_return_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
-                            const virtual_return_operand = Operand{
-                                .id = .gp64,
-                                .u = .{
-                                    .register = virtual_return_register,
-                                },
-                                .flags = .{ .type = .def },
-                            };
+                            if (produce_syscall_return_value) {
+                                const physical_return_register = Register{
+                                    .index = .{
+                                        .physical = .rax,
+                                    },
+                                };
+                                const physical_return_operand = Operand{
+                                    .id = .gp64,
+                                    .u = .{
+                                        .register = physical_return_register,
+                                    },
+                                    .flags = .{ .type = .def },
+                                };
 
-                            const syscall_result_copy = try mir.buildInstruction(instruction_selection, .copy, &.{
-                                virtual_return_operand,
-                                physical_return_operand,
-                            });
-                            try instruction_selection.instruction_cache.append(mir.allocator, syscall_result_copy);
+                                const virtual_return_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
+                                const virtual_return_operand = Operand{
+                                    .id = .gp64,
+                                    .u = .{
+                                        .register = virtual_return_register,
+                                    },
+                                    .flags = .{ .type = .def },
+                                };
+
+                                const syscall_result_copy = try mir.buildInstruction(instruction_selection, .copy, &.{
+                                    virtual_return_operand,
+                                    physical_return_operand,
+                                });
+                                try instruction_selection.instruction_cache.append(mir.allocator, syscall_result_copy);
+                            }
                         },
                         .sign_extend => |ir_cast_index| {
                             const ir_sign_extend = mir.ir.casts.get(ir_cast_index);
-                            const ir_source_instruction = ir_sign_extend.value;
+                            assert(!folded_load);
+                            const ir_source_instruction = blk: {
+                                var source = ir_sign_extend.value;
+                                const source_instruction = mir.ir.instructions.get(source);
+                                const result = switch (source_instruction.*) {
+                                    .load => b: {
+                                        const load = mir.ir.loads.get(source_instruction.load);
+                                        folded_load = true;
+                                        break :b load.instruction;
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                };
+                                break :blk result;
+                            };
 
                             const destination_type = resolveType(ir_sign_extend.type);
 
-                            const source_register = try instruction_selection.getRegisterForValue(mir, ir_source_instruction);
                             const source_type = resolveType(getIrType(mir.ir, ir_source_instruction));
 
                             if (destination_type != source_type) {
                                 const instruction_id: Instruction.Id = switch (source_type) {
                                     .i32 => switch (destination_type) {
-                                        .i64 => .movsx64rr32,
+                                        .i64 => switch (folded_load) {
+                                            true => .movsx64rm32,
+                                            false => .movsx64rr32,
+                                        },
                                         else => unreachable,
                                     },
                                     else => |t| @panic(@tagName(t)),
                                 };
+
                                 const instruction_descriptor = instruction_descriptors.getPtrConst(instruction_id);
                                 assert(instruction_descriptor.operands.len == 2);
                                 const destination_operand_index = 0;
-                                const source_operand_index = 1;
-                                const source_operand = mir.constrainOperandRegisterClass(instruction_descriptor, source_register, source_operand_index, .{});
                                 const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
                                 const destination_operand = mir.constrainOperandRegisterClass(instruction_descriptor, destination_register, destination_operand_index, .{ .type = .def });
+                                const source_operand_index = 1;
+
+                                const source_operand = switch (folded_load) {
+                                    true => blk: {
+                                        const addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_source_instruction);
+                                        const memory_id: Operand.Id = switch (source_type) {
+                                            .i32 => .i32mem,
+                                            .i64 => .i64mem,
+                                            else => |t| @panic(@tagName(t)),
+                                        };
+                                        const operand = Operand{
+                                            .id = memory_id,
+                                            .u = .{
+                                                .memory = .{
+                                                    .addressing_mode = addressing_mode,
+                                                },
+                                            },
+                                            .flags = .{},
+                                        };
+                                        break :blk operand;
+                                    },
+                                    false => blk: {
+                                        const source_register = try instruction_selection.getRegisterForValue(mir, ir_source_instruction);
+                                        break :blk mir.constrainOperandRegisterClass(instruction_descriptor, source_register, source_operand_index, .{});
+                                    },
+                                };
 
                                 const sign_extend = try mir.buildInstruction(instruction_selection, instruction_id, &.{
                                     destination_operand,
                                     source_operand,
                                 });
+
                                 try instruction_selection.instruction_cache.append(mir.allocator, sign_extend);
+
+                                try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
                             } else {
                                 unreachable;
                             }
                         },
                         .load => |ir_load_index| {
+                            if (folded_load) {
+                                folded_load = false;
+                                continue;
+                            }
+
                             const ir_load = mir.ir.loads.get(ir_load_index);
-                            const ir_destination = ir_load.instruction;
-                            const addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_destination);
-                            const value_type = resolveType(getIrType(mir.ir, ir_destination));
+                            const ir_source = ir_load.instruction;
+                            const addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_source);
+                            const value_type = resolveType(getIrType(mir.ir, ir_source));
 
                             switch (value_type) {
                                 inline .i32,
@@ -2151,6 +2362,8 @@ pub const MIR = struct {
                                         source_operand,
                                     });
                                     try instruction_selection.instruction_cache.append(mir.allocator, load);
+
+                                    try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
                                 },
                                 else => |t| @panic(@tagName(t)),
                             }
@@ -2338,35 +2551,9 @@ pub const MIR = struct {
 
                     instruction_selection.instruction_cache.clearRetainingCapacity();
                 }
-
-                instruction_selection.local_value_map.clearRetainingCapacity();
             }
 
-            // for (ir_function.blocks.items, function.blocks.items) |ir_block_index, block_index| {
-            //     const ir_block = mir.ir.blocks.get(ir_block_index);
-            //     instruction_selection.current_block = block_index;
-            //
-            //     for (ir_block.instructions.items) |ir_instruction_index| {
-            //         const ir_instruction = mir.ir.instructions.get(ir_instruction_index);
-            //         switch (ir_instruction.*) {
-            //             .load_string_literal => |ir_load_string_literal_index| {
-            //                 // const ir_string_literal = mir.ir.string_literals.get(ir_load_string_literal_index);
-            //                 const virtual_register = try mir.createVirtualRegister(Register.Class.gp64);
-            //                 const virtual_operand = Operand.new(.gp64, virtual_register, .{ .type = .def });
-            //                 try mir.append(instruction_selection, .lea64r, &.{
-            //                     virtual_operand,
-            //                     Operand.Lea64Mem.stringLiteral(ir_load_string_literal_index),
-            //                 });
-            //
-            //                 try instruction_selection.updateValueMap(allocator, ir_instruction_index, virtual_register);
-            //             },
-            //             .@"unreachable" => try mir.append(instruction_selection, .ud2, &.{}),
-            //             else => |t| @panic(@tagName(t)),
-            //         }
-            //     }
-            //
-            //     instruction_selection.local_value_map.clearRetainingCapacity();
-            // }
+            try instruction_selection.emitLiveInCopies(mir, function.blocks.items[0]);
 
             print("=========\n{}=========\n", .{function});
         }
@@ -2400,7 +2587,7 @@ pub const MIR = struct {
         const operand = mir.operands.get(operand_index);
         assert(operand.u == .register);
         assert(!std.meta.eql(operand.u.register.index, register));
-        operand.flags.renamable = true;
+        operand.flags.renamable = false;
         mir.removeRegisterOperandFromUseList(instruction_selection, operand);
         operand.u.register.index = register;
         mir.addRegisterOperandFromUseList(instruction_selection, operand_index);
@@ -2412,8 +2599,8 @@ pub const MIR = struct {
         const head_index_ptr = mir.getRegisterListHead(instruction_selection, operand.u.register);
         const head_index = head_index_ptr.*;
 
-        switch (head_index.valid) {
-            true => {
+        switch (head_index.invalid) {
+            false => {
                 const head_operand = mir.operands.get(head_index);
                 assert(std.meta.eql(head_operand.u.register.index, operand.u.register.index));
                 const last_operand_index = head_operand.u.register.list.previous;
@@ -2433,18 +2620,19 @@ pub const MIR = struct {
                     },
                 }
             },
-            false => {
+            true => {
                 operand.u.register.list.previous = operand_index;
                 operand.u.register.list.next = Operand.Index.invalid;
                 head_index_ptr.* = operand_index;
             },
         }
     }
+
     fn removeRegisterOperandFromUseList(mir: *MIR, instruction_selection: *InstructionSelection, operand: *Operand) void {
         assert(operand.isOnRegisterUseList());
         const head_index_ptr = mir.getRegisterListHead(instruction_selection, operand.u.register);
         const head_index = head_index_ptr.*;
-        assert(head_index.valid);
+        assert(!head_index.invalid);
 
         const operand_previous = operand.u.register.list.previous;
         const operand_next = operand.u.register.list.next;
@@ -2457,9 +2645,9 @@ pub const MIR = struct {
             previous.u.register.list.next = operand_next;
         }
 
-        const next = switch (operand_next.valid) {
-            true => mir.operands.get(operand_next),
-            false => head,
+        const next = switch (operand_next.invalid) {
+            false => mir.operands.get(operand_next),
+            true => head,
         };
         next.u.register.list.previous = operand_previous;
 
@@ -2632,7 +2820,7 @@ pub const MIR = struct {
                     break :blk null;
                 };
                 // TODO: handle allocation error here
-                register_allocator.allocateVirtualRegister(mir, instruction_selection, instruction, live_register, hint, false) catch unreachable;
+                register_allocator.allocateVirtualRegister(mir, instruction_selection, instruction_index, live_register, hint, false) catch unreachable;
             }
 
             live_register.last_use = instruction_index;
@@ -2643,12 +2831,10 @@ pub const MIR = struct {
 
         fn isRegisterInClass(register: Register.Physical, register_class: Register.Class) bool {
             const result = std.mem.indexOfScalar(Register.Physical, registers_by_class.get(register_class), register) != null;
-            print("Is {s} in class {s}: {}\n", .{ @tagName(register), @tagName(register_class), result });
             return result;
         }
 
-        fn allocateVirtualRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction: *Instruction, live_register: *LiveRegister, maybe_hint: ?Register, look_at_physical_register_uses: bool) !void {
-            _ = instruction;
+        fn allocateVirtualRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction_index: Instruction.Index, live_register: *LiveRegister, maybe_hint: ?Register, look_at_physical_register_uses: bool) !void {
             assert(live_register.physical == .no_register);
             const virtual_register = live_register.virtual;
             const register_class = mir.virtual_registers.get(live_register.virtual).register_class;
@@ -2656,11 +2842,7 @@ pub const MIR = struct {
             if (maybe_hint) |hint_register| {
                 if (hint_register.index == .physical
                 // TODO : and isAllocatable
-                and isRegisterInClass(hint_register.index.physical, register_class)
-
-                // TODO and !isRegUsedInInstr(Hint0, LookAtPhysRegUses)) {
-
-                ) {
+                and isRegisterInClass(hint_register.index.physical, register_class) and !register_allocator.isRegisterUsedInInstruction(hint_register.index.physical, look_at_physical_register_uses)) {
                     if (register_allocator.register_states.get(hint_register.index.physical) == .free) {
                         register_allocator.assignVirtualToPhysicalRegister(live_register, hint_register.index.physical);
                         return;
@@ -2670,8 +2852,21 @@ pub const MIR = struct {
 
             const maybe_hint2 = register_allocator.traceCopies(mir, instruction_selection, virtual_register);
             if (maybe_hint2) |hint| {
-                _ = hint;
-                unreachable;
+                // TODO
+                const allocatable = true;
+                if (hint == .physical and allocatable and isRegisterInClass(hint.physical, register_class) and !register_allocator.isRegisterUsedInInstruction(hint.physical, look_at_physical_register_uses)) {
+                    const physical_register = hint.physical;
+                    if (register_allocator.register_states.get(physical_register) == .free) {
+                        register_allocator.assignVirtualToPhysicalRegister(live_register, physical_register);
+                        return;
+                    } else {
+                        print("Second hint {s} not free\n", .{@tagName(physical_register)});
+                    }
+                } else {
+                    unreachable;
+                }
+            } else {
+                print("Can't take hint for VR{} for instruction #{}\n", .{ virtual_register.uniqueInteger(), instruction_index.uniqueInteger() });
             }
 
             const register_class_members = registers_by_class.get(register_class);
@@ -2679,16 +2874,14 @@ pub const MIR = struct {
 
             var best_cost: u32 = SpillCost.impossible;
             var best_register = Register.Physical.no_register;
-            print("Candidates for {s}: ", .{@tagName(register_class)});
-            for (register_class_members) |candidate_register| {
-                print("{s}, ", .{@tagName(candidate_register)});
-            }
+            // print("Candidates for {s}: ", .{@tagName(register_class)});
+            // for (register_class_members) |candidate_register| {
+            //     print("{s}, ", .{@tagName(candidate_register)});
+            // }
             print("\n", .{});
             for (register_class_members) |candidate_register| {
-                print("Checking candidate register {s}\n", .{@tagName(candidate_register)});
                 if (register_allocator.isRegisterUsedInInstruction(candidate_register, look_at_physical_register_uses)) continue;
                 const spill_cost = register_allocator.computeSpillCost(candidate_register);
-                print("Spill cost: {}\n", .{spill_cost});
 
                 if (spill_cost == 0) {
                     register_allocator.assignVirtualToPhysicalRegister(live_register, candidate_register);
@@ -2753,8 +2946,43 @@ pub const MIR = struct {
             }
         }
 
-        fn traceCopies(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, virtual_register_index: Register.Virtual.Index) ?Register.Index {
+        fn traceCopyChain(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, register: Register) ?Register.Index {
             _ = register_allocator;
+            const chain_length_limit = 3;
+            _ = chain_length_limit;
+            var chain_try_count: u32 = 0;
+            _ = chain_try_count;
+            while (true) {
+                switch (register.index) {
+                    .physical => return register.index,
+                    .virtual => |vri| {
+                        const virtual_head_index_ptr = mir.getRegisterListHead(instruction_selection, .{
+                            .index = .{
+                                .virtual = vri,
+                            },
+                        });
+
+                        var vdef = Instruction.Iterator.Get(.{
+                            .use = false,
+                            .def = true,
+                            .element = .instruction,
+                        }).new(mir, virtual_head_index_ptr.*);
+
+                        const vdef_instruction = vdef.nextPointer() orelse break;
+                        if (vdef.nextPointer()) |_| break;
+
+                        switch (vdef_instruction.id) {
+                            else => |t| @panic(@tagName(t)),
+                        }
+                        unreachable;
+                    },
+                }
+            }
+
+            return null;
+        }
+
+        fn traceCopies(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, virtual_register_index: Register.Virtual.Index) ?Register.Index {
             const head_index_ptr = mir.getRegisterListHead(instruction_selection, .{
                 .index = .{
                     .virtual = virtual_register_index,
@@ -2766,8 +2994,27 @@ pub const MIR = struct {
                 .element = .instruction,
             }).new(mir, head_index_ptr.*);
 
-            while (define_instructions.next()) |_| {
-                unreachable;
+            const definition_limit = 3;
+            var try_count: u32 = 0;
+            while (define_instructions.next()) |instruction_index| {
+                const instruction = mir.instructions.get(instruction_index);
+                switch (instruction.id) {
+                    .mov32rm => unreachable,
+                    .copy => {
+                        const operand_index = instruction.operands.items[1];
+                        const operand = mir.operands.get(operand_index);
+
+                        if (register_allocator.traceCopyChain(mir, instruction_selection, operand.u.register)) |register| {
+                            return register;
+                        }
+
+                        print("Missed oportunity for register allocation tracing copy chain for VR{}\n", .{virtual_register_index.uniqueInteger()});
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+
+                try_count += 1;
+                if (try_count >= definition_limit) break;
             }
 
             return null;
@@ -2786,9 +3033,16 @@ pub const MIR = struct {
             // TODO: debug info
         }
 
+        fn usePhysicalRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction_index: Instruction.Index, physical_register: Register.Physical) !bool {
+            const displaced_any = try register_allocator.displacePhysicalRegister(mir, instruction_selection, instruction_index, physical_register);
+            register_allocator.register_states.set(physical_register, .preassigned);
+            register_allocator.markUsedRegisterInInstruction(physical_register);
+            return displaced_any;
+        }
+
         fn displacePhysicalRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction_index: Instruction.Index, physical_register: Register.Physical) !bool {
             const state = register_allocator.register_states.getPtr(physical_register);
-            print("Trying to displace register {s} with state {s}\n", .{ @tagName(physical_register), @tagName(state.*) });
+            // print("Trying to displace register {s} with state {s}\n", .{ @tagName(physical_register), @tagName(state.*) });
             return switch (state.*) {
                 .free => false,
                 .preassigned => blk: {
@@ -2799,6 +3053,7 @@ pub const MIR = struct {
                     const live_reg = register_allocator.live_virtual_registers.getPtr(virtual_register).?;
                     const before = mir.getNextInstructionIndex(instruction_index);
                     try register_allocator.reload(mir, instruction_selection, before, virtual_register, physical_register);
+                    state.* = .free;
                     live_reg.physical = .no_register;
                     live_reg.reloaded = true;
                     break :blk true;
@@ -2861,16 +3116,24 @@ pub const MIR = struct {
 
         fn defineVirtualRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction_index: Instruction.Index, operand_index: Operand.Index, virtual_register: Register.Virtual.Index, look_at_physical_register_uses: bool) !bool {
             const instruction = mir.instructions.get(instruction_index);
+            const operand = mir.operands.get(operand_index);
             const gop = try register_allocator.live_virtual_registers.getOrPut(mir.allocator, virtual_register);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{
                     .virtual = virtual_register,
                 };
-                unreachable;
+                if (!operand.flags.dead_or_kill) {
+                    var live_out = false;
+                    if (live_out) {
+                        // TODO
+                    } else {
+                        operand.flags.dead_or_kill = true;
+                    }
+                }
             }
             const live_register = gop.value_ptr;
             if (live_register.physical == .no_register) {
-                try register_allocator.allocateVirtualRegister(mir, instruction_selection, instruction, live_register, null, look_at_physical_register_uses);
+                try register_allocator.allocateVirtualRegister(mir, instruction_selection, instruction_index, live_register, null, look_at_physical_register_uses);
             } else {
                 assert(!register_allocator.isRegisterUsedInInstruction(live_register.physical, look_at_physical_register_uses));
             }
@@ -2881,7 +3144,7 @@ pub const MIR = struct {
                 const instruction_descriptor = instruction_descriptors.get(instruction.id);
                 if (!instruction_descriptor.flags.implicit_def) {
                     const spill_before = mir.getNextInstructionIndex(instruction_index);
-                    const kill = !live_register.last_use.valid;
+                    const kill = live_register.last_use.invalid;
                     try register_allocator.spill(mir, instruction_selection, spill_before, virtual_register, physical_register, kill, live_register.live_out);
 
                     live_register.last_use = Instruction.Index.invalid;
@@ -2950,7 +3213,7 @@ pub const MIR = struct {
 
                 const limit = 8;
                 var count: u32 = 0;
-                while (iterator.next()) |use_instruction| {
+                while (iterator.nextPointer()) |use_instruction| {
                     if (!use_instruction.parent.eq(instruction_selection.current_block)) {
                         register_allocator.may_live_across_blocks.set(virtual_register_index.uniqueInteger());
                         // TODO: return !basic_block.successorsEmpty()
@@ -3041,13 +3304,176 @@ pub const MIR = struct {
     pub fn allocateRegisters(mir: *MIR) !void {
         print("\n[REGISTER ALLOCATION]\n\n", .{});
         const function_count = mir.functions.len;
-        _ = function_count;
         var function_iterator = mir.functions.iterator();
-        _ = function_iterator;
         const register_count = @typeInfo(Register.Physical).Enum.fields.len;
         _ = register_count;
         const register_unit_count = 173;
         _ = register_unit_count;
+
+        for (0..function_count) |function_index| {
+            const function = function_iterator.nextPointer().?;
+            const instruction_selection = &mir.instruction_selections.items[function_index];
+            print("Allocating registers for {}\n", .{function});
+
+            var block_i: usize = function.blocks.items.len;
+            var register_allocator = try RegisterAllocator.init(mir, instruction_selection);
+
+            while (block_i > 0) {
+                block_i -= 1;
+
+                const block_index = function.blocks.items[block_i];
+                const block = mir.blocks.get(block_index);
+
+                var instruction_i: usize = block.instructions.items.len;
+
+                while (instruction_i > 0) {
+                    instruction_i -= 1;
+
+                    const instruction_index = block.instructions.items[instruction_i];
+                    const instruction = mir.instructions.get(instruction_index);
+                    print("===============\nInstruction {} (#{})\n", .{ instruction_i, instruction_index.uniqueInteger() });
+                    print("{}\n", .{function});
+
+                    register_allocator.used_in_instruction = RegisterBitset.initEmpty();
+
+                    const max_operand_count = 32;
+                    var define_bitset = std.StaticBitSet(max_operand_count).initEmpty();
+                    var physical_register_bitset = std.StaticBitSet(max_operand_count).initEmpty();
+                    var register_mask_bitset = std.StaticBitSet(max_operand_count).initEmpty();
+                    var virtual_register_define = false;
+                    var assign_live_throughs = false;
+
+                    for (instruction.operands.items, 0..) |operand_index, operand_i| {
+                        const operand = mir.operands.get(operand_index);
+                        switch (operand.u) {
+                            .register => |register| {
+                                const is_define = operand.flags.type == .def;
+                                const is_physical = register.index == .physical;
+                                if (is_define and !is_physical) {
+                                    virtual_register_define = true;
+                                }
+                                define_bitset.setValue(operand_i, is_define);
+                                physical_register_bitset.setValue(operand_i, is_physical);
+                                if (is_physical and is_define) {
+                                    const physical_register = register.index.physical;
+                                    const displaced_any = try register_allocator.definePhysicalRegister(mir, instruction_selection, instruction_index, physical_register);
+                                    if (!displaced_any) {
+                                        operand.flags.dead_or_kill = true;
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+
+                    if (define_bitset.count() > 0) {
+                        if (virtual_register_define) {
+                            var rearranged_implicit_operands = true;
+                            if (assign_live_throughs) {
+                                unreachable;
+                            } else {
+                                while (rearranged_implicit_operands) {
+                                    rearranged_implicit_operands = false;
+
+                                    for (instruction.operands.items) |operand_index| {
+                                        const operand = mir.operands.get(operand_index);
+                                        switch (operand.u) {
+                                            .register => |register| switch (operand.flags.type) {
+                                                .def => switch (register.index) {
+                                                    .virtual => |virtual_register| {
+                                                        rearranged_implicit_operands = try register_allocator.defineVirtualRegister(mir, instruction_selection, instruction_index, operand_index, virtual_register, false);
+                                                        if (rearranged_implicit_operands) {
+                                                            break;
+                                                        }
+                                                    },
+                                                    .physical => {},
+                                                },
+                                                else => {},
+                                            },
+                                            .lea64mem => |lea64mem| {
+                                                assert(lea64mem.gp64 == null);
+                                                assert(lea64mem.scale_reg == null);
+                                            },
+                                            else => {},
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        var operand_i = instruction.operands.items.len;
+                        while (operand_i > 0) {
+                            operand_i -= 1;
+
+                            if (define_bitset.isSet(operand_i) and physical_register_bitset.isSet(operand_i)) {
+                                const operand_index = instruction.operands.items[operand_i];
+                                const operand = mir.operands.get(operand_index);
+                                const physical_register = operand.u.register.index.physical;
+                                register_allocator.freePhysicalRegister(physical_register);
+                                register_allocator.unmarkUsedRegisterInInstruction(physical_register);
+                            }
+                        }
+                    }
+
+                    if (register_mask_bitset.count() > 0) {
+                        unreachable;
+                    }
+
+                    // Physical register use
+                    if (physical_register_bitset.count() > 0) {
+                        for (instruction.operands.items, 0..) |operand_index, operand_i| {
+                            if (!define_bitset.isSet(operand_i) and physical_register_bitset.isSet(operand_i)) {
+                                const operand = mir.operands.get(operand_index);
+                                const physical_register = operand.u.register.index.physical;
+                                if (!register_allocator.reserved.contains(physical_register)) {
+                                    const displaced_any = try register_allocator.usePhysicalRegister(mir, instruction_selection, instruction_index, physical_register);
+                                    if (!displaced_any) {
+                                        operand.flags.dead_or_kill = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    var rearranged_implicit_operands = true;
+                    while (rearranged_implicit_operands) {
+                        rearranged_implicit_operands = false;
+                        for (instruction.operands.items, 0..) |operand_index, operand_i| {
+                            if (!define_bitset.isSet(operand_i)) {
+                                const operand = mir.operands.get(operand_index);
+                                if (operand.u == .register and operand.u.register.index == .virtual) {
+                                    const virtual_register = operand.u.register.index.virtual;
+                                    rearranged_implicit_operands = try register_allocator.useVirtualRegister(mir, instruction_selection, instruction_index, virtual_register, @intCast(operand_i));
+                                    if (rearranged_implicit_operands) break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (instruction.id == .copy and instruction.operands.items.len == 2) {
+                        const dst_register = mir.operands.get(instruction.operands.items[0]).u.register.index;
+                        const src_register = mir.operands.get(instruction.operands.items[1]).u.register.index;
+
+                        if (std.meta.eql(dst_register, src_register)) {
+                            try register_allocator.coalesced.append(mir.allocator, instruction_index);
+                            print("Avoiding copy...\n", .{});
+                        }
+                    }
+                }
+
+                for (register_allocator.coalesced.items) |coalesced| {
+                    for (block.instructions.items, 0..) |instruction_index, i| {
+                        if (coalesced.eq(instruction_index)) {
+                            const result = block.instructions.orderedRemove(i);
+                            assert(result.eq(coalesced));
+                            break;
+                        }
+                    } else unreachable;
+                }
+
+                print("{}\n============\n", .{function});
+            }
+        }
 
         // for (0..function_count) |function_index| {
         //     const function = function_iterator.nextPointer().?;
@@ -3314,10 +3740,16 @@ pub const MIR = struct {
     }
 
     fn getRegisterListHead(mir: *MIR, instruction_selection: *InstructionSelection, register: Register) *Operand.Index {
-        return switch (register.index) {
-            .physical => |physical| instruction_selection.physical_register_use_or_definition_list.getPtr(physical),
-            .virtual => |virtual_register_index| &mir.virtual_registers.get(virtual_register_index).use_def_list_head,
-        };
+        switch (register.index) {
+            .physical => |physical| {
+                const operand_index = instruction_selection.physical_register_use_or_definition_list.getPtr(physical);
+                return operand_index;
+            },
+            .virtual => |virtual_register_index| {
+                const virtual_register = mir.virtual_registers.get(virtual_register_index);
+                return &virtual_register.use_def_list_head;
+            },
+        }
     }
 
     const Function = struct {
@@ -3338,12 +3770,19 @@ pub const MIR = struct {
                     try writer.print("{s}", .{@tagName(instruction.id)});
                     for (instruction.operands.items, 0..) |operand_index, i| {
                         const operand = function.mir.operands.get(operand_index);
-                        try writer.writeByte(' ');
+                        try writer.print(" O{} ", .{operand_index.uniqueInteger()});
                         switch (operand.u) {
                             .register => |register| {
                                 switch (register.index) {
                                     .physical => |physical| try writer.writeAll(@tagName(physical)),
                                     .virtual => |virtual| try writer.print("VR{}", .{virtual.uniqueInteger()}),
+                                }
+                            },
+                            .memory => |memory| {
+                                const base = memory.addressing_mode.base;
+                                switch (base) {
+                                    .register_base => unreachable,
+                                    .frame_index => |frame_index| try writer.print("SF{}", .{frame_index}),
                                 }
                             },
                             else => try writer.writeAll(@tagName(operand.u)),
@@ -3405,11 +3844,17 @@ pub const MIR = struct {
                 => {},
             }
         }
+
         instruction_allocation.ptr.* = .{
             .id = instruction,
             .operands = list,
             .parent = instruction_selection.current_block,
         };
+
+        if (instruction == .copy) {
+            const i = instruction_allocation.ptr.*;
+            print("Built copy: DST: {}. SRC: {}\n", .{ mir.operands.get(i.operands.items[0]).u.register.index, mir.operands.get(i.operands.items[1]).u.register.index });
+        }
 
         return instruction_allocation.index;
     }

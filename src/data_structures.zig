@@ -40,10 +40,10 @@ pub fn BlockList(comptime T: type) type {
             index: u6,
             block: u24,
             _reserved: bool = false,
-            valid: bool = true,
+            invalid: bool = false,
 
             pub const invalid = Index{
-                .valid = false,
+                .invalid = true,
                 .index = 0,
                 .block = 0,
             };
@@ -53,7 +53,7 @@ pub fn BlockList(comptime T: type) type {
             }
 
             pub fn uniqueInteger(index: Index) u32 {
-                assert(index.valid);
+                assert(!index.invalid);
                 return @as(u30, @truncate(@as(u32, @bitCast(index))));
             }
 
@@ -114,7 +114,7 @@ pub fn BlockList(comptime T: type) type {
         }
 
         pub fn get(list: *List, index: Index) *T {
-            assert(index.valid);
+            assert(!index.invalid);
             return &list.blocks.items[index.block].items[index.index];
         }
 
