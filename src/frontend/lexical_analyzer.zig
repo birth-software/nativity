@@ -11,6 +11,7 @@ const enumFromString = data_structures.enumFromString;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
+const logln = Compilation.logln;
 const fs = @import("../fs.zig");
 
 pub const Token = packed struct(u64) {
@@ -112,6 +113,12 @@ pub const Result = struct {
     time: u64,
 };
 
+pub const Logger = enum {
+    main,
+
+    pub var bitset = std.EnumSet(Logger).initEmpty();
+};
+
 pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !Result {
     _ = file_index;
     const time_start = std.time.Instant.now() catch unreachable;
@@ -134,8 +141,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                 }
 
                 // const identifier = text[start_index..][0 .. index - start_index];
-                // _ = identifier;
-                // std.debug.print("Identifier: {s}\n", .{identifier});
+                // logln("Identifier: {s}", .{identifier});
 
                 if (start_character == 'u' or start_character == 's') {
                     var index_integer = start_index + 1;
@@ -205,11 +211,8 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
         });
     }
 
-    const should_log = true;
-    if (should_log) {
-        for (tokens.items, 0..) |token, i| {
-            std.debug.print("#{} {s}\n", .{ i, @tagName(token.id) });
-        }
+    for (tokens.items, 0..) |token, i| {
+        logln(.lexer, .main, "#{} {s}\n", .{ i, @tagName(token.id) });
     }
 
     const time_end = std.time.Instant.now() catch unreachable;

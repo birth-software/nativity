@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const print = std.debug.print;
+const panic = std.debug.panic;
 const emit = @import("emit.zig");
 const ir = @import("intermediate_representation.zig");
 
@@ -12,7 +12,31 @@ const ArrayList = data_structures.ArrayList;
 const AutoArrayHashMap = data_structures.AutoArrayHashMap;
 const BlockList = data_structures.BlockList;
 
+const log = Compilation.log;
+const logln = Compilation.logln;
+
 const x86_64 = @This();
+
+pub const Logger = enum {
+    register_allocation_new_instructions,
+    instruction_selection_block,
+    instruction_selection_ir_function,
+    instruction_selection_new_instruction,
+    instruction_selection_cache_flush,
+    instruction_selection_mir_function,
+    register_allocation_block,
+    register_allocation_problematic_hint,
+    register_allocation_assignment,
+    register_allocation_reload,
+    register_allocation_function_before,
+    register_allocation_new_instruction,
+    register_allocation_new_instruction_function_before,
+    register_allocation_instruction_avoid_copy,
+    register_allocation_function_after,
+    register_allocation_operand_list_verification,
+
+    pub var bitset = std.EnumSet(Logger).initEmpty();
+};
 
 const Register = struct {
     list: List = .{},
@@ -1008,7 +1032,6 @@ const InstructionSelection = struct {
     fn loadRegisterFromStackSlot(instruction_selection: *InstructionSelection, mir: *MIR, insert_before_instruction_index: usize, destination_register: Register.Physical, frame_index: u32, register_class: Register.Class, virtual_register: Register.Virtual.Index) !void {
         _ = virtual_register;
         const stack_object = instruction_selection.stack_objects.items[frame_index];
-        print("Stack object size: {}\n", .{stack_object.size});
         switch (@divExact(stack_object.size, 8)) {
             @sizeOf(u64) => {
                 switch (register_class) {
@@ -1043,7 +1066,7 @@ const InstructionSelection = struct {
                             destination_operand,
                             source_operand,
                         });
-                        print("Inserting instruction at index {}", .{insert_before_instruction_index});
+                        logln(.codegen, .register_allocation_new_instructions, "Inserting instruction at index {}", .{insert_before_instruction_index});
                         try mir.blocks.get(instruction_selection.current_block).instructions.insert(mir.allocator, insert_before_instruction_index, instruction_index);
                     },
                     else => |t| @panic(@tagName(t)),
@@ -1081,12 +1104,12 @@ const InstructionSelection = struct {
                         destination_operand,
                         source_operand,
                     });
-                    print("Inserting instruction at index {}\n", .{insert_before_instruction_index});
+                    logln(.codegen, .register_allocation_new_instructions, "Inserting instruction at index {}\n", .{insert_before_instruction_index});
                     try mir.blocks.get(instruction_selection.current_block).instructions.insert(mir.allocator, insert_before_instruction_index, instruction_index);
                 },
                 else => |t| @panic(@tagName(t)),
             },
-            else => std.debug.panic("Stack object size: {}\n", .{stack_object.size}),
+            else => panic("Stack object size: {} bits\n", .{stack_object.size}),
         }
     }
 
@@ -1420,7 +1443,6 @@ const InstructionSelection = struct {
 
             // TODO: addLiveIn MachineBasicBlock ? unreachable;
         }
-        print("After livein: {}\n", .{instruction_selection.function});
     }
 };
 
@@ -2001,15 +2023,14 @@ pub const MIR = struct {
     instruction_selections: ArrayList(InstructionSelection) = .{},
     virtual_registers: BlockList(Register.Virtual) = .{},
 
-    pub fn selectInstructions(allocator: Allocator, intermediate: *ir.Result, target: std.Target) !MIR {
-        print("\n[INSTRUCTION SELECTION]\n\n", .{});
-        var mir_stack = MIR{
+    pub fn selectInstructions(allocator: Allocator, intermediate: *ir.Result, target: std.Target) !*MIR {
+        logln(.codegen, .instruction_selection_block, "\n[INSTRUCTION SELECTION]\n\n", .{});
+        const mir = try allocator.create(MIR);
+        mir.* = .{
             .allocator = allocator,
             .ir = intermediate,
             .target = target,
         };
-
-        const mir = &mir_stack;
 
         try mir.blocks.ensureCapacity(allocator, intermediate.blocks.len);
         try mir.functions.ensureCapacity(allocator, intermediate.function_definitions.len);
@@ -2019,7 +2040,7 @@ pub const MIR = struct {
 
         while (function_definition_iterator.nextPointer()) |ir_function| {
             const fn_name = mir.ir.getFunctionName(ir_function.declaration);
-            print("=========\n{}=========\n", .{ir_function});
+            logln(.codegen, .instruction_selection_ir_function, "=========\n{}=========\n", .{ir_function});
 
             const instruction_selection = mir.instruction_selections.addOneAssumeCapacity();
             const function_allocation = try mir.functions.addOne(mir.allocator);
@@ -2065,7 +2086,6 @@ pub const MIR = struct {
 
             try instruction_selection.lowerArguments(mir, ir_function);
 
-            print("Block count: {}\n", .{function.blocks.items.len});
             var block_i: usize = function.blocks.items.len;
 
             while (block_i > 0) {
@@ -2077,7 +2097,6 @@ pub const MIR = struct {
                 const ir_block = mir.ir.blocks.get(ir_block_index);
 
                 var instruction_i: usize = ir_block.instructions.items.len;
-                print("Instruction count: {}\n", .{instruction_i});
 
                 var folded_load = false;
 
@@ -2089,7 +2108,7 @@ pub const MIR = struct {
 
                     instruction_selection.local_value_map.clearRetainingCapacity();
 
-                    print("Instruction #{}\n", .{instruction_i});
+                    logln(.codegen, .instruction_selection_new_instruction, "Instruction #{}\n", .{instruction_i});
 
                     switch (ir_instruction.*) {
                         .ret => |ir_ret_index| {
@@ -2545,7 +2564,7 @@ pub const MIR = struct {
 
                         const instruction_index = instruction_selection.instruction_cache.items[i];
                         const instruction = mir.instructions.get(instruction_index);
-                        print("Inserting instruction #{} ({s}) into index {} (instruction count: {})\n", .{ instruction_index.uniqueInteger(), @tagName(instruction.id), block.current_stack_index, block.instructions.items.len });
+                        logln(.codegen, .instruction_selection_cache_flush, "Inserting instruction #{} ({s}) into index {} (instruction count: {})\n", .{ instruction_index.uniqueInteger(), @tagName(instruction.id), block.current_stack_index, block.instructions.items.len });
                         try block.instructions.insert(mir.allocator, block.current_stack_index, instruction_index);
                     }
 
@@ -2555,10 +2574,10 @@ pub const MIR = struct {
 
             try instruction_selection.emitLiveInCopies(mir, function.blocks.items[0]);
 
-            print("=========\n{}=========\n", .{function});
+            logln(.codegen, .instruction_selection_mir_function, "=========\n{}=========\n", .{function});
         }
 
-        return mir_stack;
+        return mir;
     }
 
     fn getNextInstructionIndex(mir: *MIR, instruction_index: Instruction.Index) usize {
@@ -2783,8 +2802,8 @@ pub const MIR = struct {
                     // TODO: asserts
                     const assert_result = !operand.flags.isKill() or live_register.last_use.eq(instruction_index);
                     if (assert_result) {
-                        print("Existing live register at instruction #{}: {}\n", .{ instruction_index.uniqueInteger(), live_register });
-                        print("Function until now: {}\n", .{instruction_selection.function});
+                        // logln("Existing live register at instruction #{}: {}\n", .{ instruction_index.uniqueInteger(), live_register });
+                        // logln("Function until now: {}\n", .{instruction_selection.function});
                         assert(assert_result);
                     }
                 },
@@ -2860,13 +2879,13 @@ pub const MIR = struct {
                         register_allocator.assignVirtualToPhysicalRegister(live_register, physical_register);
                         return;
                     } else {
-                        print("Second hint {s} not free\n", .{@tagName(physical_register)});
+                        logln(.codegen, .register_allocation_problematic_hint, "Second hint {s} not free\n", .{@tagName(physical_register)});
                     }
                 } else {
                     unreachable;
                 }
             } else {
-                print("Can't take hint for VR{} for instruction #{}\n", .{ virtual_register.uniqueInteger(), instruction_index.uniqueInteger() });
+                logln(.codegen, .register_allocation_problematic_hint, "Can't take hint for VR{} for instruction #{}\n", .{ virtual_register.uniqueInteger(), instruction_index.uniqueInteger() });
             }
 
             const register_class_members = registers_by_class.get(register_class);
@@ -2878,7 +2897,7 @@ pub const MIR = struct {
             // for (register_class_members) |candidate_register| {
             //     print("{s}, ", .{@tagName(candidate_register)});
             // }
-            print("\n", .{});
+            // print("\n", .{});
             for (register_class_members) |candidate_register| {
                 if (register_allocator.isRegisterUsedInInstruction(candidate_register, look_at_physical_register_uses)) continue;
                 const spill_cost = register_allocator.computeSpillCost(candidate_register);
@@ -3008,7 +3027,7 @@ pub const MIR = struct {
                             return register;
                         }
 
-                        print("Missed oportunity for register allocation tracing copy chain for VR{}\n", .{virtual_register_index.uniqueInteger()});
+                        logln(.codegen, .register_allocation_problematic_hint, "Missed oportunity for register allocation tracing copy chain for VR{}\n", .{virtual_register_index.uniqueInteger()});
                     },
                     else => |t| @panic(@tagName(t)),
                 }
@@ -3029,7 +3048,7 @@ pub const MIR = struct {
                 .virtual = virtual_register,
             });
 
-            print("Assigning V{} to {s}\n", .{ virtual_register.uniqueInteger(), @tagName(register) });
+            logln(.codegen, .register_allocation_assignment, "Assigning V{} to {s}\n", .{ virtual_register.uniqueInteger(), @tagName(register) });
             // TODO: debug info
         }
 
@@ -3065,7 +3084,7 @@ pub const MIR = struct {
         fn reload(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, before_index: usize, virtual_register: Register.Virtual.Index, physical_register: Register.Physical) !void {
             const frame_index = try register_allocator.getStackSpaceFor(mir, instruction_selection, virtual_register);
             const register_class = mir.virtual_registers.get(virtual_register).register_class;
-            print("Frame index: {}\n", .{frame_index});
+            logln(.codegen, .register_allocation_reload, "Frame index: {}\n", .{frame_index});
 
             try instruction_selection.loadRegisterFromStackSlot(mir, before_index, physical_register, frame_index, register_class, virtual_register);
         }
@@ -3302,7 +3321,7 @@ pub const MIR = struct {
     }
 
     pub fn allocateRegisters(mir: *MIR) !void {
-        print("\n[REGISTER ALLOCATION]\n\n", .{});
+        logln(.codegen, .register_allocation_block, "[REGISTER ALLOCATION]\n\n", .{});
         const function_count = mir.functions.len;
         var function_iterator = mir.functions.iterator();
         const register_count = @typeInfo(Register.Physical).Enum.fields.len;
@@ -3313,7 +3332,7 @@ pub const MIR = struct {
         for (0..function_count) |function_index| {
             const function = function_iterator.nextPointer().?;
             const instruction_selection = &mir.instruction_selections.items[function_index];
-            print("Allocating registers for {}\n", .{function});
+            logln(.codegen, .register_allocation_function_before, "Allocating registers for {}\n", .{function});
 
             var block_i: usize = function.blocks.items.len;
             var register_allocator = try RegisterAllocator.init(mir, instruction_selection);
@@ -3331,8 +3350,8 @@ pub const MIR = struct {
 
                     const instruction_index = block.instructions.items[instruction_i];
                     const instruction = mir.instructions.get(instruction_index);
-                    print("===============\nInstruction {} (#{})\n", .{ instruction_i, instruction_index.uniqueInteger() });
-                    print("{}\n", .{function});
+                    logln(.codegen, .register_allocation_new_instruction, "===============\nInstruction {} (#{})\n", .{ instruction_i, instruction_index.uniqueInteger() });
+                    logln(.codegen, .register_allocation_new_instruction_function_before, "{}\n", .{function});
 
                     register_allocator.used_in_instruction = RegisterBitset.initEmpty();
 
@@ -3456,7 +3475,7 @@ pub const MIR = struct {
 
                         if (std.meta.eql(dst_register, src_register)) {
                             try register_allocator.coalesced.append(mir.allocator, instruction_index);
-                            print("Avoiding copy...\n", .{});
+                            logln(.codegen, .register_allocation_instruction_avoid_copy, "Avoiding copy...\n", .{});
                         }
                     }
                 }
@@ -3471,7 +3490,7 @@ pub const MIR = struct {
                     } else unreachable;
                 }
 
-                print("{}\n============\n", .{function});
+                logln(.codegen, .register_allocation_function_after, "{}\n============\n", .{function});
             }
         }
 
@@ -3726,7 +3745,7 @@ pub const MIR = struct {
             const instruction_index = operand.parent;
             assert(instruction_index.valid);
             const instruction = mir.instructions.get(instruction_index);
-            print("Verifying instruction #{}, operand #{}\n", .{ instruction_index.uniqueInteger(), mir.operands.indexOf(operand).uniqueInteger() });
+            logln(.codegen, .register_allocation_operand_list_verification, "Verifying instruction #{}, operand #{}\n", .{ instruction_index.uniqueInteger(), mir.operands.indexOf(operand).uniqueInteger() });
             _ = instruction;
             assert(operand.u == .register);
             assert(operand.u.register.index == .virtual and operand.u.register.index.virtual.eq(register));
@@ -3853,7 +3872,8 @@ pub const MIR = struct {
 
         if (instruction == .copy) {
             const i = instruction_allocation.ptr.*;
-            print("Built copy: DST: {}. SRC: {}\n", .{ mir.operands.get(i.operands.items[0]).u.register.index, mir.operands.get(i.operands.items[1]).u.register.index });
+            _ = i;
+            // print("Built copy: DST: {}. SRC: {}\n", .{ mir.operands.get(i.operands.items[0]).u.register.index, mir.operands.get(i.operands.items[1]).u.register.index });
         }
 
         return instruction_allocation.index;

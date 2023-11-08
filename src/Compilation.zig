@@ -3,7 +3,6 @@ const Compilation = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const equal = std.mem.eql;
-const print = std.debug.print;
 
 const Allocator = std.mem.Allocator;
 
@@ -40,7 +39,104 @@ build_directory: std.fs.Dir,
 const cache_dir_name = "cache";
 const installation_dir_name = "installation";
 
-pub fn init(allocator: Allocator) !*Compilation {
+const ArgumentParsingError = error{
+    main_package_path_not_specified,
+};
+
+fn reportUnterminatedArgumentError(string: []const u8) noreturn {
+    std.debug.panic("Unterminated argument: {s}", .{string});
+}
+
+fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
+    const arguments = (try std.process.argsAlloc(allocator))[1..];
+
+    var maybe_executable_path: ?[]const u8 = null;
+    var maybe_main_package_path: ?[]const u8 = null;
+    var target_triplet: []const u8 = "x86_64-linux-gnu";
+
+    var i: usize = 0;
+    while (i < arguments.len) : (i += 1) {
+        const current_argument = arguments[i];
+        if (equal(u8, current_argument, "-o")) {
+            if (i + 1 != arguments.len) {
+                maybe_executable_path = arguments[i + 1];
+                assert(maybe_executable_path.?.len != 0);
+                i += 1;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-target")) {
+            if (i + 1 != arguments.len) {
+                target_triplet = arguments[i + 1];
+                i += 1;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-log")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                var log_argument_iterator = std.mem.splitScalar(u8, arguments[i], ',');
+
+                while (log_argument_iterator.next()) |log_argument| {
+                    var log_argument_splitter = std.mem.splitScalar(u8, log_argument, '.');
+                    const log_scope_candidate = log_argument_splitter.next() orelse unreachable;
+                    var recognized_scope = false;
+
+                    inline for (@typeInfo(LoggerScope).Enum.fields) |logger_scope_enum_field| {
+                        const log_scope = @field(LoggerScope, logger_scope_enum_field.name);
+
+                        if (equal(u8, @tagName(log_scope), log_scope_candidate)) {
+                            const LogScope = getLoggerScopeType(log_scope);
+
+                            if (log_argument_splitter.next()) |particular_log_candidate| {
+                                var recognized_particular = false;
+                                inline for (@typeInfo(LogScope.Logger).Enum.fields) |particular_log_field| {
+                                    const particular_log = @field(LogScope.Logger, particular_log_field.name);
+
+                                    if (equal(u8, particular_log_candidate, @tagName(particular_log))) {
+                                        LogScope.Logger.bitset.setPresent(particular_log, true);
+                                        recognized_particular = true;
+                                    }
+                                } else if (!recognized_particular) std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
+                            } else {
+                                unreachable;
+                            }
+
+                            logger_bitset.setPresent(log_scope, true);
+
+                            recognized_scope = true;
+                        }
+                    } else if (!recognized_scope) std.debug.panic("Unrecognized log scope: {s}", .{log_scope_candidate});
+                }
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else {
+            maybe_main_package_path = current_argument;
+        }
+    }
+
+    const main_package_path = maybe_main_package_path orelse return error.main_package_path_not_specified;
+
+    const executable_path = maybe_executable_path orelse blk: {
+        const executable_name = std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
+        assert(executable_name.len > 0);
+        const result = try std.mem.concat(allocator, u8, &.{ "nat/", executable_name });
+        break :blk result;
+    };
+
+    const cross_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = target_triplet });
+    const target = cross_target.toTarget();
+
+    return .{
+        .main_package_path = main_package_path,
+        .executable_path = executable_path,
+        .target = target,
+    };
+}
+
+pub fn init(allocator: Allocator) !void {
     const compilation: *Compilation = try allocator.create(Compilation);
 
     const self_exe_path = try std.fs.selfExePathAlloc(allocator);
@@ -56,7 +152,9 @@ pub fn init(allocator: Allocator) !*Compilation {
     try compilation.build_directory.makePath(cache_dir_name);
     try compilation.build_directory.makePath(installation_dir_name);
 
-    return compilation;
+    const compilation_descriptor = try parseArguments(allocator);
+
+    try compilation.compileModule(compilation_descriptor);
 }
 
 pub const Struct = struct {
@@ -617,7 +715,7 @@ pub const Module = struct {
     };
 
     pub fn importFile(module: *Module, allocator: Allocator, current_file_index: File.Index, import_name: []const u8) !ImportPackageResult {
-        print("import: '{s}'\n", .{import_name});
+        logln(.compilation, .import, "import: '{s}'\n", .{import_name});
         if (equal(u8, import_name, "std")) {
             return module.importPackage(allocator, module.main_package.dependencies.get("std").?);
         }
@@ -672,7 +770,7 @@ pub const Module = struct {
                     .relative_path = relative_path,
                     .package = package,
                 });
-                std.debug.print("Adding file #{}: {s}\n", .{ file_allocation.index.uniqueInteger(), full_path });
+                logln(.compilation, .new_file, "Adding file #{}: {s}\n", .{ file_allocation.index.uniqueInteger(), full_path });
                 path_lookup.value_ptr.* = file_allocation.ptr;
                 // break :blk file;
                 break :blk .{
@@ -691,7 +789,7 @@ pub const Module = struct {
 
     pub fn importPackage(module: *Module, allocator: Allocator, package: *Package) !ImportPackageResult {
         const full_path = try std.fs.path.resolve(allocator, &.{ package.directory.path, package.source_path });
-        print("Import full path: {s}\n", .{full_path});
+        logln(.compilation, .import, "Import full path: {s}\n", .{full_path});
         const import_file = try module.getFile(allocator, full_path, package.source_path, package);
         try import_file.ptr.addPackageReference(allocator, package);
 
@@ -719,9 +817,7 @@ pub const Module = struct {
         file.status = .loaded_into_memory;
 
         try file.lex(allocator, file_index);
-        print("Start of parsing file #{}\n", .{file_index.uniqueInteger()});
         try file.parse(allocator, file_index);
-        print("End of parsing file #{}\n", .{file_index.uniqueInteger()});
     }
 
     fn getString(map: *StringKeyMap([]const u8), key: u32) ?[]const u8 {
@@ -1020,3 +1116,57 @@ pub const File = struct {
         file.status = .parsed;
     }
 };
+
+pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
+    std.builtin.default_panic(message, stack_trace, return_address);
+}
+
+const LoggerScope = enum {
+    compilation,
+    lexer,
+    parser,
+    sema,
+    ir,
+    codegen,
+};
+
+const Logger = enum {
+    import,
+    new_file,
+    arguments,
+    var bitset = std.EnumSet(Logger).initEmpty();
+};
+
+fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
+    comptime {
+        return switch (logger_scope) {
+            .compilation => @This(),
+            .lexer => lexical_analyzer,
+            .parser => syntactic_analyzer,
+            .sema => semantic_analyzer,
+            .ir => intermediate_representation,
+            .codegen => emit,
+        };
+    }
+}
+
+var logger_bitset = std.EnumSet(LoggerScope).initEmpty();
+
+var writer = std.io.getStdErr().writer();
+
+fn shouldLog(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger) bool {
+    return logger_bitset.contains(logger_scope) and getLoggerScopeType(logger_scope).Logger.bitset.contains(logger);
+}
+
+pub fn logln(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger, comptime format: []const u8, arguments: anytype) void {
+    if (shouldLog(logger_scope, logger)) {
+        log(logger_scope, logger, format, arguments);
+        writer.writeByte('\n') catch unreachable;
+    }
+}
+
+pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger, comptime format: []const u8, arguments: anytype) void {
+    if (shouldLog(logger_scope, logger)) {
+        std.fmt.format(writer, format, arguments) catch unreachable;
+    }
+}

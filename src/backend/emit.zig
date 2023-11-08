@@ -105,10 +105,15 @@ pub fn InstructionSelector(comptime Instruction: type) type {
     };
 }
 
+const x86_64 = @import("x86_64.zig");
+const aarch64 = @import("aarch64.zig");
+
+pub const Logger = x86_64.Logger;
+
 pub fn get(comptime arch: std.Target.Cpu.Arch) type {
     const backend = switch (arch) {
-        .x86_64 => @import("x86_64.zig"),
-        .aarch64 => @import("aarch64.zig"),
+        .x86_64 => x86_64,
+        .aarch64 => aarch64,
         else => {},
     };
 
@@ -138,10 +143,8 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
             // switch (@import("builtin").os.tag) {
             //     .linux => switch (@import("builtin").cpu.arch == arch) {
             //         true => {
-            //             std.debug.print("Executing...\n", .{});
             //             const entryPoint = result.getEntryPoint(fn () callconv(.SysV) noreturn);
             //             entryPoint();
-            //             std.debug.print("This should not print...\n", .{});
             //         },
             //         false => {},
             //     },

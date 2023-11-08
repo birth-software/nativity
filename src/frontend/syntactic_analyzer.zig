@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const equal = std.mem.eql;
-const log = std.log;
 
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
@@ -14,6 +13,8 @@ const Token = lexical_analyzer.Token;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
+const log = Compilation.log;
+const logln = Compilation.logln;
 
 pub const Result = struct {
     nodes: ArrayList(Node),
@@ -23,6 +24,21 @@ pub const Result = struct {
 
 pub const Options = packed struct {
     is_comptime: bool,
+};
+
+pub const Logger = enum {
+    token_errors,
+    symbol_declaration,
+    node_creation,
+    main_node,
+    container_members,
+    block,
+    assign,
+    suffix,
+    precedence,
+    @"switch",
+
+    pub var bitset = std.EnumSet(Logger).initEmpty();
 };
 
 // TODO: pack it to be more efficient
@@ -153,7 +169,7 @@ const Analyzer = struct {
             const result = token_i;
             return result;
         } else {
-            std.debug.print("Unexpected token {s} when expected {s}\n", .{ @tagName(token.id), @tagName(token_id) });
+            logln(.parser, .token_errors, "Unexpected token {s} when expected {s}\n", .{ @tagName(token.id), @tagName(token_id) });
             return error.unexpected_token;
         }
     }
@@ -169,9 +185,9 @@ const Analyzer = struct {
         analyzer.token_i += 1;
         const declaration_name_token = try analyzer.expectToken(.identifier);
         const declaration_name = analyzer.bytes(declaration_name_token);
-        std.debug.print("Starting parsing declaration \"{s}\"\n", .{declaration_name});
+        logln(.parser, .symbol_declaration, "Starting parsing declaration \"{s}\"", .{declaration_name});
 
-        std.debug.print("Current token: {}\n", .{analyzer.tokens[analyzer.token_i].id});
+        logln(.parser, .symbol_declaration, "Current token: {}", .{analyzer.tokens[analyzer.token_i].id});
 
         const type_node_index = switch (analyzer.tokens[analyzer.token_i].id) {
             .colon => blk: {
@@ -199,37 +215,37 @@ const Analyzer = struct {
             .right = init_node_index,
         };
 
-        std.debug.print("Adding declaration \"{s}\" with init node of type: {s}\n", .{ declaration_name, @tagName(init_node.id) });
+        logln(.parser, .symbol_declaration, "Adding declaration \"{s}\" with init node of type: {s}", .{ declaration_name, @tagName(init_node.id) });
         // if (analyzer.token_i < analyzer.tokens.len) {
         //     const first_token = analyzer.tokens[first];
         //     const last_token = analyzer.tokens[analyzer.token_i];
         //     const declaration_source_start = first_token.start;
         //     const declaration_source_end = last_token.start;
         //
-        //     std.debug.print("[ALL]\n", .{});
-        //     std.debug.print("Source file ({} bytes) :\n```\n{s}\n```\n", .{ analyzer.source_file.len, analyzer.source_file });
+        //     logln("[ALL]\n", .{});
+        //     logln("Source file ({} bytes) :\n```\n{s}\n```\n", .{ analyzer.source_file.len, analyzer.source_file });
         //
-        //     std.debug.print("[BEFORE]\n", .{});
+        //     logln("[BEFORE]\n", .{});
         //
-        //     std.debug.print("Tokens before the declaration: ", .{});
+        //     logln("Tokens before the declaration: ", .{});
         //     for (analyzer.tokens[0..first]) |t| {
-        //         std.debug.print("{s} ", .{@tagName(t.id)});
+        //         logln("{s} ", .{@tagName(t.id)});
         //     }
-        //     std.debug.print("\n", .{});
-        //     std.debug.print("Source before the declaration:\n```\n{s}\n```\n", .{analyzer.source_file[0..analyzer.tokens[first].start]});
-        //     std.debug.print("[DECLARATION]\n", .{});
+        //     logln("\n", .{});
+        //     logln("Source before the declaration:\n```\n{s}\n```\n", .{analyzer.source_file[0..analyzer.tokens[first].start]});
+        //     logln("[DECLARATION]\n", .{});
         //
-        //     std.debug.print("First token: {}\n", .{first_token});
-        //     std.debug.print("Last token: {}\n", .{last_token});
+        //     logln("First token: {}\n", .{first_token});
+        //     logln("Last token: {}\n", .{last_token});
         //
-        //     std.debug.print("Tokens including declaration ([{}-{}])", .{ first, analyzer.token_i });
+        //     logln("Tokens including declaration ([{}-{}])", .{ first, analyzer.token_i });
         //     for (analyzer.tokens[first..][0 .. analyzer.token_i - first]) |t| {
-        //         std.debug.print("{s} ", .{@tagName(t.id)});
+        //         logln("{s} ", .{@tagName(t.id)});
         //     }
-        //     std.debug.print("\n", .{});
+        //     logln("\n", .{});
         //
-        //     std.debug.print("Source for the declaration:\n```\n{s}\n```\n", .{analyzer.source_file[declaration_source_start..declaration_source_end]});
-        //     std.debug.print("[AFTER]\n", .{});
+        //     logln("Source for the declaration:\n```\n{s}\n```\n", .{analyzer.source_file[declaration_source_start..declaration_source_end]});
+        //     logln("[AFTER]\n", .{});
         //
         //     // TODO
         //     // print("Tokens for file #{}\n", .{analyzer.
@@ -245,7 +261,7 @@ const Analyzer = struct {
 
         while (analyzer.token_i < analyzer.tokens.len) {
             const first = analyzer.token_i;
-            std.debug.print("First token for container member: {s}\n", .{@tagName(analyzer.tokens[first].id)});
+            logln(.parser, .container_members, "First token for container member: {s}", .{@tagName(analyzer.tokens[first].id)});
             const member_node_index: Node.Index = switch (analyzer.tokens[first].id) {
                 .fixed_keyword_comptime => switch (analyzer.tokens[analyzer.token_i + 1].id) {
                     .left_brace => blk: {
@@ -265,7 +281,7 @@ const Analyzer = struct {
                 else => |t| @panic(@tagName(t)),
             };
 
-            std.debug.print("Container member {s}\n", .{@tagName(analyzer.nodes.items[member_node_index.unwrap()].id)});
+            logln(.parser, .container_members, "Container member {s}", .{@tagName(analyzer.nodes.items[member_node_index.unwrap()].id)});
 
             try analyzer.temporal_node_heap.append(analyzer.allocator, member_node_index);
         }
@@ -373,7 +389,7 @@ const Analyzer = struct {
             const type_expression = try analyzer.typeExpression();
             // const type_expression_node = analyzer.nodes.items[type_expression.unwrap()];
             // _ = type_expression_node;
-            // std.debug.print("Type expression node: {}\n", .{type_expression_node});
+            // logln("Type expression node: {}\n", .{type_expression_node});
             foo = true;
 
             if (analyzer.tokens[analyzer.token_i].id == .comma) {
@@ -410,7 +426,7 @@ const Analyzer = struct {
 
         while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
             const first_statement_token = analyzer.tokens[analyzer.token_i];
-            std.debug.print("First statement token: {s}\n", .{@tagName(first_statement_token.id)});
+            logln(.parser, .block, "First statement token: {s}\n", .{@tagName(first_statement_token.id)});
             const statement_index = switch (first_statement_token.id) {
                 .identifier => switch (analyzer.tokens[analyzer.token_i + 1].id) {
                     .colon => {
@@ -428,7 +444,7 @@ const Analyzer = struct {
             };
 
             const node = analyzer.nodes.items[statement_index.unwrap()];
-            std.debug.print("Adding statement: {s}\n", .{@tagName(node.id)});
+            logln(.parser, .block, "Adding statement: {s}\n", .{@tagName(node.id)});
 
             try analyzer.temporal_node_heap.append(analyzer.allocator, statement_index);
         }
@@ -497,20 +513,20 @@ const Analyzer = struct {
     }
 
     fn switchExpression(analyzer: *Analyzer) anyerror!Node.Index {
-        std.debug.print("Parsing switch...\n", .{});
+        logln(.parser, .@"switch", "Parsing switch...\n", .{});
         const switch_token = analyzer.token_i;
         analyzer.token_i += 1;
         _ = try analyzer.expectToken(.left_parenthesis);
         const switch_expression = try analyzer.expression();
         _ = try analyzer.expectToken(.right_parenthesis);
-        std.debug.print("Parsed switch expression...\n", .{});
+        logln(.parser, .@"switch", "Parsed switch expression...\n", .{});
         _ = try analyzer.expectToken(.left_brace);
 
         var list = Node.List{};
 
         while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
             const case_token = analyzer.token_i;
-            std.debug.print("Parsing switch case...\n", .{});
+            logln(.parser, .@"switch", "Parsing switch case...\n", .{});
             const case_node = switch (analyzer.tokens[case_token].id) {
                 .fixed_keyword_else => blk: {
                     analyzer.token_i += 1;
@@ -621,7 +637,8 @@ const Analyzer = struct {
             .left = expr,
             .right = try analyzer.expression(),
         };
-        std.debug.print("assign:\nleft: {}.\nright: {}\n", .{ node.left, node.right });
+
+        logln(.parser, .assign, "assign:\nleft: {}.\nright: {}\n", .{ node.left, node.right });
         return try analyzer.addNode(node);
     }
 
@@ -679,14 +696,14 @@ const Analyzer = struct {
         var result = try analyzer.prefixExpression();
         if (!result.invalid) {
             const prefix_node = analyzer.nodes.items[result.unwrap()];
-            std.debug.print("Prefix: {}\n", .{prefix_node.id});
+            logln(.parser, .precedence, "Prefix: {}\n", .{prefix_node.id});
         }
 
         var banned_precedence: i32 = -1;
 
         while (analyzer.token_i < analyzer.tokens.len) {
             const token = analyzer.tokens[analyzer.token_i];
-            // std.debug.print("Looping in expression precedence with token {}\n", .{token});
+            // logln("Looping in expression precedence with token {}\n", .{token});
             const precedence: i32 = switch (token.id) {
                 .equal, .semicolon, .right_parenthesis, .right_brace, .comma, .period, .fixed_keyword_const, .fixed_keyword_var => -1,
                 .bang => switch (analyzer.tokens[analyzer.token_i + 1].id) {
@@ -695,19 +712,19 @@ const Analyzer = struct {
                 },
                 else => |t| {
                     const start = token.start;
-                    std.debug.print("Source file:\n```\n{s}\n```\n", .{analyzer.source_file[start..]});
+                    logln(.parser, .precedence, "Source file:\n```\n{s}\n```\n", .{analyzer.source_file[start..]});
                     @panic(@tagName(t));
                 },
             };
-            std.debug.print("Precedence: {} ({s}) (file #{})\n", .{ precedence, @tagName(token.id), analyzer.file_index.uniqueInteger() });
+            logln(.parser, .precedence, "Precedence: {} ({s}) (file #{})\n", .{ precedence, @tagName(token.id), analyzer.file_index.uniqueInteger() });
 
             if (precedence < minimum_precedence) {
-                std.debug.print("Breaking for minimum_precedence\n", .{});
+                logln(.parser, .precedence, "Breaking for minimum_precedence\n", .{});
                 break;
             }
 
             if (precedence == banned_precedence) {
-                std.debug.print("Breaking for banned precedence\n", .{});
+                logln(.parser, .precedence, "Breaking for banned precedence\n", .{});
                 break;
             }
 
@@ -747,7 +764,7 @@ const Analyzer = struct {
 
     fn prefixExpression(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
-        // std.debug.print("Prefix...\n", .{});
+        // logln("Prefix...\n", .{});
         const node_id: Node.Id = switch (analyzer.tokens[token].id) {
             else => |pref| {
                 _ = pref;
@@ -792,10 +809,7 @@ const Analyzer = struct {
             }),
             // todo:?
             .left_brace => try analyzer.block(.{ .is_comptime = false }),
-            else => |id| {
-                log.warn("By default, calling curlySuffixExpression with {s}", .{@tagName(id)});
-                unreachable;
-            },
+            else => |id| std.debug.panic("WARN: By default, calling curlySuffixExpression with {s}", .{@tagName(id)}),
         };
 
         return result;
@@ -916,13 +930,13 @@ const Analyzer = struct {
                     var expression_list = ArrayList(Node.Index){};
                     while (analyzer.tokens[analyzer.token_i].id != .right_parenthesis) {
                         const current_token = analyzer.tokens[analyzer.token_i];
-                        std.debug.print("Current token: {s}\n", .{@tagName(current_token.id)});
+                        logln(.parser, .suffix, "Current token: {s}\n", .{@tagName(current_token.id)});
                         const parameter = try analyzer.expression();
                         try expression_list.append(analyzer.allocator, parameter);
                         const parameter_node = analyzer.nodes.items[parameter.unwrap()];
-                        std.debug.print("Paremeter node: {s}\n", .{@tagName(parameter_node.id)});
+                        logln(.parser, .suffix, "Paremeter node: {s}\n", .{@tagName(parameter_node.id)});
                         const next_token = analyzer.tokens[analyzer.token_i];
-                        std.debug.print("next token: {s}\n", .{@tagName(next_token.id)});
+                        logln(.parser, .suffix, "next token: {s}\n", .{@tagName(next_token.id)});
                         analyzer.token_i += @intFromBool(switch (next_token.id) {
                             .comma => true,
                             .colon, .right_brace, .right_bracket => unreachable,
@@ -988,7 +1002,7 @@ const Analyzer = struct {
                 .colon => unreachable,
                 else => blk: {
                     const identifier = analyzer.bytes(token_i);
-                    // std.debug.print("identifier: {s}\n", .{identifier});
+                    // logln("identifier: {s}\n", .{identifier});
                     analyzer.token_i += 1;
                     if (equal(u8, identifier, "_")) {
                         break :blk Node.Index.invalid;
@@ -1122,7 +1136,7 @@ const Analyzer = struct {
                         const right_token = analyzer.token_i;
                         analyzer.token_i += 1;
                         const result: Node.Index = @bitCast(right_token);
-                        std.debug.print("WARNING: rhs has node index {} but it's token #{}\n", .{ result, right_token });
+                        logln(.parser, .suffix, "WARNING: rhs has node index {} but it's token #{}\n", .{ result, right_token });
                         break :blk result;
                     },
                 }),
@@ -1135,13 +1149,10 @@ const Analyzer = struct {
     fn addNode(analyzer: *Analyzer, node: Node) !Node.Index {
         const index = analyzer.nodes.items.len;
         try analyzer.nodes.append(analyzer.allocator, node);
-        std.debug.print("Adding node #{} (0x{x}) {s} to file #{}\n", .{ index, @intFromPtr(&analyzer.nodes.items[index]), @tagName(node.id), analyzer.file_index.uniqueInteger() });
+        logln(.parser, .node_creation, "Adding node #{} (0x{x}) {s} to file #{}\n", .{ index, @intFromPtr(&analyzer.nodes.items[index]), @tagName(node.id), analyzer.file_index.uniqueInteger() });
         // if (node.id == .identifier) {
-        //     std.debug.print("Node identifier: {s}\n", .{analyzer.bytes(node.token)});
+        //     logln("Node identifier: {s}\n", .{analyzer.bytes(node.token)});
         // }
-        if (node.id == .call) {
-            std.debug.print("Call two: {}\n", .{node});
-        }
         return Node.Index{
             .value = @intCast(index),
         };
@@ -1185,9 +1196,9 @@ pub fn analyze(allocator: Allocator, tokens: []const Token, source_file: []const
     assert(node_index.value == 0);
     assert(!node_index.invalid);
 
-    std.debug.print("Start Parsing file root members\n", .{});
+    logln(.parser, .main_node, "Start Parsing file root members\n", .{});
     const members = try analyzer.containerMembers();
-    std.debug.print("End Parsing file root members\n", .{});
+    logln(.parser, .main_node, "End Parsing file root members\n", .{});
 
     switch (members.len) {
         0 => analyzer.nodes.items[0].id = .main_zero,

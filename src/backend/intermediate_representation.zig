@@ -1,9 +1,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-const print = std.debug.print;
 
 const Compilation = @import("../Compilation.zig");
+const log = Compilation.log;
+const logln = Compilation.logln;
 const Module = Compilation.Module;
 const Package = Compilation.Package;
 
@@ -13,6 +14,13 @@ const BlockList = data_structures.BlockList;
 const AutoArrayHashMap = data_structures.AutoArrayHashMap;
 const AutoHashMap = data_structures.AutoHashMap;
 const StringKeyMap = data_structures.StringKeyMap;
+
+pub const Logger = enum {
+    function,
+    phi_removal,
+
+    pub var bitset = std.EnumSet(Logger).initEmpty();
+};
 
 pub const Result = struct {
     blocks: BlockList(BasicBlock) = .{},
@@ -398,6 +406,7 @@ pub const Builder = struct {
         };
 
         const function_decl_name = builder.ir.getFunctionName(function_declaration_allocation.index);
+        _ = function_decl_name;
 
         if (sema_prototype.arguments) |sema_arguments| {
             try function_declaration.arguments.ensureTotalCapacity(builder.allocator, @intCast(sema_arguments.len));
@@ -429,9 +438,6 @@ pub const Builder = struct {
 
                 const return_type = builder.module.types.get(sema_prototype.return_type);
                 const is_noreturn = return_type.* == .noreturn;
-                if (std.mem.eql(u8, function_decl_name, "print")) {
-                    print("WTDASDAS", .{});
-                }
 
                 if (!is_noreturn) {
                     const exit_block = try builder.newBlock();
@@ -545,7 +551,7 @@ pub const Builder = struct {
 
     fn optimizeFunction(builder: *Builder, function: *Function) !void {
         // HACK
-        print("\n[BEFORE OPTIMIZE]:\n{}", .{function});
+        logln(.ir, .function, "\n[BEFORE OPTIMIZE]:\n{}", .{function});
         var reachable_blocks = try builder.findReachableBlocks(function.blocks.items[0]);
         var did_something = true;
 
@@ -616,7 +622,7 @@ pub const Builder = struct {
             }
         }
 
-        print("[AFTER OPTIMIZE]:\n{}", .{function});
+        logln(.ir, .function, "[AFTER OPTIMIZE]:\n{}", .{function});
     }
 
     fn removeUnreachablePhis(builder: *Builder, reachable_blocks: []const BasicBlock.Index, instruction_index: Instruction.Index) !bool {
@@ -686,7 +692,7 @@ pub const Builder = struct {
                             };
                         }
                     } else {
-                        print("TODO: maybe this phi removal is wrong?", .{});
+                        logln(.ir, .phi_removal, "TODO: maybe this phi removal is wrong?", .{});
                         instruction.* = .{
                             .copy = trivial_value,
                         };
@@ -957,7 +963,7 @@ pub const Builder = struct {
                 },
                 .declaration => |sema_declaration_index| {
                     const sema_declaration = builder.module.declarations.get(sema_declaration_index);
-                    print("Name: {s}\n", .{builder.module.getName(sema_declaration.name).?});
+                    //logln("Name: {s}\n", .{builder.module.getName(sema_declaration.name).?});
                     assert(sema_declaration.scope_type == .local);
                     const declaration_type = builder.module.types.get(sema_declaration.type);
                     switch (declaration_type.*) {

@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const equal = std.mem.eql;
+const panic = std.debug.panic;
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
 const Module = Compilation.Module;
@@ -23,6 +24,23 @@ const Struct = Compilation.Struct;
 const Type = Compilation.Type;
 const Value = Compilation.Value;
 
+const log = Compilation.log;
+const logln = Compilation.logln;
+
+pub const Logger = enum {
+    type,
+    identifier,
+    symbol_declaration,
+    scope_node,
+    node,
+    typecheck,
+    @"switch",
+    block,
+    call,
+
+    pub var bitset = std.EnumSet(Logger).initEmpty();
+};
+
 const lexical_analyzer = @import("lexical_analyzer.zig");
 const Token = lexical_analyzer.Token;
 
@@ -34,8 +52,6 @@ const SymbolDeclaration = syntactic_analyzer.SymbolDeclaration;
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
 const HashMap = data_structures.AutoHashMap;
-
-const print = std.debug.print;
 
 const Analyzer = struct {
     allocator: Allocator,
@@ -52,7 +68,7 @@ const Analyzer = struct {
         const scope = analyzer.module.scopes.get(scope_index);
         const file = analyzer.module.files.get(scope.file);
         const result = &file.syntactic_analyzer_result.nodes.items[node_index.unwrap()];
-        print("Fetching node #{} (0x{x}) from scope #{} from file #{} with id: {s}\n", .{ node_index.uniqueInteger(), @intFromPtr(result), scope_index.uniqueInteger(), scope.file.uniqueInteger(), @tagName(result.id) });
+        logln(.sema, .scope_node, "Fetching node #{} (0x{x}) from scope #{} from file #{} with id: {s}\n", .{ node_index.uniqueInteger(), @intFromPtr(result), scope_index.uniqueInteger(), scope.file.uniqueInteger(), @tagName(result.id) });
         return result.*;
     }
 
@@ -116,7 +132,7 @@ const Analyzer = struct {
     }
 
     fn block(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) anyerror!Block.Index {
-        print("Resolving block from scope #{} in file #{}\n", .{ scope_index.uniqueInteger(), analyzer.module.scopes.get(scope_index).file.uniqueInteger() });
+        logln(.sema, .block, "Resolving block from scope #{} in file #{}\n", .{ scope_index.uniqueInteger(), analyzer.module.scopes.get(scope_index).file.uniqueInteger() });
         var reaches_end = true;
         const block_node = analyzer.getScopeNode(scope_index, node_index);
         var statement_nodes = ArrayList(Node.Index){};
@@ -138,7 +154,8 @@ const Analyzer = struct {
             .block, .block_zero, .block_one, .block_two => false,
             else => |t| @panic(@tagName(t)),
         };
-        print("Is comptime: {}\n", .{is_comptime});
+
+        logln(.sema, .block, "Is comptime: {}\n", .{is_comptime});
 
         var statements = ArrayList(Value.Index){};
 
@@ -213,7 +230,7 @@ const Analyzer = struct {
 
     fn processCall(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Call.Index {
         const node = analyzer.getScopeNode(scope_index, node_index);
-        print("Node index: {}. Left index: {}\n", .{ node_index.uniqueInteger(), node.left.uniqueInteger() });
+        logln(.sema, .call, "Node index: {}. Left index: {}\n", .{ node_index.uniqueInteger(), node.left.uniqueInteger() });
         assert(!node.left.invalid);
         const left_value_index = switch (!node.left.invalid) {
             true => blk: {
@@ -247,7 +264,7 @@ const Analyzer = struct {
                             const function = analyzer.module.functions.get(function_index);
                             const function_prototype = analyzer.module.function_prototypes.get(analyzer.module.types.get(function.prototype).function);
                             const argument_declarations = function_prototype.arguments.?;
-                            print("Argument declaration count: {}. Argument node list count: {}\n", .{ argument_declarations.len, call_argument_node_list.len });
+                            logln(.sema, .call, "Argument declaration count: {}. Argument node list count: {}\n", .{ argument_declarations.len, call_argument_node_list.len });
                             var argument_array = ArrayList(Value.Index){};
                             if (argument_declarations.len == call_argument_node_list.len) {
                                 for (argument_declarations, call_argument_node_list) |argument_declaration_index, argument_node_index| {
@@ -276,7 +293,7 @@ const Analyzer = struct {
 
                                 break :b argument_array;
                             } else {
-                                std.debug.panic("Function call has argument count mismatch: call has {}, function declaration has {}\n", .{ call_argument_node_list.len, argument_declarations.len });
+                                panic("Function call has argument count mismatch: call has {}, function declaration has {}\n", .{ call_argument_node_list.len, argument_declarations.len });
                             }
                         },
                         else => |t| @panic(@tagName(t)),
@@ -306,7 +323,8 @@ const Analyzer = struct {
             if (enum_field.name == enum_name_hash) {
                 return enum_name_hash;
             }
-            print("Existing \"{s}\" != current \"{s}\"\n", .{ existing, enum_name });
+
+            logln(.sema, .typecheck, "Existing enum field \"{s}\" != enum literal \"{s}\"\n", .{ existing, enum_name });
         } else {
             return null;
         }
@@ -411,7 +429,7 @@ const Analyzer = struct {
                     unreachable;
                 };
 
-                print("Index: {}\n", .{group_index});
+                logln(.sema, .@"switch", "Index: {}\n", .{group_index});
 
                 const true_switch_case_node = analyzer.getScopeNode(scope_index, switch_case_node_list[group_index]);
                 var result = Value{
@@ -448,7 +466,7 @@ const Analyzer = struct {
             },
             false => {
                 // const id = analyzer.tokenIdentifier(.token);
-                // print("id: {s}\n", .{id});
+                // logln("id: {s}\n", .{id});
                 // const left = try analyzer.expression(scope_index, ExpectType.none, statement_node.left);
 
                 // if (analyzer.module.values.get(left).isComptime() and analyzer.module.values.get(right).isComptime()) {
@@ -518,17 +536,8 @@ const Analyzer = struct {
 
     fn doIdentifier(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_token: Token.Index, node_scope_index: Scope.Index) !Value.Index {
         const identifier = analyzer.tokenIdentifier(node_scope_index, node_token);
-        print("Referencing identifier: \"{s}\"\n", .{identifier});
+        logln(.sema, .identifier, "Referencing identifier: \"{s}\"\n", .{identifier});
         const identifier_hash = try analyzer.processIdentifier(identifier);
-
-        if (equal(u8, identifier, "print")) {
-            print("WTF\n", .{});
-        }
-
-        if (equal(u8, identifier, "windows")) {
-            print("WTF\n", .{});
-            unreachable;
-        }
 
         if (analyzer.lookupDeclarationInCurrentAndParentScopes(scope_index, identifier_hash)) |lookup| {
             const declaration_index = lookup.declaration;
@@ -538,7 +547,7 @@ const Analyzer = struct {
             const typecheck_result = switch (declaration.init_value.invalid) {
                 false => blk: {
                     const init_value = analyzer.module.values.get(declaration.init_value);
-                    print("Declaration found: {}\n", .{init_value});
+                    logln(.sema, .identifier, "Declaration found: {}\n", .{init_value});
                     const is_unresolved = init_value.* == .unresolved;
                     switch (is_unresolved) {
                         true => {
@@ -554,8 +563,8 @@ const Analyzer = struct {
                         false => {},
                     }
 
-                    print("Declaration resolved as: {}\n", .{init_value});
-                    print("Declaration mutability: {s}. Is comptime: {}\n", .{ @tagName(declaration.mutability), init_value.isComptime() });
+                    logln(.sema, .identifier, "Declaration resolved as: {}\n", .{init_value});
+                    logln(.sema, .identifier, "Declaration mutability: {s}. Is comptime: {}\n", .{ @tagName(declaration.mutability), init_value.isComptime() });
 
                     const typecheck_result = try analyzer.typeCheck(expect_type, declaration.type);
 
@@ -613,7 +622,7 @@ const Analyzer = struct {
             };
         } else {
             const scope = analyzer.module.scopes.get(scope_index);
-            std.debug.panic("Identifier \"{s}\" not found in scope #{} of file #{} referenced by scope #{} of file #{}: {s}", .{ identifier, scope_index.uniqueInteger(), scope.file.uniqueInteger(), node_scope_index.uniqueInteger(), analyzer.module.scopes.get(node_scope_index).file.uniqueInteger(), tokenBytes(analyzer.getScopeToken(scope_index, node_token), analyzer.getScopeSourceFile(scope_index)) });
+            panic("Identifier \"{s}\" not found in scope #{} of file #{} referenced by scope #{} of file #{}: {s}", .{ identifier, scope_index.uniqueInteger(), scope.file.uniqueInteger(), node_scope_index.uniqueInteger(), analyzer.module.scopes.get(node_scope_index).file.uniqueInteger(), tokenBytes(analyzer.getScopeToken(scope_index, node_token), analyzer.getScopeSourceFile(scope_index)) });
         }
     }
 
@@ -641,7 +650,7 @@ const Analyzer = struct {
 
     fn resolveNode(analyzer: *Analyzer, value: *Value, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) anyerror!void {
         const node = analyzer.getScopeNode(scope_index, node_index);
-        print("Resolving node #{} in scope #{} from file #{}: {}\n", .{ node_index.uniqueInteger(), scope_index.uniqueInteger(), analyzer.module.scopes.get(scope_index).file.uniqueInteger(), node });
+        logln(.sema, .node, "Resolving node #{} in scope #{} from file #{}: {}\n", .{ node_index.uniqueInteger(), scope_index.uniqueInteger(), analyzer.module.scopes.get(scope_index).file.uniqueInteger(), node });
 
         assert(value.* == .unresolved);
 
@@ -669,8 +678,8 @@ const Analyzer = struct {
             },
             .compiler_intrinsic_one, .compiler_intrinsic_two, .compiler_intrinsic => blk: {
                 const intrinsic_name = analyzer.tokenIdentifier(scope_index, node.token + 1);
-                print("Intrinsic: {s}\n", .{intrinsic_name});
-                const intrinsic = data_structures.enumFromString(Intrinsic, intrinsic_name) orelse std.debug.panic("Unknown intrinsic: {s}\n", .{intrinsic_name});
+                logln(.sema, .node, "Intrinsic: {s}\n", .{intrinsic_name});
+                const intrinsic = data_structures.enumFromString(Intrinsic, intrinsic_name) orelse panic("Unknown intrinsic: {s}\n", .{intrinsic_name});
                 switch (intrinsic) {
                     .import => {
                         assert(node.id == .compiler_intrinsic_one);
@@ -679,7 +688,7 @@ const Analyzer = struct {
                             .string_literal => {
                                 const import_name = analyzer.tokenStringLiteral(scope_index, import_argument.token);
                                 const import_file = try analyzer.module.importFile(analyzer.allocator, analyzer.current_file, import_name);
-                                print("Importing \"{s}\"...\n", .{import_name});
+                                logln(.sema, .node, "Importing \"{s}\"...\n", .{import_name});
 
                                 const result = .{
                                     .type = switch (import_file.file.is_new) {
@@ -687,7 +696,7 @@ const Analyzer = struct {
                                             const new_file_index = import_file.file.index;
                                             try analyzer.module.generateAbstractSyntaxTreeForFile(analyzer.allocator, new_file_index);
                                             const analyze_result = try analyzeFile(value, analyzer.allocator, analyzer.module, new_file_index);
-                                            print("Done analyzing {s}!\n", .{import_name});
+                                            logln(.sema, .node, "Done analyzing {s}!\n", .{import_name});
                                             break :true_block analyze_result;
                                         },
                                         false => false_block: {
@@ -705,7 +714,7 @@ const Analyzer = struct {
                     },
                     .syscall => {
                         var argument_nodes = try analyzer.getArguments(scope_index, node_index);
-                        print("Argument count: {}\n", .{argument_nodes.items.len});
+                        logln(.sema, .node, "Argument count: {}\n", .{argument_nodes.items.len});
                         if (argument_nodes.items.len > 0 and argument_nodes.items.len <= 6 + 1) {
                             const argument_expect_type = .{
                                 .flexible_integer = .{
@@ -741,7 +750,7 @@ const Analyzer = struct {
                         assert(node.id == .compiler_intrinsic_one);
                         const message_node = analyzer.getScopeNode(scope_index, node.left);
                         switch (message_node.id) {
-                            .string_literal => std.debug.panic("error: {s}", .{analyzer.tokenStringLiteral(scope_index, message_node.token)}),
+                            .string_literal => panic("error: {s}", .{analyzer.tokenStringLiteral(scope_index, message_node.token)}),
                             else => |t| @panic(@tagName(t)),
                         }
                         unreachable;
@@ -833,11 +842,12 @@ const Analyzer = struct {
                 .call = try analyzer.processCall(scope_index, node_index),
             },
             .field_access => blk: {
-                print("left alocation...\n", .{});
+                logln(.sema, .node, "left alocation...\n", .{});
                 const identifier = analyzer.tokenIdentifier(scope_index, node.right.value);
-                print("Field access identifier for RHS: \"{s}\"\n", .{identifier});
+                logln(.sema, .node, "Field access identifier for RHS: \"{s}\"\n", .{identifier});
                 analyzer.debugNode(scope_index, node_index);
                 const left_allocation = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
+
                 switch (left_allocation.ptr.*) {
                     .type => |type_index| {
                         if (!type_index.invalid) {
@@ -852,13 +862,13 @@ const Analyzer = struct {
                                         .declaration_reference => |declaration_reference| {
                                             const declaration = analyzer.module.declarations.get(declaration_reference.value);
                                             const declaration_name = analyzer.module.getName(declaration.name).?;
-                                            print("Decl ref: {s}\n", .{declaration_name});
-                                            print("TODO: maybe this should not be runtime", .{});
+                                            logln(.sema, .node, "Decl ref: {s}\n", .{declaration_name});
+                                            logln(.sema, .node, "TODO: maybe this should not be runtime", .{});
                                             unreachable;
                                         },
                                         else => |t| @panic(@tagName(t)),
                                     }
-                                    print("Right: {}\n", .{right_value});
+                                    logln(.sema, .node, "Right: {}\n", .{right_value});
                                     // struct_scope.declarations.get(identifier);
 
                                     unreachable;
@@ -877,7 +887,7 @@ const Analyzer = struct {
                                     };
                                     const enum_field = analyzer.module.enum_fields.get(result);
                                     const enum_field_name = analyzer.module.getName(enum_field.name).?;
-                                    print("Enum field name resolution: {s}\n", .{enum_field_name});
+                                    logln(.sema, .node, "Enum field name resolution: {s}\n", .{enum_field_name});
                                     break :blk .{
                                         .enum_field = result,
                                     };
@@ -886,7 +896,7 @@ const Analyzer = struct {
                             }
                             unreachable;
                         } else {
-                            std.debug.panic("Identifier \"{s}\" not found. Type empty", .{identifier});
+                            panic("Identifier \"{s}\" not found. Type empty", .{identifier});
                         }
                     },
                     .declaration_reference => |declaration_reference| {
@@ -929,7 +939,7 @@ const Analyzer = struct {
                 for (field_node_list.items) |field_node_index| {
                     const field_node = analyzer.getScopeNode(scope_index, field_node_index);
                     const identifier = analyzer.tokenIdentifier(scope_index, field_node.token);
-                    print("Enum field: {s}\n", .{identifier});
+                    logln(.sema, .node, "Enum field: {s}\n", .{identifier});
                     assert(field_node.left.invalid);
 
                     const enum_hash_name = try analyzer.processIdentifier(identifier);
@@ -966,7 +976,7 @@ const Analyzer = struct {
         const node = analyzer.getScopeNode(scope_index, node_index);
         const source_file = analyzer.getScopeSourceFile(scope_index);
         const token = analyzer.getScopeToken(scope_index, node.token);
-        print("Debugging node {s}:\n\n```\n{s}\n```\n", .{ @tagName(node.id), source_file[token.start..] });
+        logln(.sema, .node, "Debugging node {s}:\n\n```\n{s}\n```\n", .{ @tagName(node.id), source_file[token.start..] });
     }
 
     fn processStringLiteral(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !u32 {
@@ -989,7 +999,7 @@ const Analyzer = struct {
                 const token = analyzer.getScopeToken(scope_index, type_node.token);
                 const source_file = analyzer.getScopeSourceFile(scope_index);
                 const identifier = tokenBytes(token, source_file);
-                print("Identifier: \"{s}\"\n", .{identifier});
+                logln(.sema, .type, "Identifier: \"{s}\"", .{identifier});
                 const resolved_value_index = try analyzer.doIdentifier(scope_index, ExpectType.type, type_node.token, scope_index);
                 const resolved_value = analyzer.module.values.get(resolved_value_index);
                 break :blk switch (resolved_value.*) {
@@ -1000,7 +1010,7 @@ const Analyzer = struct {
             .keyword_noreturn => Type.noreturn,
             inline .signed_integer_type, .unsigned_integer_type => |int_type_signedness| blk: {
                 const bit_count: u16 = @intCast(type_node.left.value);
-                print("Bit count: {}\n", .{bit_count});
+                logln(.sema, .type, "Bit count: {}", .{bit_count});
                 break :blk switch (bit_count) {
                     inline 8, 16, 32, 64 => |hardware_bit_count| Type.Integer.getIndex(.{
                         .bit_count = hardware_bit_count,
@@ -1053,7 +1063,7 @@ const Analyzer = struct {
             true => null,
             false => blk: {
                 const argument_list_node = analyzer.getScopeNode(scope_index, arguments_node_index);
-                // print("Function prototype argument list node: {}\n", .{function_prototype_node.left.uniqueInteger()});
+                // logln("Function prototype argument list node: {}\n", .{function_prototype_node.left.uniqueInteger()});
                 const argument_node_list = switch (argument_list_node.id) {
                     .node_list => analyzer.getScopeNodeList(scope_index, argument_list_node),
                     else => |t| @panic(@tagName(t)),
@@ -1248,7 +1258,7 @@ const Analyzer = struct {
 
         if (analyzer.lookupDeclarationInCurrentAndParentScopes(scope_index, identifier_index)) |lookup| {
             const declaration_name = analyzer.tokenIdentifier(lookup.scope, identifier_token);
-            std.debug.panic("Existing name in lookup: {s}", .{declaration_name});
+            panic("Existing name in lookup: {s}", .{declaration_name});
         }
 
         // Check if the symbol name is already occupied in the same scope
@@ -1287,7 +1297,7 @@ const Analyzer = struct {
         const expected_identifier_token_index = declaration_node.token + 1;
         const expected_identifier_token = analyzer.getScopeToken(scope_index, expected_identifier_token_index);
         if (expected_identifier_token.id != .identifier) {
-            print("Error: found: {}", .{expected_identifier_token.id});
+            logln(.sema, .symbol_declaration, "Error: found: {}", .{expected_identifier_token.id});
             @panic("Expected identifier");
         }
         // TODO: Check if it is a keyword
@@ -1483,7 +1493,7 @@ pub fn initialize(compilation: *Compilation, module: *Module, package: *Package,
             const value = module.values.get(decl.init_value);
             module.entry_point = switch (value.*) {
                 .function => |function_index| function_index.uniqueInteger(),
-                .unresolved => std.debug.panic("Unresolved declaration: {s}\n", .{declaration_name}),
+                .unresolved => panic("Unresolved declaration: {s}\n", .{declaration_name}),
                 else => |t| @panic(@tagName(t)),
             };
             break;
