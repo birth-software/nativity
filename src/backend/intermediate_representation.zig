@@ -19,7 +19,9 @@ pub const Logger = enum {
     function,
     phi_removal,
 
-    pub var bitset = std.EnumSet(Logger).initEmpty();
+    pub var bitset = std.EnumSet(Logger).initMany(&.{
+        .function,
+    });
 };
 
 pub const Result = struct {

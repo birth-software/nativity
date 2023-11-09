@@ -100,7 +100,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
                                     }
                                 } else if (!recognized_particular) std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
                             } else {
-                                unreachable;
+                                // LogScope.Logger.bitset = @TypeOf(LogScope.Logger.bitset).initFull();
                             }
 
                             logger_bitset.setPresent(log_scope, true);
@@ -1117,10 +1117,6 @@ pub const File = struct {
     }
 };
 
-pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
-    std.builtin.default_panic(message, stack_trace, return_address);
-}
-
 const LoggerScope = enum {
     compilation,
     lexer,
@@ -1168,5 +1164,18 @@ pub fn logln(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logg
 pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger, comptime format: []const u8, arguments: anytype) void {
     if (shouldLog(logger_scope, logger)) {
         std.fmt.format(writer, format, arguments) catch unreachable;
+    }
+}
+
+pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
+    const print_stack_trace = true;
+    switch (print_stack_trace) {
+        true => std.builtin.default_panic(message, stack_trace, return_address),
+        false => {
+            writer.writeAll("\nPANIC: ") catch {};
+            writer.writeAll(message) catch {};
+            writer.writeByte('\n') catch {};
+            std.os.abort();
+        },
     }
 }

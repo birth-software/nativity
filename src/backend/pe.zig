@@ -22,21 +22,21 @@ pub const Writer = struct {
     }
 
     pub fn writeToMemory(writer: *Writer, image: *const emit.Result) !void {
-        print("File len: {}\n", .{writer.in_file.len});
+        print("File len: {}", .{writer.in_file.len});
         const dos_header: *const ImageDosHeader = @ptrCast(@alignCast(writer.in_file.ptr));
-        print("File address: {}\n", .{dos_header.file_address_of_new_exe_header});
-        print("File: {s}\n", .{writer.in_file[0x40..]});
+        print("File address: {}", .{dos_header.file_address_of_new_exe_header});
+        print("File: {s}", .{writer.in_file[0x40..]});
         for (writer.in_file[0x40..], 0..) |byte, index| {
             if (byte == 'T') {
-                print("Index: {}\n", .{index});
+                print("Index: {}", .{index});
                 break;
             }
         }
         assert(dos_header.magic_number == ImageDosHeader.magic);
         // assert(dos_header.file_address_of_new_exe_header == @sizeOf(ImageDosHeader));
-        print("{}\n", .{dos_header});
+        print("{}", .{dos_header});
         const file_header: *const ImageFileHeader = @ptrCast(@alignCast(writer.in_file[dos_header.file_address_of_new_exe_header + 4 ..].ptr));
-        print("File header: {}\n", .{file_header});
+        print("File header: {}", .{file_header});
 
         writer.append(std.mem.asBytes(&ImageDosHeader{
             .file_address_of_new_exe_header = 208,

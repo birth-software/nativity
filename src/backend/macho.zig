@@ -487,7 +487,7 @@ pub fn interpretFile(allocator: Allocator, descriptor: Compilation.Module.Descri
     _ = allocator;
     _ = descriptor;
     const header: *const Header = @ptrCast(@alignCast(file.ptr));
-    print("Header : {}\n", .{header});
+    print("Header : {}", .{header});
     assert(header.magic == Header.magic);
 
     var text_segment: LoadCommand.Segment64 = undefined;
@@ -503,69 +503,69 @@ pub fn interpretFile(allocator: Allocator, descriptor: Compilation.Module.Descri
                 if (equal(u8, segment_load_command.name[0..text_segment_name.len], text_segment_name)) {
                     text_segment = segment_load_command.*;
                 }
-                print("SLC: {}\n", .{segment_load_command});
-                print("segment name: {s}\n", .{segment_load_command.name});
+                print("SLC: {}", .{segment_load_command});
+                print("segment name: {s}", .{segment_load_command.name});
                 const section_ptr: [*]const LoadCommand.Segment64.Section = @ptrFromInt(@intFromPtr(segment_load_command) + @sizeOf(LoadCommand.Segment64));
                 const sections = section_ptr[0..segment_load_command.section_count];
                 for (sections) |section| {
-                    print("{}\n", .{section});
-                    print("Section name: {s}. Segment name: {s}\n", .{ section.name, section.segment_name });
+                    print("{}", .{section});
+                    print("Section name: {s}. Segment name: {s}", .{ section.name, section.segment_name });
                 }
             },
             .dyld_chained_fixups => {
                 const command: *const LoadCommand.LinkeditData = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .dyld_exports_trie => {
                 const command: *const LoadCommand.LinkeditData = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .symbol_table => {
                 const command: *const LoadCommand.SymbolTable = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .symbol_table_information => {
                 const command: *const LoadCommand.SymbolTableInformation = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .load_dylinker => {
                 const command: *const LoadCommand.Dylinker = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
                 const name: [*:0]const u8 = @ptrFromInt(@intFromPtr(command) + command.name_offset);
-                print("Name: {s}\n", .{name});
+                print("Name: {s}", .{name});
             },
             .uuid_number => {
                 const command: *const LoadCommand.Uuid = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .minimum_os_version => {
                 const command: *const LoadCommand.MinimumVersion = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .source_version => {
                 const command: *const LoadCommand.SourceVersion = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .dyld_main_entry_point => {
                 const command: *const LoadCommand.EntryPoint = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .load_dylib => {
                 const command: *const LoadCommand.Dylib = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
-                print("Dylib: {s}\n", .{@as([*:0]const u8, @ptrFromInt(@intFromPtr(load_command_ptr) + @sizeOf(LoadCommand.Dylib)))});
+                print("command: {}", .{command});
+                print("Dylib: {s}", .{@as([*:0]const u8, @ptrFromInt(@intFromPtr(load_command_ptr) + @sizeOf(LoadCommand.Dylib)))});
             },
             .function_starts => {
                 const command: *const LoadCommand.LinkeditData = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .data_in_code => {
                 const command: *const LoadCommand.LinkeditData = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             .code_signature => {
                 const command: *const LoadCommand.LinkeditData = @ptrCast(@alignCast(load_command_ptr));
-                print("command: {}\n", .{command});
+                print("command: {}", .{command});
             },
             else => |t| @panic(@tagName(t)),
         }
