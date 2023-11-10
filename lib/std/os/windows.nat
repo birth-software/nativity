@@ -1,0 +1,3 @@
+const HANDLE = u64;
+const FileDescriptor = HANDLE;
+const GetStdHandle = fn(handle_descriptor: u32) HANDLE extern;

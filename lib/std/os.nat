@@ -1,0 +1,46 @@
+const current = #import("builtin").os;
+const system = switch (current) {
+    .linux => linux,
+    .macos => macos,
+    .windows => windows,
+};
+
+const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [@]const u8, bytes_len: usize) ssize {
+    switch (current) {
+        .linux => return #syscall(1, file_descriptor, bytes_ptr, bytes_len),
+        .macos => return macos.write(file_descriptor, bytes_ptr, bytes_len),
+        .windows => {
+            var written_bytes: u32 = 0;
+            if (windows.WriteFile(file_descriptor, bytes_ptr, bytes_len, @written_bytes, false) != 0) {
+                return written_bytes;
+            } else {
+                unreachable;
+            }
+        },
+    }
+}
+
+const FileDescriptor = system.FileDescriptor;
+
+const print = fn(bytes_ptr: [@]const u8, bytes_len: usize) void {
+    const file_descriptor = switch (current) {
+        .linux, .macos => 2,
+        .windows => windows.GetStdHandle(windows.STD_OUTPUT_HANDLE),
+    };
+
+    _ = write(file_descriptor, bytes_ptr, bytes_len);
+}
+
+const exit = fn(exit_code: s32) noreturn {
+    switch (current) {
+        .linux => _ = #syscall(231, exit_code),
+        .macos => macos.exit(exit_code),
+        .windows => windows.ExitProcess(exit_code),
+    }
+    
+    unreachable;
+}
+
+const linux = #import("os/linux.nat");
+const macos = #import("os/macos.nat");
+const windows = #import("os/windows.nat");

@@ -1,0 +1,4 @@
+const main = fn() s32 {
+    var a : s32 = 0;
+    return a;
+}

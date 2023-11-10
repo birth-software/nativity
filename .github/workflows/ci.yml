@@ -24,8 +24,6 @@ jobs:
       matrix:
         os: [
           ubuntu-latest,
-          windows-latest,
-          macos-latest
         ]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
@@ -39,4 +37,7 @@ jobs:
       - name: Zig environment variables
         run: zig env
       - name: Test
-        run: zig build test -Dall --summary all
+        run: |
+          zig build test -Dall --summary all
+          zig build run -- test/first/main.nat
+          nat/first

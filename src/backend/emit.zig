@@ -6,89 +6,187 @@ const assert = std.debug.assert;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
+const Compilation = @import("../Compilation.zig");
+
 const ir = @import("intermediate_representation.zig");
 
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
 const AutoHashMap = data_structures.AutoHashMap;
+const mmap = data_structures.mmap;
+
+const elf = @import("elf.zig");
+const pe = @import("pe.zig");
+const macho = @import("macho.zig");
 
 const jit_callconv = .SysV;
 
 const Section = struct {
     content: []align(page_size) u8,
     index: usize = 0,
+    alignment: u32,
+    name: []const u8,
+    flags: Flags,
+    type: Type,
+    symbol_table: std.StringArrayHashMapUnmanaged(u32) = .{},
+
+    const Type = enum {
+        null,
+        loadable_program,
+        string_table,
+        symbol_table,
+    };
+
+    const Flags = packed struct {
+        read: bool,
+        write: bool,
+        execute: bool,
+    };
 };
 
 pub const Result = struct {
-    sections: struct {
-        text: Section,
-        rodata: Section,
-        data: Section,
-    },
-    entry_point: u32 = 0,
+    sections: ArrayList(Section) = .{},
+    // sections: struct {
+    //     text: Section,
+    //     rodata: Section,
+    //     data: Section,
+    // },
+    entry_point: u32,
+    target: std.Target,
+    allocator: Allocator,
 
-    pub fn create() !Result {
-        return Result{
-            .sections = .{
-                .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
-                .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
-                .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
-            },
+    const text_section_index = 0;
+
+    pub fn create(allocator: Allocator, target: std.Target, entry_point_index: u32) !Result {
+        var result = Result{
+            // .sections = .{
+            //     .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
+            //     .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
+            //     .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
+            // },
+            .target = target,
+            .allocator = allocator,
+            .entry_point = entry_point_index,
         };
+
+        _ = try result.addSection(.{
+            .name = ".text",
+            .size = 0x1000,
+            .alignment = 0x1000,
+            .flags = .{
+                .execute = true,
+                .read = true,
+                .write = false,
+            },
+            .type = .loadable_program,
+        });
+
+        return result;
     }
 
-    fn mmap(size: usize, flags: packed struct {
-        executable: bool,
-    }) ![]align(page_size) u8 {
-        return switch (@import("builtin").os.tag) {
-            .windows => blk: {
-                const windows = std.os.windows;
-                break :blk @as([*]align(0x1000) u8, @ptrCast(@alignCast(try windows.VirtualAlloc(null, size, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE))))[0..size];
-            },
-            .linux, .macos => |os_tag| blk: {
-                const jit = switch (os_tag) {
-                    .macos => 0x800,
-                    .linux => 0,
-                    else => unreachable,
-                };
-                const execute_flag: switch (os_tag) {
-                    .linux => u32,
-                    .macos => c_int,
-                    else => unreachable,
-                } = if (flags.executable) std.os.PROT.EXEC else 0;
-                const protection_flags: u32 = @intCast(std.os.PROT.READ | std.os.PROT.WRITE | execute_flag);
-                const mmap_flags = std.os.MAP.ANONYMOUS | std.os.MAP.PRIVATE | jit;
+    const SectionCreation = struct {
+        name: []const u8,
+        size: usize,
+        alignment: u32,
+        flags: Section.Flags,
+        type: Section.Type,
+    };
 
-                break :blk std.os.mmap(null, size, protection_flags, mmap_flags, -1, 0);
-            },
-            else => @compileError("OS not supported"),
-        };
+    pub fn addSection(result: *Result, arguments: SectionCreation) !usize {
+        const index = result.sections.items.len;
+        assert(std.mem.isAligned(arguments.size, page_size));
+
+        try result.sections.append(result.allocator, .{
+            .content = try mmap(arguments.size, .{ .executable = arguments.flags.execute }),
+            .alignment = arguments.alignment,
+            .name = arguments.name,
+            .flags = arguments.flags,
+            .type = arguments.type,
+        });
+
+        return index;
+    }
+
+    pub fn insertSection(result: *Result, index: usize, arguments: SectionCreation) !usize {
+        assert(std.mem.isAligned(arguments.size, page_size));
+        try result.sections.insert(result.allocator, index, .{
+            .content = try mmap(arguments.size, .{ .executable = arguments.flags.execute }),
+            .alignment = arguments.alignment,
+            .name = arguments.name,
+            .flags = arguments.flags,
+            .type = arguments.type,
+        });
+
+        return index;
+    }
+
+    pub fn alignSection(result: *Result, index: usize, alignment: usize) void {
+        const index_ptr = &result.sections.items[index].index;
+        index_ptr.* = std.mem.alignForward(usize, index_ptr.*, alignment);
+    }
+
+    pub fn writeToSection(image: *Result, section_index: usize, bytes: []const u8) void {
+        const section = &image.sections.items[section_index];
+        const destination = section.content[section.index..][0..bytes.len];
+        @memcpy(destination, bytes);
+        section.index += bytes.len;
+    }
+
+    pub fn writeByteToSection(image: *Result, section_index: usize, byte: u8) void {
+        const section = &image.sections.items[section_index];
+        section.content[section.index] = byte;
+        section.index += 1;
+    }
+
+    pub fn getTextSection(result: *Result) *Section {
+        return &result.sections.items[0];
     }
 
     pub fn appendCode(image: *Result, code: []const u8) void {
-        std.debug.print("New code: ", .{});
-        for (code) |byte| {
-            std.debug.print("0x{x} ", .{byte});
-        }
-        std.debug.print("\n", .{});
-        const destination = image.sections.text.content[image.sections.text.index..][0..code.len];
-        @memcpy(destination, code);
-        image.sections.text.index += code.len;
+        image.writeToSection(text_section_index, code);
     }
 
     pub fn appendCodeByte(image: *Result, code_byte: u8) void {
-        std.debug.print("New code: 0x{x}\n", .{code_byte});
-        image.sections.text.content[image.sections.text.index] = code_byte;
-        image.sections.text.index += 1;
+        image.writeByteToSection(text_section_index, code_byte);
     }
 
     fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {
+        if (@import("builtin").cpu.arch == .aarch64 and @import("builtin").os.tag == .macos) {
+            data_structures.pthread_jit_write_protect_np(true);
+        }
         comptime {
             assert(@typeInfo(FunctionType) == .Fn);
         }
 
         assert(image.sections.text.content.len > 0);
         return @as(*const FunctionType, @ptrCast(&image.sections.text.content[image.entry_point]));
+    }
+
+    fn writeElf(image: *Result, executable_relative_path: []const u8) !void {
+        const file_in_memory = try elf.writeToMemory(image);
+        try writeFile(file_in_memory.items, executable_relative_path);
+    }
+
+    fn writeFile(bytes: []const u8, path: []const u8) !void {
+        const flags = switch (@import("builtin").os.tag) {
+            .windows => .{},
+            else => .{
+                .mode = 0o777,
+            },
+        };
+
+        const file_descriptor = try std.fs.cwd().createFile(path, flags);
+        try file_descriptor.writeAll(bytes);
+        file_descriptor.close();
+    }
+
+    fn writePe(image: *Result, executable_relative_path: []const u8) !void {
+        _ = executable_relative_path;
+        _ = image;
+        // var writer = try pe.Writer.init(allocator);
+        // try writer.writeToMemory(image);
+        // try writer.writeToFile(executable_relative_path);
+        unreachable;
     }
 };
 
@@ -114,36 +212,49 @@ pub fn InstructionSelector(comptime Instruction: type) type {
     };
 }
 
+const x86_64 = @import("x86_64.zig");
+const aarch64 = @import("aarch64.zig");
+
+pub const Logger = x86_64.Logger;
+
 pub fn get(comptime arch: std.Target.Cpu.Arch) type {
     const backend = switch (arch) {
-        .x86_64 => @import("x86_64.zig"),
-        else => @compileError("Architecture not supported"),
+        .x86_64 => x86_64,
+        .aarch64 => aarch64,
+        else => {},
     };
 
     return struct {
-        pub fn initialize(allocator: Allocator, intermediate: *ir.Result) !void {
-            std.debug.print("Entry point: {}\n", .{intermediate.entry_point});
-            var mir = try backend.MIR.generate(allocator, intermediate);
-            try mir.allocateRegisters(allocator, intermediate);
-            const result = try mir.encode(intermediate);
+        pub fn initialize(allocator: Allocator, intermediate: *ir.Result, descriptor: Compilation.Module.Descriptor) !void {
+            switch (arch) {
+                .x86_64 => {
+                    var mir = try backend.MIR.selectInstructions(allocator, intermediate, descriptor.target);
+                    try mir.allocateRegisters();
+                    const os = descriptor.target.os.tag;
+                    const image = try mir.encode();
 
-            const text_section = result.sections.text.content[0..result.sections.text.index];
-            for (text_section) |byte| {
-                std.debug.print("0x{x}\n", .{byte});
-            }
-
-            switch (@import("builtin").os.tag) {
-                .linux => switch (@import("builtin").cpu.arch == arch) {
-                    true => {
-                        std.debug.print("Executing...\n", .{});
-                        const entryPoint = result.getEntryPoint(fn () callconv(.SysV) noreturn);
-                        entryPoint();
-                        std.debug.print("This should not print...\n", .{});
-                    },
-                    false => {},
+                    switch (os) {
+                        .linux => try image.writeElf(descriptor.executable_path),
+                        .windows => try image.writePe(descriptor.executable_path),
+                        else => unreachable,
+                    }
                 },
-                else => {},
+                else => {
+                    const file = try std.fs.cwd().readFileAlloc(allocator, "main", std.math.maxInt(u64));
+                    try macho.interpretFile(allocator, descriptor, file);
+                },
             }
+
+            // switch (@import("builtin").os.tag) {
+            //     .linux => switch (@import("builtin").cpu.arch == arch) {
+            //         true => {
+            //             const entryPoint = result.getEntryPoint(fn () callconv(.SysV) noreturn);
+            //             entryPoint();
+            //         },
+            //         false => {},
+            //     },
+            //     else => {},
+            // }
         }
     };
 }

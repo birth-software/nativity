@@ -1,0 +1,16 @@
+const Os = enum{
+    linux,
+    macos,
+    windows,
+};
+
+const Cpu = enum{
+    aarch64,
+    x86_64,
+};
+
+const Abi = enum{
+    none,
+    gnu,
+    msvc,
+};

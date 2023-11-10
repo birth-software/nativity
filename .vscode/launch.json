@@ -8,8 +8,10 @@
             "type": "lldb",
             "request": "launch",
             "name": "Launch",
-            "program": "${workspaceFolder}/zig-out/bin/compiler",
-            "args": [],
+            "program": "${workspaceFolder}/zig-out/bin/nativity",
+            "args": [
+                "test/hello_world/main.nat"
+            ],
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "zig build"
         },
