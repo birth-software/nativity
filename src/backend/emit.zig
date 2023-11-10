@@ -12,6 +12,7 @@ const ir = @import("intermediate_representation.zig");
 
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
+const ArrayListAligned = data_structures.ArrayListAligned;
 const AutoHashMap = data_structures.AutoHashMap;
 const mmap = data_structures.mmap;
 
@@ -22,13 +23,12 @@ const macho = @import("macho.zig");
 const jit_callconv = .SysV;
 
 const Section = struct {
-    content: []align(page_size) u8,
-    index: usize = 0,
-    alignment: u32,
-    name: []const u8,
-    flags: Flags,
-    type: Type,
+    bytes: ArrayListAligned(u8, page_size),
     symbol_table: std.StringArrayHashMapUnmanaged(u32) = .{},
+    name: []const u8,
+    alignment: u32,
+    flags: Section.Flags,
+    type: Section.Type,
 
     const Type = enum {
         null,
@@ -44,110 +44,119 @@ const Section = struct {
     };
 };
 
-pub const Result = struct {
+const SectionCreation = struct {
+    name: []const u8,
+    size_guess: usize,
+    alignment: u32,
+    flags: Section.Flags,
+    type: Section.Type,
+};
+
+const Relocation = struct {
+    source: struct {
+        offset: u32,
+        index: u16,
+    },
+    target: struct {
+        offset: u32,
+        index: u16,
+    },
+    offset: i8,
+};
+
+pub const SectionManager = struct {
     sections: ArrayList(Section) = .{},
-    // sections: struct {
-    //     text: Section,
-    //     rodata: Section,
-    //     data: Section,
-    // },
-    entry_point: u32,
-    target: std.Target,
+    rodata: ?u16 = null,
+    null: bool = false,
+    linker_relocations: ArrayList(Relocation) = .{},
     allocator: Allocator,
 
-    const text_section_index = 0;
+    pub fn addSection(section_manager: *SectionManager, arguments: SectionCreation) !usize {
+        const index = section_manager.sections.items.len;
 
-    pub fn create(allocator: Allocator, target: std.Target, entry_point_index: u32) !Result {
-        var result = Result{
-            // .sections = .{
-            //     .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
-            //     .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
-            //     .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
-            // },
-            .target = target,
-            .allocator = allocator,
-            .entry_point = entry_point_index,
-        };
+        const r = try section_manager.insertSection(index, arguments);
+        assert(index == r);
 
-        _ = try result.addSection(.{
-            .name = ".text",
-            .size = 0x1000,
-            .alignment = 0x1000,
+        return index;
+    }
+
+    pub fn getTextSectionIndex(section_manager: *const SectionManager) u16 {
+        return @intCast(@intFromBool(section_manager.null));
+    }
+
+    pub fn getTextSection(section_manager: *SectionManager) *Section {
+        return &section_manager.sections.items[section_manager.getTextSectionIndex()];
+    }
+
+    pub fn insertSection(section_manager: *SectionManager, index: usize, arguments: SectionCreation) !usize {
+        try section_manager.sections.insert(section_manager.allocator, index, .{
+            .bytes = try ArrayListAligned(u8, page_size).initCapacity(section_manager.allocator, arguments.size_guess),
+            .alignment = arguments.alignment,
+            .name = arguments.name,
+            .flags = arguments.flags,
+            .type = arguments.type,
+        });
+
+        return index;
+    }
+
+    pub fn addNullSection(section_manager: *SectionManager) !void {
+        const index = try section_manager.insertSection(0, .{
+            .name = "",
+            .size_guess = page_size,
+            .alignment = page_size,
             .flags = .{
-                .execute = true,
                 .read = true,
                 .write = false,
+                .execute = false,
             },
             .type = .loadable_program,
         });
+        assert(index == 0);
+
+        section_manager.null = true;
+    }
+
+    pub fn appendByteToSection(section_manager: *SectionManager, section_index: usize, byte: u8) !void {
+        try section_manager.sections.items[section_index].bytes.append(section_manager.allocator, byte);
+    }
+
+    pub fn appendToSection(section_manager: *SectionManager, section_index: usize, bytes: []const u8) !void {
+        try section_manager.sections.items[section_index].bytes.appendSlice(section_manager.allocator, bytes);
+    }
+
+    pub fn getSectionOffset(section_manager: *SectionManager, section_index: usize) usize {
+        return section_manager.sections.items[section_index].bytes.items.len;
+    }
+
+    pub fn getCodeOffset(section_manager: *SectionManager) usize {
+        return section_manager.getSectionOffset(text_section_index);
+    }
+
+    pub fn appendCode(section_manager: *SectionManager, code: []const u8) !void {
+        try section_manager.appendToSection(text_section_index, code);
+    }
+
+    pub fn appendCodeByte(section_manager: *SectionManager, code_byte: u8) !void {
+        try section_manager.appendByteToSection(text_section_index, code_byte);
+    }
+
+    const text_section_index = 0;
+};
+
+pub const Result = struct {
+    section_manager: SectionManager,
+    entry_point: u32,
+    target: std.Target,
+
+    pub fn create(section_manager: SectionManager, target: std.Target, entry_point_index: u32) !Result {
+        var result = Result{
+            .section_manager = section_manager,
+            .target = target,
+            .entry_point = entry_point_index,
+        };
 
         return result;
-    }
-
-    const SectionCreation = struct {
-        name: []const u8,
-        size: usize,
-        alignment: u32,
-        flags: Section.Flags,
-        type: Section.Type,
-    };
-
-    pub fn addSection(result: *Result, arguments: SectionCreation) !usize {
-        const index = result.sections.items.len;
-        assert(std.mem.isAligned(arguments.size, page_size));
-
-        try result.sections.append(result.allocator, .{
-            .content = try mmap(arguments.size, .{ .executable = arguments.flags.execute }),
-            .alignment = arguments.alignment,
-            .name = arguments.name,
-            .flags = arguments.flags,
-            .type = arguments.type,
-        });
-
-        return index;
-    }
-
-    pub fn insertSection(result: *Result, index: usize, arguments: SectionCreation) !usize {
-        assert(std.mem.isAligned(arguments.size, page_size));
-        try result.sections.insert(result.allocator, index, .{
-            .content = try mmap(arguments.size, .{ .executable = arguments.flags.execute }),
-            .alignment = arguments.alignment,
-            .name = arguments.name,
-            .flags = arguments.flags,
-            .type = arguments.type,
-        });
-
-        return index;
-    }
-
-    pub fn alignSection(result: *Result, index: usize, alignment: usize) void {
-        const index_ptr = &result.sections.items[index].index;
-        index_ptr.* = std.mem.alignForward(usize, index_ptr.*, alignment);
-    }
-
-    pub fn writeToSection(image: *Result, section_index: usize, bytes: []const u8) void {
-        const section = &image.sections.items[section_index];
-        const destination = section.content[section.index..][0..bytes.len];
-        @memcpy(destination, bytes);
-        section.index += bytes.len;
-    }
-
-    pub fn writeByteToSection(image: *Result, section_index: usize, byte: u8) void {
-        const section = &image.sections.items[section_index];
-        section.content[section.index] = byte;
-        section.index += 1;
-    }
-
-    pub fn getTextSection(result: *Result) *Section {
-        return &result.sections.items[0];
-    }
-
-    pub fn appendCode(image: *Result, code: []const u8) void {
-        image.writeToSection(text_section_index, code);
-    }
-
-    pub fn appendCodeByte(image: *Result, code_byte: u8) void {
-        image.writeByteToSection(text_section_index, code_byte);
     }
 
     fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {

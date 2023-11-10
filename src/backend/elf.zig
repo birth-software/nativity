@@ -10,22 +10,13 @@ const emit = @import("emit.zig");
 const page_size = 0x1000;
 
 pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, page_size) {
-    var file = try std.ArrayListAlignedUnmanaged(u8, 0x1000).initCapacity(image.allocator, 0x100000);
-    _ = try image.insertSection(0, .{
-        .name = "",
-        .size = page_size,
-        .alignment = page_size,
-        .flags = .{
-            .read = true,
-            .write = false,
-            .execute = false,
-        },
-        .type = .loadable_program,
-    });
+    const allocator = image.section_manager.allocator;
 
-    const symbol_table_index = try image.addSection(.{
+    try image.section_manager.addNullSection();
+
+    const symbol_table_index = try image.section_manager.addSection(.{
         .name = ".symtab",
-        .size = page_size,
+        .size_guess = 50,
         .alignment = @alignOf(SymbolTable.Entry),
         .flags = .{
             .read = false,
@@ -34,9 +25,9 @@ pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, pag
         },
         .type = .symbol_table,
     });
-    const string_table_index = try image.addSection(.{
+    const string_table_index = try image.section_manager.addSection(.{
         .name = ".strtab",
-        .size = page_size,
+        .size_guess = 50,
         .alignment = 1,
         .flags = .{
             .read = false,
@@ -45,9 +36,9 @@ pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, pag
         },
         .type = .string_table,
     });
-    const section_header_string_table_index = try image.addSection(.{
+    const section_header_string_table_index = try image.section_manager.addSection(.{
         .name = ".shstrtab",
-        .size = page_size,
+        .size_guess = 50,
         .alignment = 1,
         .flags = .{
             .read = false,
@@ -62,7 +53,7 @@ pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, pag
 
     const program_header_count = blk: {
         var result: usize = 0;
-        for (image.sections.items) |section| {
+        for (image.section_manager.sections.items) |section| {
             result += @intFromBool(switch (section.type) {
                 .null => false,
                 .loadable_program => true,
@@ -75,7 +66,7 @@ pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, pag
 
     var symbol_name_offset: u32 = 0;
 
-    image.writeToSection(symbol_table_index, std.mem.asBytes(&SymbolTable.Entry{
+    try image.section_manager.appendToSection(symbol_table_index, std.mem.asBytes(&SymbolTable.Entry{
         .name_offset = symbol_name_offset,
         .information = 0,
         .other = 0,
@@ -84,153 +75,171 @@ pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, pag
         .size = 0,
     }));
 
-    image.writeToSection(string_table_index, "");
-    image.writeByteToSection(string_table_index, 0);
+    try image.section_manager.appendToSection(string_table_index, "");
+    try image.section_manager.appendByteToSection(string_table_index, 0);
     symbol_name_offset += 1;
 
-    for (image.sections.items) |section| {
-        image.writeToSection(section_header_string_table_index, section.name);
-        image.writeByteToSection(section_header_string_table_index, 0);
+    for (image.section_manager.sections.items) |section| {
+        try image.section_manager.appendToSection(section_header_string_table_index, section.name);
+        try image.section_manager.appendByteToSection(section_header_string_table_index, 0);
     }
 
-    {
-        var program_segment_offset: usize = 0;
+    try image.section_manager.appendToSection(0, std.mem.asBytes(&Header{
+        .endianness = .little,
+        .machine = switch (image.target.cpu.arch) {
+            .x86_64 => .AMD64,
+            else => unreachable,
+        },
+        .os_abi = switch (image.target.os.tag) {
+            .linux => .systemv,
+            else => unreachable,
+        },
+        .entry = 0, // overwritten later
+        .section_header_offset = 0, // overwritten later
+        .program_header_count = @intCast(program_header_count),
+        .section_header_count = @intCast(image.section_manager.sections.items.len),
+        .section_header_string_table_index = @intCast(section_header_string_table_index),
+    }));
 
-        image.writeToSection(0, std.mem.asBytes(&Header{
-            .endianness = .little,
-            .machine = switch (image.target.cpu.arch) {
-                .x86_64 => .AMD64,
-                else => unreachable,
-            },
-            .os_abi = switch (image.target.os.tag) {
-                .linux => .systemv,
-                else => unreachable,
-            },
-            .entry = 0,
-            .section_header_offset = 0,
-            .program_header_count = @intCast(program_header_count),
-            .section_header_count = @intCast(image.sections.items.len),
-            .section_header_string_table_index = @intCast(section_header_string_table_index),
-        }));
+    var program_segment_offset: usize = 0;
 
-        for (image.sections.items, 0..) |section, section_index| {
-            switch (section.type) {
-                .loadable_program => {
-                    program_segment_offset = std.mem.alignForward(usize, program_segment_offset, section.alignment);
-                    const virtual_address = base_virtual_address + program_segment_offset;
-                    const program_segment_size = switch (section_index) {
-                        0 => @sizeOf(Header) + @sizeOf(ProgramHeader) * program_header_count,
-                        else => section.index,
-                    };
-                    image.writeToSection(0, std.mem.asBytes(&ProgramHeader{
-                        .type = .load,
-                        .flags = ProgramHeader.Flags{
-                            .executable = section.flags.execute,
-                            .writable = section.flags.write,
-                            .readable = section.flags.read,
-                        },
-                        .offset = program_segment_offset,
-                        .virtual_address = virtual_address,
-                        .physical_address = virtual_address,
-                        .size_in_file = program_segment_size,
-                        .size_in_memory = program_segment_size,
-                        .alignment = section.alignment,
-                    }));
+    for (image.section_manager.sections.items, 0..) |section, section_index| {
+        switch (section.type) {
+            .loadable_program => {
+                program_segment_offset = std.mem.alignForward(usize, program_segment_offset, section.alignment);
+                const virtual_address = base_virtual_address + program_segment_offset;
+                const program_segment_size = switch (section_index) {
+                    0 => @sizeOf(Header) + @sizeOf(ProgramHeader) * program_header_count,
+                    else => section.bytes.items.len,
+                };
 
-                    program_segment_offset += program_segment_size;
-                },
-                .null,
-                .string_table,
-                .symbol_table,
-                => {},
-            }
-        }
-    }
-
-    {
-        var section_offset: usize = 0;
-        var section_headers = try ArrayList(SectionHeader).initCapacity(image.allocator, image.sections.items.len);
-        var section_name_offset: u32 = 0;
-
-        for (image.sections.items, 0..) |section, section_i| {
-            section_offset = std.mem.alignForward(usize, section_offset, section.alignment);
-            const virtual_address = base_virtual_address + section_offset;
-
-            for (section.symbol_table.keys(), section.symbol_table.values()) |symbol_name, symbol_offset| {
-                const symbol_address = virtual_address + symbol_offset;
-                image.writeToSection(symbol_table_index, std.mem.asBytes(&SymbolTable.Entry{
-                    .name_offset = symbol_name_offset,
-                    .information = 0x10,
-                    .other = 0,
-                    .section_header_index = @intCast(section_i),
-                    .value = symbol_address,
-                    .size = 0,
+                try image.section_manager.appendToSection(0, std.mem.asBytes(&ProgramHeader{
+                    .type = .load,
+                    .flags = ProgramHeader.Flags{
+                        .executable = section.flags.execute,
+                        .writable = section.flags.write,
+                        .readable = section.flags.read,
+                    },
+                    .offset = program_segment_offset,
+                    .virtual_address = virtual_address,
+                    .physical_address = virtual_address,
+                    .size_in_file = program_segment_size,
+                    .size_in_memory = program_segment_size,
+                    .alignment = section.alignment,
                 }));
 
-                image.writeToSection(string_table_index, symbol_name);
-                image.writeByteToSection(string_table_index, 0);
+                program_segment_offset += program_segment_size;
+            },
+            .null,
+            .string_table,
+            .symbol_table,
+            => {},
+        }
+    }
 
-                symbol_name_offset += @intCast(symbol_name.len + 1);
-            }
+    var file = try std.ArrayListAlignedUnmanaged(u8, 0x1000).initCapacity(allocator, 0x100000);
+    var section_headers = try ArrayList(SectionHeader).initCapacity(allocator, image.section_manager.sections.items.len);
+    var section_name_offset: u32 = 0;
 
-            const source = section.content[0..section.index];
-            file.items.len = section_offset + source.len;
-            try file.replaceRange(image.allocator, section_offset, source.len, source);
+    for (image.section_manager.sections.items, 0..) |section, section_i| {
+        const section_offset = std.mem.alignForward(usize, file.items.len, section.alignment);
+        const virtual_address = base_virtual_address + section_offset;
 
-            section_headers.appendAssumeCapacity(SectionHeader{
-                .name_offset = section_name_offset,
-                .type = switch (section_i) {
-                    0 => .null,
-                    else => switch (section.type) {
-                        .loadable_program => .program_data,
-                        .string_table => .string_table,
-                        .symbol_table => .symbol_table,
-                        .null => .null,
-                    },
-                },
-                .flags = .{
-                    .alloc = true,
-                    .executable = section.flags.execute,
-                    .writable = section.flags.write,
-                },
-                .virtual_address = virtual_address,
-                .file_offset = section_offset,
-                .size = section.index,
-                .link = switch (section.type) {
-                    .symbol_table => @intCast(string_table_index),
-                    else => 0,
-                },
-                .info = switch (section.type) {
-                    .symbol_table => 1,
-                    else => 0,
-                },
-                .alignment = 0,
-                .entry_size = switch (section.type) {
-                    .symbol_table => @sizeOf(SymbolTable.Entry),
-                    else => 0,
-                },
-            });
-
-            section_offset += section.index;
-            section_name_offset += @intCast(section.name.len + 1);
+        if (file.items.len < section_offset) {
+            try file.appendNTimes(allocator, 0, section_offset - file.items.len);
         }
 
-        const section_header_offset = std.mem.alignForward(usize, section_offset, @alignOf(SectionHeader));
-        const section_header_bytes = std.mem.sliceAsBytes(section_headers.items);
-        try file.ensureTotalCapacity(image.allocator, section_header_offset + section_header_bytes.len);
-        file.items.len = section_header_offset + section_header_bytes.len;
-        try file.replaceRange(image.allocator, section_header_offset, section_header_bytes.len, section_header_bytes);
+        for (section.symbol_table.keys(), section.symbol_table.values()) |symbol_name, symbol_offset| {
+            const symbol_address = virtual_address + symbol_offset;
+            try image.section_manager.appendToSection(symbol_table_index, std.mem.asBytes(&SymbolTable.Entry{
+                .name_offset = symbol_name_offset,
+                .information = 0x10,
+                .other = 0,
+                .section_header_index = @intCast(section_i),
+                .value = symbol_address,
+                .size = 0,
+            }));
 
-        const _start_offset = blk: {
-            const entry_offset = image.sections.items[text_section_index].symbol_table.values()[image.entry_point];
-            const text_section_virtual_address = section_headers.items[text_section_index].virtual_address;
-            break :blk text_section_virtual_address + entry_offset;
-        };
+            try image.section_manager.appendToSection(string_table_index, symbol_name);
+            try image.section_manager.appendByteToSection(string_table_index, 0);
 
-        const header: *Header = @ptrCast(file.items.ptr);
-        header.section_header_offset = section_header_offset;
-        header.entry = _start_offset;
+            symbol_name_offset += @intCast(symbol_name.len + 1);
+        }
+
+        try file.appendSlice(image.section_manager.allocator, section.bytes.items);
+
+        section_headers.appendAssumeCapacity(SectionHeader{
+            .name_offset = section_name_offset,
+            .type = switch (section_i) {
+                0 => .null,
+                else => switch (section.type) {
+                    .loadable_program => .program_data,
+                    .string_table => .string_table,
+                    .symbol_table => .symbol_table,
+                    .null => .null,
+                },
+            },
+            .flags = .{
+                .alloc = true,
+                .executable = section.flags.execute,
+                .writable = section.flags.write,
+            },
+            .virtual_address = virtual_address,
+            .file_offset = section_offset,
+            .size = section.bytes.items.len,
+            .link = switch (section.type) {
+                .symbol_table => @intCast(string_table_index),
+                else => 0,
+            },
+            .info = switch (section.type) {
+                .symbol_table => 1,
+                else => 0,
+            },
+            .alignment = 0,
+            .entry_size = switch (section.type) {
+                .symbol_table => @sizeOf(SymbolTable.Entry),
+                else => 0,
+            },
+        });
+
+        section_name_offset += @intCast(section.name.len + 1);
     }
+
+    const section_header_offset = std.mem.alignForward(usize, file.items.len, @alignOf(SectionHeader));
+    const section_header_bytes = std.mem.sliceAsBytes(section_headers.items);
+
+    try file.ensureTotalCapacity(allocator, section_header_offset + section_header_bytes.len);
+
+    if (file.items.len < section_header_offset) {
+        file.appendNTimesAssumeCapacity(0, section_header_offset - file.items.len);
+    }
+
+    file.appendSliceAssumeCapacity(section_header_bytes);
+
+    // At this point, the file array list is not going to grow, so it's safe to practice relocations
+    for (image.section_manager.linker_relocations.items) |relocation| {
+        const source_section_index = relocation.source.index + @intFromBool(image.section_manager.null);
+        const target_section_index = relocation.target.index + @intFromBool(image.section_manager.null);
+        const source_section_header = &section_headers.items[source_section_index];
+        const target_section_header = &section_headers.items[target_section_index];
+        const source_file_offset = source_section_header.file_offset + relocation.source.offset;
+        const source_virtual_address = source_section_header.virtual_address + relocation.source.offset;
+        const target_virtual_address = target_section_header.virtual_address + relocation.target.offset;
+        const displacement: i32 = @intCast(@as(i64, @intCast(target_virtual_address)) - @as(i64, @intCast(source_virtual_address)));
+        const address_file_offset: usize = @intCast(@as(i64, @intCast(source_file_offset)) + relocation.offset);
+        const address_file_pointer: *align(1) i32 = @ptrCast(&file.items[address_file_offset]);
+        address_file_pointer.* = displacement;
+    }
+
+    const _start_offset = blk: {
+        const entry_offset = image.section_manager.sections.items[text_section_index].symbol_table.values()[image.entry_point];
+        const text_section_virtual_address = section_headers.items[text_section_index].virtual_address;
+        break :blk text_section_virtual_address + entry_offset;
+    };
+
+    const header: *Header = @ptrCast(file.items.ptr);
+    header.section_header_offset = section_header_offset;
+    header.entry = _start_offset;
 
     return file;
 }

@@ -982,9 +982,35 @@ const Analyzer = struct {
     fn processStringLiteral(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !u32 {
         const string_literal_node = analyzer.getScopeNode(scope_index, node_index);
         assert(string_literal_node.id == .string_literal);
-        const string_literal = analyzer.tokenStringLiteral(scope_index, string_literal_node.token);
+        const original_string_literal = analyzer.tokenStringLiteral(scope_index, string_literal_node.token);
+        const string_literal = for (original_string_literal) |ch| {
+            if (ch == '\\') {
+                break try fixupStringLiteral(analyzer.allocator, original_string_literal);
+            }
+        } else original_string_literal;
         const string_key = try analyzer.module.addStringLiteral(analyzer.allocator, string_literal);
         return string_key;
+    }
+
+    fn fixupStringLiteral(allocator: Allocator, string_literal: []const u8) ![]const u8 {
+        var result = try ArrayList(u8).initCapacity(allocator, string_literal.len - 1);
+        var i: usize = 0;
+
+        while (i < string_literal.len) : (i += 1) {
+            const ch = string_literal[i];
+            if (ch != '\\') {
+                result.appendAssumeCapacity(ch);
+            } else {
+                const next_ch: u8 = switch (string_literal[i + 1]) {
+                    'n' => '\n',
+                    else => |next_ch| panic("Unexpected character: {c}, 0x{x}", .{ next_ch, next_ch }),
+                };
+                result.appendAssumeCapacity(next_ch);
+                i += 1;
+            }
+        }
+
+        return result.items;
     }
 
     fn functionPrototypeReturnType(analyzer: *Analyzer, function_prototype_index: Function.Prototype.Index) Type.Index {

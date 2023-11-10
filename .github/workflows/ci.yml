@@ -43,3 +43,5 @@ jobs:
           nat/first
           zig build run -- test/stack/main.nat
           nat/stack
+          zig build run -- test/hello_world/main.nat
+          nat/hello_world
