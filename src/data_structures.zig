@@ -4,6 +4,7 @@ const assert = std.debug.assert;
 pub const Allocator = std.mem.Allocator;
 pub const AutoArrayHashMap = std.AutoArrayHashMapUnmanaged;
 pub const ArrayList = std.ArrayListUnmanaged;
+pub const ArrayListAligned = std.ArrayListAlignedUnmanaged;
 pub const AutoHashMap = std.AutoHashMapUnmanaged;
 pub const HashMap = std.HashMapUnmanaged;
 pub const SegmentedList = std.SegmentedList;

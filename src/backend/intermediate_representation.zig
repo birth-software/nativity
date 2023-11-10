@@ -15,6 +15,9 @@ const AutoArrayHashMap = data_structures.AutoArrayHashMap;
 const AutoHashMap = data_structures.AutoHashMap;
 const StringKeyMap = data_structures.StringKeyMap;
 
+const emit = @import("emit.zig");
+const SectionManager = emit.SectionManager;
+
 pub const Logger = enum {
     function,
     phi_removal,
@@ -40,9 +43,9 @@ pub const Result = struct {
     stack_references: BlockList(StackReference) = .{},
     string_literals: BlockList(StringLiteral) = .{},
     casts: BlockList(Cast) = .{},
-    readonly_data: ArrayList(u8) = .{},
     module: *Module,
     entry_point: Function.Index = Function.Index.invalid,
+    section_manager: emit.SectionManager,
 
     pub fn getFunctionName(ir: *Result, function_index: Function.Declaration.Index) []const u8 {
         return ir.module.getName(ir.module.function_name_map.get(@bitCast(function_index)).?).?;
@@ -54,10 +57,26 @@ pub fn initialize(compilation: *Compilation, module: *Module) !*Result {
     const builder = try compilation.base_allocator.create(Builder);
     builder.* = .{
         .allocator = compilation.base_allocator,
-        .module = module,
+        .ir = .{
+            .module = module,
+            .section_manager = SectionManager{
+                .allocator = compilation.base_allocator,
+            },
+        },
     };
 
     builder.ir.module = module;
+    _ = try builder.ir.section_manager.addSection(.{
+        .name = ".text",
+        .size_guess = 0,
+        .alignment = 0x1000,
+        .flags = .{
+            .execute = true,
+            .read = true,
+            .write = false,
+        },
+        .type = .loadable_program,
+    });
 
     var sema_function_index = function_iterator.getCurrentIndex();
     while (function_iterator.next()) |sema_function| {
@@ -260,7 +279,6 @@ pub const Instruction = union(enum) {
 
 pub const StringLiteral = struct {
     offset: u32,
-    hash: u32,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -395,10 +413,7 @@ pub const Function = struct {
 
 pub const Builder = struct {
     allocator: Allocator,
-    ir: Result = .{
-        .module = undefined,
-    },
-    module: *Module,
+    ir: Result,
     current_function_index: Function.Index = Function.Index.invalid,
 
     fn currentFunction(builder: *Builder) *Function {
@@ -406,7 +421,7 @@ pub const Builder = struct {
     }
 
     fn buildFunction(builder: *Builder, sema_function: Compilation.Function) !Function.Index {
-        const sema_prototype = builder.module.function_prototypes.get(builder.module.types.get(sema_function.prototype).function);
+        const sema_prototype = builder.ir.module.function_prototypes.get(builder.ir.module.types.get(sema_function.prototype).function);
         const function_declaration_allocation = try builder.ir.function_declarations.addOne(builder.allocator);
         const function_declaration = function_declaration_allocation.ptr;
         function_declaration.* = .{
@@ -420,7 +435,7 @@ pub const Builder = struct {
         if (sema_prototype.arguments) |sema_arguments| {
             try function_declaration.arguments.ensureTotalCapacity(builder.allocator, @intCast(sema_arguments.len));
             for (sema_arguments) |sema_argument_declaration_index| {
-                const sema_argument_declaration = builder.module.declarations.get(sema_argument_declaration_index);
+                const sema_argument_declaration = builder.ir.module.declarations.get(sema_argument_declaration_index);
                 const argument_allocation = try builder.ir.arguments.append(builder.allocator, .{
                     .type = try builder.translateType(sema_argument_declaration.type),
                 });
@@ -445,7 +460,7 @@ pub const Builder = struct {
                 // TODO: arguments
                 function.current_basic_block = try builder.newBlock();
 
-                const return_type = builder.module.types.get(sema_prototype.return_type);
+                const return_type = builder.ir.module.types.get(sema_prototype.return_type);
                 const is_noreturn = return_type.* == .noreturn;
 
                 if (!is_noreturn) {
@@ -486,7 +501,7 @@ pub const Builder = struct {
                     });
                 }
 
-                const sema_block = sema_function.getBodyBlock(builder.module);
+                const sema_block = sema_function.getBodyBlock(builder.ir.module);
                 try builder.block(sema_block, .{ .emit_exit_block = !is_noreturn });
 
                 if (!is_noreturn and sema_block.reaches_end) {
@@ -797,7 +812,7 @@ pub const Builder = struct {
     };
 
     fn emitSyscallArgument(builder: *Builder, sema_syscall_argument_value_index: Compilation.Value.Index) !Instruction.Index {
-        const sema_syscall_argument_value = builder.module.values.get(sema_syscall_argument_value_index);
+        const sema_syscall_argument_value = builder.ir.module.values.get(sema_syscall_argument_value_index);
         return switch (sema_syscall_argument_value.*) {
             .integer => |integer| try builder.processInteger(integer),
             .sign_extend => |cast_index| try builder.processCast(cast_index, .sign_extend),
@@ -807,8 +822,8 @@ pub const Builder = struct {
     }
 
     fn processCast(builder: *Builder, sema_cast_index: Compilation.Cast.Index, cast_type: CastType) !Instruction.Index {
-        const sema_cast = builder.module.casts.get(sema_cast_index);
-        const sema_source_value = builder.module.values.get(sema_cast.value);
+        const sema_cast = builder.ir.module.casts.get(sema_cast_index);
+        const sema_source_value = builder.ir.module.values.get(sema_cast.value);
         const source_value = switch (sema_source_value.*) {
             .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
             else => |t| @panic(@tagName(t)),
@@ -827,7 +842,7 @@ pub const Builder = struct {
     }
 
     fn processDeclarationReferenceRaw(builder: *Builder, declaration_index: Compilation.Declaration.Index) !Instruction.Index {
-        const sema_declaration = builder.module.declarations.get(declaration_index);
+        const sema_declaration = builder.ir.module.declarations.get(declaration_index);
         const result = switch (sema_declaration.scope_type) {
             .local => builder.currentFunction().stack_map.get(declaration_index).?,
             .global => unreachable,
@@ -863,7 +878,7 @@ pub const Builder = struct {
     }
 
     fn processSyscall(builder: *Builder, sema_syscall_index: Compilation.Syscall.Index) anyerror!Instruction.Index {
-        const sema_syscall = builder.module.syscalls.get(sema_syscall_index);
+        const sema_syscall = builder.ir.module.syscalls.get(sema_syscall_index);
         var arguments = try ArrayList(Instruction.Index).initCapacity(builder.allocator, sema_syscall.argument_count + 1);
 
         const sema_syscall_number = sema_syscall.number;
@@ -889,12 +904,12 @@ pub const Builder = struct {
 
     fn block(builder: *Builder, sema_block: *Compilation.Block, options: BlockOptions) anyerror!void {
         for (sema_block.statements.items) |sema_statement_index| {
-            const sema_statement = builder.module.values.get(sema_statement_index);
+            const sema_statement = builder.ir.module.values.get(sema_statement_index);
             switch (sema_statement.*) {
                 .loop => |loop_index| {
-                    const sema_loop = builder.module.loops.get(loop_index);
-                    const sema_loop_condition = builder.module.values.get(sema_loop.condition);
-                    const sema_loop_body = builder.module.values.get(sema_loop.body);
+                    const sema_loop = builder.ir.module.loops.get(loop_index);
+                    const sema_loop_condition = builder.ir.module.values.get(sema_loop.condition);
+                    const sema_loop_body = builder.ir.module.values.get(sema_loop.body);
                     const condition: Compilation.Value.Index = switch (sema_loop_condition.*) {
                         .bool => |bool_value| switch (bool_value) {
                             true => Compilation.Value.Index.invalid,
@@ -920,7 +935,7 @@ pub const Builder = struct {
                         .destination = loop_head_block,
                     });
 
-                    const sema_body_block = builder.module.blocks.get(sema_loop_body.block);
+                    const sema_body_block = builder.ir.module.blocks.get(sema_loop_body.block);
                     builder.currentFunction().current_basic_block = try builder.blockInsideBasicBlock(sema_body_block, loop_body_block);
                     if (!loop_prologue_block.invalid) {
                         builder.ir.blocks.get(loop_prologue_block).seal();
@@ -950,7 +965,7 @@ pub const Builder = struct {
                     .@"unreachable" = {},
                 }),
                 .@"return" => |sema_ret_index| {
-                    const sema_ret = builder.module.returns.get(sema_ret_index);
+                    const sema_ret = builder.ir.module.returns.get(sema_ret_index);
                     const return_value = try builder.emitReturnValue(sema_ret.value);
                     const phi_instruction = builder.ir.instructions.get(builder.currentFunction().return_phi_node);
                     const phi = switch (phi_instruction.phi.invalid) {
@@ -976,10 +991,10 @@ pub const Builder = struct {
                     });
                 },
                 .declaration => |sema_declaration_index| {
-                    const sema_declaration = builder.module.declarations.get(sema_declaration_index);
+                    const sema_declaration = builder.ir.module.declarations.get(sema_declaration_index);
                     //logln("Name: {s}\n", .{builder.module.getName(sema_declaration.name).?});
                     assert(sema_declaration.scope_type == .local);
-                    const declaration_type = builder.module.types.get(sema_declaration.type);
+                    const declaration_type = builder.ir.module.types.get(sema_declaration.type);
                     switch (declaration_type.*) {
                         .comptime_int => unreachable,
                         else => {
@@ -1011,7 +1026,7 @@ pub const Builder = struct {
     }
 
     fn emitDeclarationInitValue(builder: *Builder, declaration_init_value_index: Compilation.Value.Index) !Instruction.Index {
-        const declaration_init_value = builder.module.values.get(declaration_init_value_index);
+        const declaration_init_value = builder.ir.module.values.get(declaration_init_value_index);
         return switch (declaration_init_value.*) {
             .call => |call_index| try builder.processCall(call_index),
             .integer => |integer| try builder.processInteger(integer),
@@ -1020,7 +1035,7 @@ pub const Builder = struct {
     }
 
     fn emitReturnValue(builder: *Builder, return_value_index: Compilation.Value.Index) !Instruction.Index {
-        const return_value = builder.module.values.get(return_value_index);
+        const return_value = builder.ir.module.values.get(return_value_index);
         return switch (return_value.*) {
             .syscall => |syscall_index| try builder.processSyscall(syscall_index),
             .integer => |integer| try builder.processInteger(integer),
@@ -1064,7 +1079,7 @@ pub const Builder = struct {
     }
 
     fn emitCallArgument(builder: *Builder, call_argument_value_index: Compilation.Value.Index) !Instruction.Index {
-        const call_argument_value = builder.module.values.get(call_argument_value_index);
+        const call_argument_value = builder.ir.module.values.get(call_argument_value_index);
         return switch (call_argument_value.*) {
             .integer => |integer| try builder.processInteger(integer),
             .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
@@ -1074,12 +1089,12 @@ pub const Builder = struct {
     }
 
     fn processCall(builder: *Builder, sema_call_index: Compilation.Call.Index) anyerror!Instruction.Index {
-        const sema_call = builder.module.calls.get(sema_call_index);
+        const sema_call = builder.ir.module.calls.get(sema_call_index);
         const sema_argument_list_index = sema_call.arguments;
         const argument_list: []const Instruction.Index = switch (sema_argument_list_index.invalid) {
             false => blk: {
                 var argument_list = ArrayList(Instruction.Index){};
-                const sema_argument_list = builder.module.argument_lists.get(sema_argument_list_index);
+                const sema_argument_list = builder.ir.module.argument_lists.get(sema_argument_list_index);
                 try argument_list.ensureTotalCapacity(builder.allocator, sema_argument_list.array.items.len);
                 for (sema_argument_list.array.items) |sema_argument_value_index| {
                     const argument_value_index = try builder.emitCallArgument(sema_argument_value_index);
@@ -1091,7 +1106,7 @@ pub const Builder = struct {
         };
 
         const call_index = try builder.call(.{
-            .function = switch (builder.module.values.get(sema_call.value).*) {
+            .function = switch (builder.ir.module.values.get(sema_call.value).*) {
                 .function => |function_index| .{
                     .index = function_index.index,
                     .block = function_index.block,
@@ -1109,16 +1124,34 @@ pub const Builder = struct {
     }
 
     fn processStringLiteral(builder: *Builder, string_literal_hash: u32) !Instruction.Index {
-        const string_literal = builder.module.string_literals.getValue(string_literal_hash).?;
+        const string_literal = builder.ir.module.string_literals.getValue(string_literal_hash).?;
 
-        const readonly_offset = builder.ir.readonly_data.items.len;
-        try builder.ir.readonly_data.appendSlice(builder.allocator, string_literal);
-        try builder.ir.readonly_data.append(builder.allocator, 0);
+        if (builder.ir.section_manager.rodata == null) {
+            const rodata_index = try builder.ir.section_manager.addSection(.{
+                .name = ".rodata",
+                .size_guess = 0,
+                .alignment = 0x1000,
+                .flags = .{
+                    .read = true,
+                    .write = false,
+                    .execute = false,
+                },
+                .type = .loadable_program,
+            });
+
+            builder.ir.section_manager.rodata = @intCast(rodata_index);
+        }
+
+        const rodata_index = builder.ir.section_manager.rodata orelse unreachable;
+        const rodata_section_offset = builder.ir.section_manager.getSectionOffset(rodata_index);
+
+        try builder.ir.section_manager.appendToSection(rodata_index, string_literal);
+        try builder.ir.section_manager.appendByteToSection(rodata_index, 0);
 
         const string_literal_allocation = try builder.ir.string_literals.append(builder.allocator, .{
-            .offset = @intCast(readonly_offset),
-            .hash = string_literal_hash,
+            .offset = @intCast(rodata_section_offset),
         });
+
         const result = try builder.append(.{
             .load_string_literal = string_literal_allocation.index,
         });
@@ -1126,48 +1159,8 @@ pub const Builder = struct {
         return result;
     }
 
-    // fn emitValue(builder: *Builder, sema_value_index: Compilation.Value.Index) !Instruction.Index {
-    //     const sema_value = builder.module.values.get(sema_value_index).*;
-    //     return switch (sema_value) {
-    //         .integer => |integer| try builder.append(.{
-    //             .integer = integer,
-    //         }),
-    //         .call => |sema_call_index| try builder.processCall(sema_call_index),
-    //         .declaration_reference => |sema_declaration_reference| blk: {
-    //         },
-    //         .syscall => |sema_syscall_index| try builder.processSyscall(sema_syscall_index),
-    //         .string_literal => |string_literal_hash| blk: {
-    //             const string_literal = builder.module.string_literals.getValue(string_literal_hash).?;
-    //
-    //             const readonly_offset = builder.ir.readonly_data.items.len;
-    //             try builder.ir.readonly_data.appendSlice(builder.allocator, string_literal);
-    //
-    //             const string_literal_allocation = try builder.ir.string_literals.append(builder.allocator, .{
-    //                 .offset = @intCast(readonly_offset),
-    //                 .hash = string_literal_hash,
-    //             });
-    //             break :blk try builder.append(.{
-    //                 .string_literal = string_literal_allocation.index,
-    //             });
-    //         },
-    //         .sign_extend => |sema_cast_index| blk: {
-    //             const sema_sign_extend = builder.module.casts.get(sema_cast_index);
-    //
-    //             const sign_extend = try builder.ir.casts.append(builder.allocator, .{
-    //                 .value = try builder.emitValue(sema_sign_extend.value),
-    //                 .type = try builder.translateType(sema_sign_extend.type),
-    //             });
-    //
-    //             break :blk try builder.append(.{
-    //                 .sign_extend = sign_extend.index,
-    //             });
-    //         },
-    //         else => |t| @panic(@tagName(t)),
-    //     };
-    // }
-
     fn translateType(builder: *Builder, type_index: Compilation.Type.Index) !Type {
-        const sema_type = builder.module.types.get(type_index);
+        const sema_type = builder.ir.module.types.get(type_index);
         return switch (sema_type.*) {
             .integer => |integer| switch (integer.bit_count) {
                 8 => .i8,
