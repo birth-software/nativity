@@ -1147,21 +1147,33 @@ const InstructionSelection = struct {
         }
 
         const instruction = mir.ir.instructions.get(ir_instruction_index);
-        if (instruction.* != .stack or !instruction_selection.stack_map.contains(ir_instruction_index)) {
+        const defer_materialization = switch (instruction.*) {
+            .stack => !instruction_selection.stack_map.contains(ir_instruction_index),
+            .load_integer => false,
+            else => true,
+        };
+
+        if (defer_materialization) {
             const ir_type = getIrType(mir.ir, ir_instruction_index);
             const value_type = resolveType(ir_type);
             const register_class = register_classes.get(value_type);
             const new_register = try mir.createVirtualRegister(register_class);
             try instruction_selection.value_map.putNoClobber(mir.allocator, ir_instruction_index, new_register);
             return new_register;
-        }
+        } else {
+            const new_register = switch (instruction.*) {
+                .load_integer => try instruction_selection.materializeInteger(mir, ir_instruction_index),
+                else => unreachable,
+            };
+            try instruction_selection.local_value_map.put(mir.allocator, ir_instruction_index, new_register);
 
-        unreachable;
+            return new_register;
+        }
     }
 
     // Moving an immediate to a register
-    fn materializeInteger(instruction_selection: *InstructionSelection, mir: *MIR, ir_instruction_index: ir.Instruction.Index) !void {
-        const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
+    fn materializeInteger(instruction_selection: *InstructionSelection, mir: *MIR, ir_instruction_index: ir.Instruction.Index) !Register {
+        // const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
         const integer = mir.ir.instructions.get(ir_instruction_index).load_integer;
         const value_type = resolveType(integer.type);
         // const destination_register_class = register_classes.get(value_type);
@@ -1184,6 +1196,8 @@ const InstructionSelection = struct {
                     else => |t| @panic(@tagName(t)),
                 };
                 const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                const register_class = register_classes.get(value_type);
+                const destination_register = try mir.createVirtualRegister(register_class);
                 const operand_id = instruction_descriptor.operands[0].id;
                 // const register_class = register_classes.get(operand_id);
                 const destination_operand = Operand{
@@ -1197,7 +1211,10 @@ const InstructionSelection = struct {
                 const xor = try mir.buildInstruction(instruction_selection, instruction_id, &.{
                     destination_operand,
                 });
+
                 try instruction_selection.instruction_cache.append(mir.allocator, xor);
+
+                return destination_register;
             },
             false => {
                 const instruction_id: Instruction.Id = switch (value_type) {
@@ -1216,6 +1233,8 @@ const InstructionSelection = struct {
 
                 const instruction_descriptor = instruction_descriptors.get(instruction_id);
                 const operand_id = instruction_descriptor.operands[0].id;
+                const register_class = register_classes.get(value_type);
+                const destination_register = try mir.createVirtualRegister(register_class);
 
                 const destination_operand = Operand{
                     .id = operand_id,
@@ -1239,6 +1258,8 @@ const InstructionSelection = struct {
                 });
 
                 try instruction_selection.instruction_cache.append(mir.allocator, instr);
+
+                return destination_register;
             },
         }
     }
@@ -2199,7 +2220,7 @@ pub const MIR = struct {
                                 },
                             }
                         },
-                        .load_integer => try instruction_selection.materializeInteger(mir, ir_instruction_index),
+                        .load_integer => unreachable,
                         .@"unreachable" => try instruction_selection.instruction_cache.append(mir.allocator, try mir.buildInstruction(instruction_selection, .ud2, &.{})),
                         .syscall => |ir_syscall_index| {
                             const ir_syscall = mir.ir.syscalls.get(ir_syscall_index);

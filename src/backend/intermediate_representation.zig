@@ -853,10 +853,13 @@ pub const Builder = struct {
             .type = try builder.translateType(integer_value.type),
         };
         assert(integer.type.isInteger());
-        const load_integer = try builder.append(.{
+        const instruction_allocation = try builder.ir.instructions.append(builder.allocator, .{
             .load_integer = integer,
         });
-        return load_integer;
+        // const load_integer = try builder.append(.{
+        //     .load_integer = integer,
+        // });
+        return instruction_allocation.index;
     }
 
     fn processSyscall(builder: *Builder, sema_syscall_index: Compilation.Syscall.Index) anyerror!Instruction.Index {
