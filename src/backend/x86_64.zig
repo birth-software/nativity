@@ -3765,10 +3765,29 @@ pub const MIR = struct {
         const gp_register_encoding: Encoding.GP64 = switch (physical_register) {
             .rax => .a,
             .rdi => .di,
+            .rsi => .si,
+            .rdx => .d,
+            .rcx => .c,
             else => |t| @panic(@tagName(t)),
         };
 
         return gp_register_encoding;
+    }
+
+    fn computeStackSize(stack_objects: []const StackObject) u32 {
+        var result: u32 = 0;
+
+        for (stack_objects) |stack_object| {
+            result += @intCast(stack_object.size);
+            result = std.mem.alignForward(u32, result, stack_object.alignment);
+        }
+
+        return result;
+    }
+
+    fn computeStackOffset(stack_objects: []const StackObject) i32 {
+        const stack_size = computeStackSize(stack_objects);
+        return -@as(i32, @intCast(stack_size));
     }
 
     pub fn encode(mir: *MIR) !*emit.Result {
@@ -3790,16 +3809,7 @@ pub const MIR = struct {
             function_offsets.putAssumeCapacityNoClobber(function_index, function_offset);
             image.sections.items[0].symbol_table.putAssumeCapacityNoClobber(function.name, function_offset);
 
-            const stack_size = blk: {
-                var result: u32 = 0;
-
-                for (function.instruction_selection.stack_objects.items) |stack_object| {
-                    assert(std.mem.isAligned(result, stack_object.alignment));
-                    result += @intCast(stack_object.size);
-                }
-
-                break :blk result;
-            };
+            const stack_size = std.mem.alignForward(u32, computeStackSize(function.instruction_selection.stack_objects.items), 0x10);
 
             if (stack_size != 0) {
                 image.appendCodeByte(0x55); // push rbp
@@ -3859,15 +3869,46 @@ pub const MIR = struct {
 
                             switch (memory.addressing_mode.base) {
                                 .frame_index => |frame_index| {
-                                    const stack_offset = blk: {
-                                        var computed_stack_offset: usize = 0;
-                                        for (function.instruction_selection.stack_objects.items[0 .. frame_index + 1]) |stack_object| {
-                                            assert(std.mem.isAligned(computed_stack_offset, stack_object.alignment));
-                                            computed_stack_offset += stack_object.size;
-                                        }
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
+                                    const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
 
-                                        break :blk -@as(i64, @intCast(computed_stack_offset));
-                                    };
+                                    const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
+                                    image.appendCode(stack_bytes);
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        .mov64mr => {
+                            assert(instruction.operands.items.len == 2);
+
+                            const rex = Rex{
+                                .b = false,
+                                .x = false,
+                                .r = false,
+                                .w = true,
+                            };
+                            image.appendCodeByte(@bitCast(rex));
+
+                            const source_operand = mir.operands.get(instruction.operands.items[1]);
+                            const source_gp64 = getGP64Encoding(source_operand.*);
+
+                            const destination_operand = mir.operands.get(instruction.operands.items[0]);
+                            assert(destination_operand.u == .memory);
+                            const memory = destination_operand.u.memory;
+                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
+                            const opcode: u8 = @intCast(instruction_descriptor.opcode);
+                            image.appendCodeByte(opcode);
+
+                            const modrm = ModRm{
+                                .rm = @intFromEnum(Encoding.GP64.bp),
+                                .reg = @intCast(@intFromEnum(source_gp64)),
+                                .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
+                            };
+                            image.appendCodeByte(@bitCast(modrm));
+
+                            switch (memory.addressing_mode.base) {
+                                .frame_index => |frame_index| {
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
                                     const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
 
                                     const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
@@ -3899,15 +3940,7 @@ pub const MIR = struct {
 
                             switch (source_memory.addressing_mode.base) {
                                 .frame_index => |frame_index| {
-                                    const stack_offset = blk: {
-                                        var computed_stack_offset: usize = 0;
-                                        for (function.instruction_selection.stack_objects.items[0 .. frame_index + 1]) |stack_object| {
-                                            assert(std.mem.isAligned(computed_stack_offset, stack_object.alignment));
-                                            computed_stack_offset += stack_object.size;
-                                        }
-
-                                        break :blk -@as(i64, @intCast(computed_stack_offset));
-                                    };
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
                                     const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
 
                                     const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
@@ -3915,6 +3948,60 @@ pub const MIR = struct {
                                 },
                                 else => |t| @panic(@tagName(t)),
                             }
+                        },
+                        .mov64rm => {
+                            assert(instruction.operands.items.len == 2);
+
+                            const rex = Rex{
+                                .b = false,
+                                .x = false,
+                                .r = false,
+                                .w = true,
+                            };
+                            image.appendCodeByte(@bitCast(rex));
+
+                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
+                            const opcode: u8 = @intCast(instruction_descriptor.opcode);
+                            image.appendCodeByte(opcode);
+
+                            const destination_operand = mir.operands.get(instruction.operands.items[0]);
+                            const destination_gp64 = getGP64Encoding(destination_operand.*);
+
+                            const source_operand = mir.operands.get(instruction.operands.items[1]);
+                            assert(source_operand.u == .memory);
+                            const source_memory = source_operand.u.memory;
+
+                            const modrm = ModRm{
+                                .rm = @intFromEnum(Encoding.GP64.bp),
+                                .reg = @intCast(@intFromEnum(destination_gp64)),
+                                .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
+                            };
+                            image.appendCodeByte(@bitCast(modrm));
+
+                            switch (source_memory.addressing_mode.base) {
+                                .frame_index => |frame_index| {
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
+                                    const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
+
+                                    const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
+                                    image.appendCode(stack_bytes);
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        .mov32ri => {
+                            assert(instruction.operands.items.len == 2);
+
+                            const source_operand = mir.operands.get(instruction.operands.items[1]);
+                            const source_immediate: u32 = @intCast(source_operand.u.immediate);
+
+                            const destination_operand = mir.operands.get(instruction.operands.items[0]);
+                            const destination_gp32 = getGP32Encoding(destination_operand.*);
+
+                            const opcode = @as(u8, 0xb8) | @as(u3, @intCast(@intFromEnum(destination_gp32)));
+                            image.appendCodeByte(opcode);
+
+                            image.appendCode(std.mem.asBytes(&source_immediate));
                         },
                         .mov32ri64 => {
                             assert(instruction.operands.items.len == 2);
@@ -3962,15 +4049,7 @@ pub const MIR = struct {
 
                             switch (source_memory.addressing_mode.base) {
                                 .frame_index => |frame_index| {
-                                    const stack_offset = blk: {
-                                        var computed_stack_offset: usize = 0;
-                                        for (function.instruction_selection.stack_objects.items[0 .. frame_index + 1]) |stack_object| {
-                                            assert(std.mem.isAligned(computed_stack_offset, stack_object.alignment));
-                                            computed_stack_offset += stack_object.size;
-                                        }
-
-                                        break :blk -@as(i64, @intCast(computed_stack_offset));
-                                    };
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
                                     const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
 
                                     const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
@@ -4016,9 +4095,6 @@ pub const MIR = struct {
                             const source_operand = mir.operands.get(instruction.operands.items[1]);
                             assert(destination_operand.id == source_operand.id);
 
-                            // const destination_physical_register = destination_operand.u.register.index.physical;
-                            // _ = destination_physical_register;
-                            // const source_physical_register = source_operand.u.register.index.physical;
                             switch (destination_operand.id) {
                                 .gp32 => {
                                     image.appendCodeByte(0x89);
@@ -4032,8 +4108,68 @@ pub const MIR = struct {
                                     };
                                     image.appendCodeByte(@bitCast(modrm));
                                 },
+                                .gp64 => {
+                                    const rex = Rex{
+                                        .b = false,
+                                        .x = false,
+                                        .r = false,
+                                        .w = true,
+                                    };
+                                    image.appendCodeByte(@bitCast(rex));
+
+                                    image.appendCodeByte(0x89);
+
+                                    const destination_register = getGP64Encoding(destination_operand.*);
+                                    const source_register = getGP64Encoding(source_operand.*);
+                                    const modrm = ModRm{
+                                        .rm = @intCast(@intFromEnum(destination_register)),
+                                        .reg = @intCast(@intFromEnum(source_register)),
+                                        .mod = @as(u2, @intFromBool(true)) << 1 | @intFromBool(true),
+                                    };
+                                    image.appendCodeByte(@bitCast(modrm));
+                                },
                                 else => |t| @panic(@tagName(t)),
                             }
+                        },
+                        .lea64r => {
+                            assert(instruction.operands.items.len == 2);
+                            const rex = Rex{
+                                .b = false,
+                                .x = false,
+                                .r = false,
+                                .w = true,
+                            };
+                            image.appendCodeByte(@bitCast(rex));
+
+                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
+                            const opcode: u8 = @intCast(instruction_descriptor.opcode);
+                            image.appendCodeByte(opcode);
+
+                            const destination_operand = mir.operands.get(instruction.operands.items[0]);
+                            const destination_register = getGP64Encoding(destination_operand.*);
+                            // const source_operand = mir.operands.get(instruction.operands.items[1]);
+                            const modrm = ModRm{
+                                .rm = @intFromEnum(Encoding.GP64.bp),
+                                .reg = @intCast(@intFromEnum(destination_register)),
+                                .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(false),
+                            };
+                            image.appendCodeByte(@bitCast(modrm));
+
+                            const source_operand = mir.operands.get(instruction.operands.items[1]);
+                            switch (source_operand.u) {
+                                .lea64mem => |lea64mem| {
+                                    assert(lea64mem.gp64 == null);
+                                    assert(lea64mem.scale == 1);
+                                    assert(lea64mem.scale_reg == null);
+
+                                    switch (lea64mem.displacement) {
+                                        .string_literal => unreachable,
+                                        else => unreachable,
+                                    }
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                            unreachable;
                         },
                         else => |t| @panic(@tagName(t)),
                     }
