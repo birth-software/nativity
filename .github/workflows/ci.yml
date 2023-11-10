@@ -41,3 +41,5 @@ jobs:
           zig build test -Dall --summary all
           zig build run -- test/first/main.nat
           nat/first
+          zig build run -- test/stack/main.nat
+          nat/stack
