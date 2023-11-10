@@ -45,10 +45,10 @@ pub const Logger = enum {
         // .register_allocation_problematic_hint,
         // .register_allocation_assignment,
         // .register_allocation_reload,
-        // .register_allocation_function_before,
-        // .register_allocation_new_instruction,
-        // .register_allocation_new_instruction_function_before,
-        // .register_allocation_instruction_avoid_copy,
+        .register_allocation_function_before,
+        .register_allocation_new_instruction,
+        .register_allocation_new_instruction_function_before,
+        .register_allocation_instruction_avoid_copy,
         .register_allocation_function_after,
         // .register_allocation_operand_list_verification,
         .encoding,
@@ -2258,10 +2258,6 @@ pub const MIR = struct {
                                 try instruction_selection.instruction_cache.append(mir.allocator, argument_copy);
                             }
 
-                            // TODO: handle syscall return value
-                            const syscall = try mir.buildInstruction(instruction_selection, .syscall, &.{});
-                            try instruction_selection.instruction_cache.append(mir.allocator, syscall);
-
                             const produce_syscall_return_value = switch (instruction_i == ir_block.instructions.items.len - 2) {
                                 true => blk: {
                                     const last_block_instruction = mir.ir.instructions.get(ir_block.instructions.items[ir_block.instructions.items.len - 1]);
@@ -2274,20 +2270,28 @@ pub const MIR = struct {
                                 false => true,
                             };
 
-                            if (produce_syscall_return_value) {
-                                const physical_return_register = Register{
-                                    .index = .{
-                                        .physical = .rax,
-                                    },
-                                };
-                                const physical_return_operand = Operand{
+                            const physical_return_register = Register{
+                                .index = .{
+                                    .physical = .rax,
+                                },
+                            };
+
+                            const syscall = try mir.buildInstruction(instruction_selection, .syscall, if (produce_syscall_return_value) &.{
+                                Operand{
                                     .id = .gp64,
                                     .u = .{
                                         .register = physical_return_register,
                                     },
-                                    .flags = .{ .type = .def },
-                                };
+                                    .flags = .{
+                                        .type = .def,
+                                        .implicit = true,
+                                    },
+                                },
+                            } else &.{});
 
+                            try instruction_selection.instruction_cache.append(mir.allocator, syscall);
+
+                            if (produce_syscall_return_value) {
                                 const virtual_return_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
                                 const virtual_return_operand = Operand{
                                     .id = .gp64,
@@ -2299,7 +2303,13 @@ pub const MIR = struct {
 
                                 const syscall_result_copy = try mir.buildInstruction(instruction_selection, .copy, &.{
                                     virtual_return_operand,
-                                    physical_return_operand,
+                                    Operand{
+                                        .id = .gp64,
+                                        .u = .{
+                                            .register = physical_return_register,
+                                        },
+                                        .flags = .{},
+                                    },
                                 });
                                 try instruction_selection.instruction_cache.append(mir.allocator, syscall_result_copy);
                             }
@@ -3167,6 +3177,10 @@ pub const MIR = struct {
                 switch (instruction.id) {
                     .mov32rm => {},
                     .mov32r0 => {},
+                    .mov32ri => {},
+                    .mov64rm => {},
+                    .lea64r => {},
+                    .mov32ri64 => {},
                     .copy => {
                         const operand_index = instruction.operands.items[1];
                         const operand = mir.operands.get(operand_index);
@@ -4149,6 +4163,7 @@ pub const MIR = struct {
                 } else {
                     switch (instruction) {
                         .ret => {},
+                        .syscall => {},
                         else => unreachable,
                     }
                 }
