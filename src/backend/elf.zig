@@ -7,58 +7,96 @@ const Allocator = data_structures.Allocator;
 const ArrayList = data_structures.ArrayList;
 
 const emit = @import("emit.zig");
+const page_size = 0x1000;
 
-pub const Writer = struct {
-    bytes: ArrayList(u8),
-    allocator: Allocator,
+pub fn writeToMemory(image: *emit.Result) !std.ArrayListAlignedUnmanaged(u8, page_size) {
+    var file = try std.ArrayListAlignedUnmanaged(u8, 0x1000).initCapacity(image.allocator, 0x100000);
+    _ = try image.insertSection(0, .{
+        .name = "",
+        .size = page_size,
+        .alignment = page_size,
+        .flags = .{
+            .read = true,
+            .write = false,
+            .execute = false,
+        },
+        .type = .loadable_program,
+    });
 
-    pub fn init(allocator: Allocator) !Writer {
-        return .{
-            .bytes = try ArrayList(u8).initCapacity(allocator, 0x10000),
-            .allocator = allocator,
-        };
+    const symbol_table_index = try image.addSection(.{
+        .name = ".symtab",
+        .size = page_size,
+        .alignment = @alignOf(SymbolTable.Entry),
+        .flags = .{
+            .read = false,
+            .write = false,
+            .execute = false,
+        },
+        .type = .symbol_table,
+    });
+    const string_table_index = try image.addSection(.{
+        .name = ".strtab",
+        .size = page_size,
+        .alignment = 1,
+        .flags = .{
+            .read = false,
+            .write = false,
+            .execute = false,
+        },
+        .type = .string_table,
+    });
+    const section_header_string_table_index = try image.addSection(.{
+        .name = ".shstrtab",
+        .size = page_size,
+        .alignment = 1,
+        .flags = .{
+            .read = false,
+            .write = false,
+            .execute = false,
+        },
+        .type = .string_table,
+    });
+
+    const base_virtual_address = 0x400000;
+    const text_section_index = 1;
+
+    const program_header_count = blk: {
+        var result: usize = 0;
+        for (image.sections.items) |section| {
+            result += @intFromBool(switch (section.type) {
+                .null => false,
+                .loadable_program => true,
+                .string_table => false,
+                .symbol_table => false,
+            });
+        }
+        break :blk result;
+    };
+
+    var symbol_name_offset: u32 = 0;
+
+    image.writeToSection(symbol_table_index, std.mem.asBytes(&SymbolTable.Entry{
+        .name_offset = symbol_name_offset,
+        .information = 0,
+        .other = 0,
+        .section_header_index = 0,
+        .value = 0,
+        .size = 0,
+    }));
+
+    image.writeToSection(string_table_index, "");
+    image.writeByteToSection(string_table_index, 0);
+    symbol_name_offset += 1;
+
+    for (image.sections.items) |section| {
+        image.writeToSection(section_header_string_table_index, section.name);
+        image.writeByteToSection(section_header_string_table_index, 0);
     }
 
-    pub fn getHeader(writer: *Writer) *Header {
-        return @ptrCast(@alignCast(writer.bytes.items.ptr));
-    }
+    {
+        var program_segment_offset: usize = 0;
 
-    pub fn writeToMemory(writer: *Writer, image: *const emit.Result) !void {
-        const section_fields = @typeInfo(@TypeOf(image.sections)).Struct.fields;
-        const section_count = blk: {
-            var result: u16 = 0;
-            inline for (section_fields) |section_field| {
-                const section_size = @field(image.sections, section_field.name).index;
-                result += @intFromBool(section_size > 0);
-            }
-            break :blk result;
-        };
-
-        const program_header_count = section_count;
-        const program_start_offset = @sizeOf(Header) + program_header_count * @sizeOf(ProgramHeader);
-
-        var section_offsets: [section_fields.len]u32 = undefined;
-
-        const program_end_offset = blk: {
-            var result: u32 = program_start_offset;
-            inline for (section_fields, 0..) |section_field, section_index| {
-                const section = &@field(image.sections, section_field.name);
-                if (section.index > 0) {
-                    const section_offset = std.mem.alignForward(u32, result, section.alignment);
-                    section_offsets[section_index] = section_offset;
-                    result = std.mem.alignForward(u32, section_offset + @as(u32, @intCast(section.index)), section.alignment);
-                }
-            }
-
-            break :blk result;
-        };
-
-        const elf_file_end_offset = program_end_offset + @sizeOf(SectionHeader) * section_count;
-        try writer.bytes.resize(writer.allocator, elf_file_end_offset);
-
-        const base_address = 0x200000;
-
-        writer.getHeader().* = Header{
+        image.writeToSection(0, std.mem.asBytes(&Header{
             .endianness = .little,
             .machine = switch (image.target.cpu.arch) {
                 .x86_64 => .AMD64,
@@ -68,79 +106,134 @@ pub const Writer = struct {
                 .linux => .systemv,
                 else => unreachable,
             },
-            .entry = base_address + section_offsets[0] + image.entry_point,
-            .section_header_offset = program_end_offset,
-            .program_header_count = program_header_count,
-            .section_header_count = section_count,
-            .name_section_header_index = 0,
-        };
+            .entry = 0,
+            .section_header_offset = 0,
+            .program_header_count = @intCast(program_header_count),
+            .section_header_count = @intCast(image.sections.items.len),
+            .section_header_string_table_index = @intCast(section_header_string_table_index),
+        }));
 
-        var program_header_offset: usize = @sizeOf(Header);
-        var section_header_offset = program_end_offset;
-        inline for (section_fields, section_offsets) |section_field, section_offset| {
-            const section_name = section_field.name;
-            const section = &@field(image.sections, section_name);
-            if (section.index > 0) {
-                const program_header: *ProgramHeader = @ptrCast(@alignCast(writer.bytes.items[program_header_offset..].ptr));
-                program_header.* = .{
-                    .type = .load,
-                    .flags = .{
-                        .executable = equal(u8, section_name, "text"),
-                        .writable = equal(u8, section_name, "data"),
-                        .readable = true,
-                    },
-                    .offset = 0,
-                    .virtual_address = base_address,
-                    .physical_address = base_address,
-                    .size_in_file = section.index,
-                    .size_in_memory = section.index,
-                    .alignment = 0,
-                };
+        for (image.sections.items, 0..) |section, section_index| {
+            switch (section.type) {
+                .loadable_program => {
+                    program_segment_offset = std.mem.alignForward(usize, program_segment_offset, section.alignment);
+                    const virtual_address = base_virtual_address + program_segment_offset;
+                    const program_segment_size = switch (section_index) {
+                        0 => @sizeOf(Header) + @sizeOf(ProgramHeader) * program_header_count,
+                        else => section.index,
+                    };
+                    image.writeToSection(0, std.mem.asBytes(&ProgramHeader{
+                        .type = .load,
+                        .flags = ProgramHeader.Flags{
+                            .executable = section.flags.execute,
+                            .writable = section.flags.write,
+                            .readable = section.flags.read,
+                        },
+                        .offset = program_segment_offset,
+                        .virtual_address = virtual_address,
+                        .physical_address = virtual_address,
+                        .size_in_file = program_segment_size,
+                        .size_in_memory = program_segment_size,
+                        .alignment = section.alignment,
+                    }));
 
-                const source = section.content[0..section.index];
-                const destination = writer.bytes.items[section_offset..][0..source.len];
-                @memcpy(destination, source);
-
-                const section_header: *SectionHeader = @ptrCast(@alignCast(writer.bytes.items[section_header_offset..].ptr));
-                section_header.* = .{
-                    .name_offset = 0,
-                    .type = .program_data,
-                    .flags = .{
-                        .alloc = equal(u8, section_name, "text"),
-                        .executable = equal(u8, section_name, "text"),
-                        .writable = equal(u8, section_name, "data"),
-                    },
-                    .address = base_address + section_offset,
-                    .offset = section_offset,
-                    .size = section.index,
-                    .link = 0,
-                    .info = 0,
-                    .alignment = 0,
-                    .entry_size = 0,
-                };
+                    program_segment_offset += program_segment_size;
+                },
+                .null,
+                .string_table,
+                .symbol_table,
+                => {},
             }
         }
     }
 
-    pub fn writeToFile(writer: *const Writer, file_path: []const u8) !void {
-        std.debug.print("Writing file to {s}\n", .{file_path});
-        const flags = switch (@import("builtin").os.tag) {
-            .windows => .{},
-            else => .{
-                .mode = 0o777,
-            },
+    {
+        var section_offset: usize = 0;
+        var section_headers = try ArrayList(SectionHeader).initCapacity(image.allocator, image.sections.items.len);
+        var section_name_offset: u32 = 0;
+
+        for (image.sections.items, 0..) |section, section_i| {
+            section_offset = std.mem.alignForward(usize, section_offset, section.alignment);
+            const virtual_address = base_virtual_address + section_offset;
+
+            for (section.symbol_table.keys(), section.symbol_table.values()) |symbol_name, symbol_offset| {
+                const symbol_address = virtual_address + symbol_offset;
+                image.writeToSection(symbol_table_index, std.mem.asBytes(&SymbolTable.Entry{
+                    .name_offset = symbol_name_offset,
+                    .information = 0x10,
+                    .other = 0,
+                    .section_header_index = @intCast(section_i),
+                    .value = symbol_address,
+                    .size = 0,
+                }));
+
+                image.writeToSection(string_table_index, symbol_name);
+                image.writeByteToSection(string_table_index, 0);
+
+                symbol_name_offset += @intCast(symbol_name.len + 1);
+            }
+
+            const source = section.content[0..section.index];
+            file.items.len = section_offset + source.len;
+            try file.replaceRange(image.allocator, section_offset, source.len, source);
+
+            section_headers.appendAssumeCapacity(SectionHeader{
+                .name_offset = section_name_offset,
+                .type = switch (section_i) {
+                    0 => .null,
+                    else => switch (section.type) {
+                        .loadable_program => .program_data,
+                        .string_table => .string_table,
+                        .symbol_table => .symbol_table,
+                        .null => .null,
+                    },
+                },
+                .flags = .{
+                    .alloc = true,
+                    .executable = section.flags.execute,
+                    .writable = section.flags.write,
+                },
+                .virtual_address = virtual_address,
+                .file_offset = section_offset,
+                .size = section.index,
+                .link = switch (section.type) {
+                    .symbol_table => @intCast(string_table_index),
+                    else => 0,
+                },
+                .info = switch (section.type) {
+                    .symbol_table => 1,
+                    else => 0,
+                },
+                .alignment = 0,
+                .entry_size = switch (section.type) {
+                    .symbol_table => @sizeOf(SymbolTable.Entry),
+                    else => 0,
+                },
+            });
+
+            section_offset += section.index;
+            section_name_offset += @intCast(section.name.len + 1);
+        }
+
+        const section_header_offset = std.mem.alignForward(usize, section_offset, @alignOf(SectionHeader));
+        const section_header_bytes = std.mem.sliceAsBytes(section_headers.items);
+        try file.ensureTotalCapacity(image.allocator, section_header_offset + section_header_bytes.len);
+        file.items.len = section_header_offset + section_header_bytes.len;
+        try file.replaceRange(image.allocator, section_header_offset, section_header_bytes.len, section_header_bytes);
+
+        const _start_offset = blk: {
+            const entry_offset = image.sections.items[text_section_index].symbol_table.values()[image.entry_point];
+            const text_section_virtual_address = section_headers.items[text_section_index].virtual_address;
+            break :blk text_section_virtual_address + entry_offset;
         };
-        const file_descriptor = try std.fs.cwd().createFile(file_path, flags);
-        try file_descriptor.writeAll(writer.bytes.items);
-        file_descriptor.close();
+
+        const header: *Header = @ptrCast(file.items.ptr);
+        header.section_header_offset = section_header_offset;
+        header.entry = _start_offset;
     }
 
-    pub fn writeToFileAbsolute(writer: *const Writer, absolute_file_path: []const u8) !void {
-        const file = try std.fs.createFileAbsolute(absolute_file_path, .{});
-        defer file.close();
-        try file.writeAll(writer.bytes.items);
-    }
-};
+    return file;
+}
 
 const Header = extern struct {
     magic: u8 = 0x7f,
@@ -163,7 +256,7 @@ const Header = extern struct {
     program_header_count: u16 = 1,
     section_header_size: u16 = @sizeOf(SectionHeader),
     section_header_count: u16,
-    name_section_header_index: u16,
+    section_header_string_table_index: u16,
 
     const BitCount = enum(u8) {
         @"32" = 1,
@@ -197,14 +290,14 @@ const Header = extern struct {
 };
 
 const ProgramHeader = extern struct {
-    type: Type = .load,
+    type: Type,
     flags: Flags,
     offset: u64,
     virtual_address: u64,
     physical_address: u64,
     size_in_file: u64,
     size_in_memory: u64,
-    alignment: u64 = 0,
+    alignment: u64,
 
     const Type = enum(u32) {
         null = 0,
@@ -232,8 +325,8 @@ const SectionHeader = extern struct {
     name_offset: u32,
     type: Type,
     flags: Flags,
-    address: u64,
-    offset: u64,
+    virtual_address: u64,
+    file_offset: u64,
     size: u64,
     // section index
     link: u32,
@@ -277,5 +370,16 @@ const SectionHeader = extern struct {
         section_group: bool = false,
         tls: bool = false,
         _reserved: u53 = 0,
+    };
+};
+
+const SymbolTable = extern struct {
+    const Entry = extern struct {
+        name_offset: u32,
+        information: u8,
+        other: u8,
+        section_header_index: u16,
+        value: u64,
+        size: u64,
     };
 };

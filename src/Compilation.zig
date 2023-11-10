@@ -695,7 +695,7 @@ pub const Module = struct {
     casts: BlockList(Cast) = .{},
     string_literal_types: data_structures.AutoArrayHashMap(u32, Type.Index) = .{},
     array_types: data_structures.AutoArrayHashMap(Array, Type.Index) = .{},
-    entry_point: ?u32 = null,
+    entry_point: Function.Index = Function.Index.invalid,
 
     pub const Descriptor = struct {
         main_package_path: []const u8,

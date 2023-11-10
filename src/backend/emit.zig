@@ -24,38 +24,130 @@ const jit_callconv = .SysV;
 const Section = struct {
     content: []align(page_size) u8,
     index: usize = 0,
-    alignment: u32 = 0x10,
+    alignment: u32,
+    name: []const u8,
+    flags: Flags,
+    type: Type,
+    symbol_table: std.StringArrayHashMapUnmanaged(u32) = .{},
+
+    const Type = enum {
+        null,
+        loadable_program,
+        string_table,
+        symbol_table,
+    };
+
+    const Flags = packed struct {
+        read: bool,
+        write: bool,
+        execute: bool,
+    };
 };
 
 pub const Result = struct {
-    sections: struct {
-        text: Section,
-        rodata: Section,
-        data: Section,
-    },
-    entry_point: u32 = 0,
+    sections: ArrayList(Section) = .{},
+    // sections: struct {
+    //     text: Section,
+    //     rodata: Section,
+    //     data: Section,
+    // },
+    entry_point: u32,
     target: std.Target,
+    allocator: Allocator,
 
-    pub fn create(target: std.Target) !Result {
-        return Result{
-            .sections = .{
-                .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
-                .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
-                .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
-            },
+    const text_section_index = 0;
+
+    pub fn create(allocator: Allocator, target: std.Target, entry_point_index: u32) !Result {
+        var result = Result{
+            // .sections = .{
+            //     .text = .{ .content = try mmap(page_size, .{ .executable = true }) },
+            //     .rodata = .{ .content = try mmap(page_size, .{ .executable = false }) },
+            //     .data = .{ .content = try mmap(page_size, .{ .executable = false }) },
+            // },
             .target = target,
+            .allocator = allocator,
+            .entry_point = entry_point_index,
         };
+
+        _ = try result.addSection(.{
+            .name = ".text",
+            .size = 0x1000,
+            .alignment = 0x1000,
+            .flags = .{
+                .execute = true,
+                .read = true,
+                .write = false,
+            },
+            .type = .loadable_program,
+        });
+
+        return result;
+    }
+
+    const SectionCreation = struct {
+        name: []const u8,
+        size: usize,
+        alignment: u32,
+        flags: Section.Flags,
+        type: Section.Type,
+    };
+
+    pub fn addSection(result: *Result, arguments: SectionCreation) !usize {
+        const index = result.sections.items.len;
+        assert(std.mem.isAligned(arguments.size, page_size));
+
+        try result.sections.append(result.allocator, .{
+            .content = try mmap(arguments.size, .{ .executable = arguments.flags.execute }),
+            .alignment = arguments.alignment,
+            .name = arguments.name,
+            .flags = arguments.flags,
+            .type = arguments.type,
+        });
+
+        return index;
+    }
+
+    pub fn insertSection(result: *Result, index: usize, arguments: SectionCreation) !usize {
+        assert(std.mem.isAligned(arguments.size, page_size));
+        try result.sections.insert(result.allocator, index, .{
+            .content = try mmap(arguments.size, .{ .executable = arguments.flags.execute }),
+            .alignment = arguments.alignment,
+            .name = arguments.name,
+            .flags = arguments.flags,
+            .type = arguments.type,
+        });
+
+        return index;
+    }
+
+    pub fn alignSection(result: *Result, index: usize, alignment: usize) void {
+        const index_ptr = &result.sections.items[index].index;
+        index_ptr.* = std.mem.alignForward(usize, index_ptr.*, alignment);
+    }
+
+    pub fn writeToSection(image: *Result, section_index: usize, bytes: []const u8) void {
+        const section = &image.sections.items[section_index];
+        const destination = section.content[section.index..][0..bytes.len];
+        @memcpy(destination, bytes);
+        section.index += bytes.len;
+    }
+
+    pub fn writeByteToSection(image: *Result, section_index: usize, byte: u8) void {
+        const section = &image.sections.items[section_index];
+        section.content[section.index] = byte;
+        section.index += 1;
+    }
+
+    pub fn getTextSection(result: *Result) *Section {
+        return &result.sections.items[0];
     }
 
     pub fn appendCode(image: *Result, code: []const u8) void {
-        const destination = image.sections.text.content[image.sections.text.index..][0..code.len];
-        @memcpy(destination, code);
-        image.sections.text.index += code.len;
+        image.writeToSection(text_section_index, code);
     }
 
     pub fn appendCodeByte(image: *Result, code_byte: u8) void {
-        image.sections.text.content[image.sections.text.index] = code_byte;
-        image.sections.text.index += 1;
+        image.writeByteToSection(text_section_index, code_byte);
     }
 
     fn getEntryPoint(image: *const Result, comptime FunctionType: type) *const FunctionType {
@@ -70,16 +162,31 @@ pub const Result = struct {
         return @as(*const FunctionType, @ptrCast(&image.sections.text.content[image.entry_point]));
     }
 
-    fn writeElf(image: *const Result, allocator: Allocator, executable_relative_path: []const u8) !void {
-        var writer = try elf.Writer.init(allocator);
-        try writer.writeToMemory(image);
-        try writer.writeToFile(executable_relative_path);
+    fn writeElf(image: *Result, executable_relative_path: []const u8) !void {
+        const file_in_memory = try elf.writeToMemory(image);
+        try writeFile(file_in_memory.items, executable_relative_path);
     }
 
-    fn writePe(image: *const Result, allocator: Allocator, executable_relative_path: []const u8) !void {
-        var writer = try pe.Writer.init(allocator);
-        try writer.writeToMemory(image);
-        try writer.writeToFile(executable_relative_path);
+    fn writeFile(bytes: []const u8, path: []const u8) !void {
+        const flags = switch (@import("builtin").os.tag) {
+            .windows => .{},
+            else => .{
+                .mode = 0o777,
+            },
+        };
+
+        const file_descriptor = try std.fs.cwd().createFile(path, flags);
+        try file_descriptor.writeAll(bytes);
+        file_descriptor.close();
+    }
+
+    fn writePe(image: *Result, executable_relative_path: []const u8) !void {
+        _ = executable_relative_path;
+        _ = image;
+        // var writer = try pe.Writer.init(allocator);
+        // try writer.writeToMemory(image);
+        // try writer.writeToFile(executable_relative_path);
+        unreachable;
     }
 };
 
@@ -124,15 +231,13 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
                     var mir = try backend.MIR.selectInstructions(allocator, intermediate, descriptor.target);
                     try mir.allocateRegisters();
                     const os = descriptor.target.os.tag;
-                    _ = os;
                     const image = try mir.encode();
-                    _ = image;
 
-                    // switch (os) {
-                    //     .linux => try image.writeElf(allocator, descriptor.executable_path),
-                    //     .windows => try image.writePe(allocator, descriptor.executable_path),
-                    //     else => unreachable,
-                    // }
+                    switch (os) {
+                        .linux => try image.writeElf(descriptor.executable_path),
+                        .windows => try image.writePe(descriptor.executable_path),
+                        else => unreachable,
+                    }
                 },
                 else => {
                     const file = try std.fs.cwd().readFileAlloc(allocator, "main", std.math.maxInt(u64));

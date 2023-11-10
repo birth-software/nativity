@@ -1492,7 +1492,7 @@ pub fn initialize(compilation: *Compilation, module: *Module, package: *Package,
         if (equal(u8, declaration_name, "_start")) {
             const value = module.values.get(decl.init_value);
             module.entry_point = switch (value.*) {
-                .function => |function_index| function_index.uniqueInteger(),
+                .function => |function_index| function_index,
                 .unresolved => panic("Unresolved declaration: {s}\n", .{declaration_name}),
                 else => |t| @panic(@tagName(t)),
             };

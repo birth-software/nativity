@@ -42,7 +42,7 @@ pub const Result = struct {
     casts: BlockList(Cast) = .{},
     readonly_data: ArrayList(u8) = .{},
     module: *Module,
-    entry_point: u32 = 0,
+    entry_point: Function.Index = Function.Index.invalid,
 
     pub fn getFunctionName(ir: *Result, function_index: Function.Declaration.Index) []const u8 {
         return ir.module.getName(ir.module.function_name_map.get(@bitCast(function_index)).?).?;
@@ -58,12 +58,19 @@ pub fn initialize(compilation: *Compilation, module: *Module) !*Result {
     };
 
     builder.ir.module = module;
-    builder.ir.entry_point = module.entry_point orelse unreachable;
 
+    var sema_function_index = function_iterator.getCurrentIndex();
     while (function_iterator.next()) |sema_function| {
         const function_index = try builder.buildFunction(sema_function);
-        _ = function_index;
+        if (sema_function_index.eq(module.entry_point)) {
+            assert(!function_index.invalid);
+            builder.ir.entry_point = function_index;
+        }
+
+        sema_function_index = function_iterator.getCurrentIndex();
     }
+
+    assert(!builder.ir.entry_point.invalid);
 
     return &builder.ir;
 }
@@ -398,7 +405,7 @@ pub const Builder = struct {
         return builder.ir.function_definitions.get(builder.current_function_index);
     }
 
-    fn buildFunction(builder: *Builder, sema_function: Compilation.Function) !void {
+    fn buildFunction(builder: *Builder, sema_function: Compilation.Function) !Function.Index {
         const sema_prototype = builder.module.function_prototypes.get(builder.module.types.get(sema_function.prototype).function);
         const function_declaration_allocation = try builder.ir.function_declarations.addOne(builder.allocator);
         const function_declaration = function_declaration_allocation.ptr;
@@ -425,7 +432,7 @@ pub const Builder = struct {
         }
 
         switch (sema_prototype.attributes.@"extern") {
-            true => {},
+            true => return Function.Index.invalid,
             false => {
                 const function_allocation = try builder.ir.function_definitions.append(builder.allocator, .{
                     .ir = &builder.ir,
@@ -495,6 +502,8 @@ pub const Builder = struct {
 
                 builder.currentFunction().current_stack_offset = std.mem.alignForward(usize, builder.currentFunction().current_stack_offset, 0x10);
                 try builder.optimizeFunction(builder.currentFunction());
+
+                return function_allocation.index;
             },
         }
     }
