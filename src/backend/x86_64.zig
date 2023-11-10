@@ -2137,59 +2137,67 @@ pub const MIR = struct {
                     switch (ir_instruction.*) {
                         .ret => |ir_ret_index| {
                             const ir_ret = mir.ir.returns.get(ir_ret_index);
-                            const value_type = resolveType(getIrType(mir.ir, ir_ret.instruction));
-                            const source_register = try instruction_selection.getRegisterForValue(mir, ir_ret.instruction);
+                            switch (ir_ret.instruction.invalid) {
+                                true => {
+                                    const ret = try mir.buildInstruction(instruction_selection, .ret, &.{});
+                                    try instruction_selection.instruction_cache.append(mir.allocator, ret);
+                                },
+                                false => {
+                                    const value_type = resolveType(getIrType(mir.ir, ir_ret.instruction));
+                                    const source_register = try instruction_selection.getRegisterForValue(mir, ir_ret.instruction);
 
-                            const register_class = register_classes.get(value_type);
+                                    const register_class = register_classes.get(value_type);
 
-                            const physical_register = Register{
-                                .index = .{
-                                    .physical = switch (register_class) {
-                                        .gp32 => .eax,
-                                        .gp64 => .rax,
+                                    const physical_register = Register{
+                                        .index = .{
+                                            .physical = switch (register_class) {
+                                                .gp32 => .eax,
+                                                .gp64 => .rax,
+                                                else => unreachable,
+                                            },
+                                        },
+                                    };
+                                    const operand_id: Operand.Id = switch (register_class) {
+                                        .gp32 => .gp32,
+                                        .gp64 => .gp64,
                                         else => unreachable,
-                                    },
-                                },
-                            };
-                            const operand_id: Operand.Id = switch (register_class) {
-                                .gp32 => .gp32,
-                                .gp64 => .gp64,
-                                else => unreachable,
-                            };
+                                    };
 
-                            const copy = try mir.buildInstruction(instruction_selection, .copy, &.{
-                                Operand{
-                                    .id = operand_id,
-                                    .u = .{
-                                        .register = physical_register,
-                                    },
-                                    .flags = .{
-                                        .type = .def,
-                                    },
-                                },
-                                Operand{
-                                    .id = operand_id,
-                                    .u = .{
-                                        .register = source_register,
-                                    },
-                                    .flags = .{},
-                                },
-                            });
+                                    const copy = try mir.buildInstruction(instruction_selection, .copy, &.{
+                                        Operand{
+                                            .id = operand_id,
+                                            .u = .{
+                                                .register = physical_register,
+                                            },
+                                            .flags = .{
+                                                .type = .def,
+                                            },
+                                        },
+                                        Operand{
+                                            .id = operand_id,
+                                            .u = .{
+                                                .register = source_register,
+                                            },
+                                            .flags = .{},
+                                        },
+                                    });
 
-                            try instruction_selection.instruction_cache.append(mir.allocator, copy);
+                                    try instruction_selection.instruction_cache.append(mir.allocator, copy);
 
-                            const ret = try mir.buildInstruction(instruction_selection, .ret, &.{
-                                Operand{
-                                    .id = operand_id,
-                                    .u = .{
-                                        .register = physical_register,
-                                    },
-                                    .flags = .{
-                                        .implicit = true,
-                                    },
+                                    const ret = try mir.buildInstruction(instruction_selection, .ret, &.{
+                                        Operand{
+                                            .id = operand_id,
+                                            .u = .{
+                                                .register = physical_register,
+                                            },
+                                            .flags = .{
+                                                .implicit = true,
+                                            },
+                                        },
+                                    });
+                                    try instruction_selection.instruction_cache.append(mir.allocator, ret);
                                 },
-                            });
-                            try instruction_selection.instruction_cache.append(mir.allocator, ret);
+                            }
                         },
                         .load_integer => try instruction_selection.materializeInteger(mir, ir_instruction_index),
                         .@"unreachable" => try instruction_selection.instruction_cache.append(mir.allocator, try mir.buildInstruction(instruction_selection, .ud2, &.{})),
@@ -2238,6 +2246,7 @@ pub const MIR = struct {
                                     const last_block_instruction = mir.ir.instructions.get(ir_block.instructions.items[ir_block.instructions.items.len - 1]);
                                     break :blk switch (last_block_instruction.*) {
                                         .@"unreachable" => false,
+                                        .ret => true,
                                         else => |t| @panic(@tagName(t)),
                                     };
                                 },
@@ -2468,12 +2477,16 @@ pub const MIR = struct {
                         },
                         .call => |ir_call_index| {
                             const ir_call = mir.ir.calls.get(ir_call_index);
-                            for (ir_call.arguments, 0..) |ir_argument_index, index| {
+                            var argument_index = ir_call.arguments.len;
+                            while (argument_index > 0) {
+                                argument_index -= 1;
+
+                                const ir_argument_index = ir_call.arguments[argument_index];
                                 // print("index: {}", .{index});
                                 const source_register = try instruction_selection.getRegisterForValue(mir, ir_argument_index);
                                 const source_value_type = resolveType(getIrType(mir.ir, ir_argument_index));
                                 const source_register_class = register_classes.get(source_value_type);
-                                const argument_register = calling_convention.argument_registers.get(source_register_class)[index];
+                                const argument_register = calling_convention.argument_registers.get(source_register_class)[argument_index];
                                 // print("Argument register: {}", .{argument_register});
 
                                 const destination_register = Register{
@@ -2487,6 +2500,7 @@ pub const MIR = struct {
                                     .gp64 => .gp64,
                                     else => unreachable,
                                 };
+
                                 const source_operand = Operand{
                                     .id = operand_id,
                                     .u = .{
@@ -2494,6 +2508,7 @@ pub const MIR = struct {
                                     },
                                     .flags = .{},
                                 };
+
                                 const destination_operand = Operand{
                                     .id = operand_id,
                                     .u = .{
@@ -2576,6 +2591,39 @@ pub const MIR = struct {
                                     }
                                 },
                             }
+                        },
+                        .load_string_literal => |ir_load_string_literal_index| {
+                            const virtual_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
+                            const virtual_operand = Operand{
+                                .id = .gp64,
+                                .u = .{
+                                    .register = virtual_register,
+                                },
+                                .flags = .{ .type = .def },
+                            };
+                            const source_operand = Operand{
+                                .id = .lea64mem,
+                                .u = .{
+                                    .lea64mem = .{
+                                        .gp64 = null,
+                                        .scale = 1,
+                                        .scale_reg = null,
+                                        .displacement = Operand.PCRelative{
+                                            .string_literal = ir_load_string_literal_index,
+                                        },
+                                    },
+                                },
+                                .flags = .{},
+                            };
+
+                            const lea = try mir.buildInstruction(instruction_selection, .lea64r, &.{
+                                virtual_operand,
+                                source_operand,
+                            });
+
+                            try instruction_selection.instruction_cache.append(mir.allocator, lea);
+
+                            try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, virtual_register, false);
                         },
                         else => |t| @panic(@tagName(t)),
                     }
@@ -4070,11 +4118,17 @@ pub const MIR = struct {
         {
             if (instruction != .copy) {
                 const descriptor = instruction_descriptors.getPtrConst(instruction);
-                if (descriptor.operands.len != operands.len) unreachable;
-                for (descriptor.operands, operands) |descriptor_operand, operand| {
-                    switch (descriptor_operand.id) {
-                        .unknown => {},
-                        else => if (descriptor_operand.id != operand.id) unreachable,
+                if (descriptor.operands.len == operands.len) {
+                    for (descriptor.operands, operands) |descriptor_operand, operand| {
+                        switch (descriptor_operand.id) {
+                            .unknown => {},
+                            else => if (descriptor_operand.id != operand.id) unreachable,
+                        }
+                    }
+                } else {
+                    switch (instruction) {
+                        .ret => {},
+                        else => unreachable,
                     }
                 }
             }
