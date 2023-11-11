@@ -164,7 +164,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else .identifier;
             },
-            '(', ')', '{', '}', '[', ']', '-', '=', ';', '#', '@', ',', '.', ':', '>', '<', '*', '!' => |operator| blk: {
+            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/' => |operator| blk: {
                 index += 1;
                 break :blk @enumFromInt(operator);
             },

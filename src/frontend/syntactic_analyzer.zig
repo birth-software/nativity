@@ -141,6 +141,8 @@ pub const Node = packed struct(u128) {
         enum_field = 58,
         extern_qualifier = 59,
         function_prototype = 60,
+        add = 61,
+        sub = 62,
     };
 };
 
@@ -692,6 +694,33 @@ const Analyzer = struct {
         return try analyzer.expressionPrecedence(0);
     }
 
+    const PrecedenceOperator = enum {
+        compare_equal,
+        compare_not_equal,
+        add,
+        sub,
+    };
+
+    const operator_precedence = std.EnumArray(PrecedenceOperator, i32).init(.{
+        .compare_equal = 30,
+        .compare_not_equal = 30,
+        .add = 60,
+        .sub = 60,
+    });
+
+    const operator_associativity = std.EnumArray(PrecedenceOperator, Associativity).init(.{
+        .compare_equal = .none,
+        .compare_not_equal = .none,
+        .add = .left,
+        .sub = .left,
+    });
+    const operator_node_id = std.EnumArray(PrecedenceOperator, Node.Id).init(.{
+        .compare_equal = .compare_equal,
+        .compare_not_equal = .compare_not_equal,
+        .add = .add,
+        .sub = .sub,
+    });
+
     fn expressionPrecedence(analyzer: *Analyzer, minimum_precedence: i32) !Node.Index {
         var result = try analyzer.prefixExpression();
         if (!result.invalid) {
@@ -704,55 +733,75 @@ const Analyzer = struct {
         while (analyzer.token_i < analyzer.tokens.len) {
             const token = analyzer.tokens[analyzer.token_i];
             // logln("Looping in expression precedence with token {}\n", .{token});
-            const precedence: i32 = switch (token.id) {
-                .equal, .semicolon, .right_parenthesis, .right_brace, .comma, .period, .fixed_keyword_const, .fixed_keyword_var => -1,
-                .bang => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                    .equal => 30,
-                    else => unreachable,
-                },
-                else => |t| {
-                    const start = token.start;
-                    logln(.parser, .precedence, "Source file:\n```\n{s}\n```\n", .{analyzer.source_file[start..]});
-                    @panic(@tagName(t));
+            const operator: PrecedenceOperator = switch (token.id) {
+                .equal, .semicolon, .right_parenthesis, .right_brace, .comma, .period, .fixed_keyword_const, .fixed_keyword_var => break,
+                else => blk: {
+                    const next_token_index = analyzer.token_i + 1;
+                    if (next_token_index < analyzer.tokens.len) {
+                        const next_token_id = analyzer.tokens[next_token_index].id;
+                        break :blk switch (token.id) {
+                            .equal => switch (next_token_id) {
+                                .equal => .compare_equal,
+                                else => break,
+                            },
+                            .bang => switch (next_token_id) {
+                                .equal => .compare_not_equal,
+                                else => unreachable,
+                            },
+                            .plus => switch (next_token_id) {
+                                .plus => unreachable,
+                                .equal => unreachable,
+                                else => .add,
+                            },
+                            .minus => switch (next_token_id) {
+                                .minus => unreachable,
+                                .equal => unreachable,
+                                else => .sub,
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        };
+                    } else {
+                        unreachable;
+                    }
                 },
             };
-            logln(.parser, .precedence, "Precedence: {} ({s}) (file #{})\n", .{ precedence, @tagName(token.id), analyzer.file_index.uniqueInteger() });
 
+            const precedence = operator_precedence.get(operator);
             if (precedence < minimum_precedence) {
                 logln(.parser, .precedence, "Breaking for minimum_precedence\n", .{});
                 break;
             }
 
-            if (precedence == banned_precedence) {
-                logln(.parser, .precedence, "Breaking for banned precedence\n", .{});
+            if (precedence < banned_precedence) {
+                logln(.parser, .precedence, "Breaking for banned_precedence\n", .{});
                 break;
             }
 
             const operator_token = analyzer.token_i;
-            const is_bang_equal = analyzer.tokens[operator_token].id == .bang and analyzer.tokens[operator_token + 1].id == .equal;
-            analyzer.token_i += @as(u32, 1) + @intFromBool(is_bang_equal);
+            const extra_token = switch (operator) {
+                .add,
+                .sub,
+                => false,
+                .compare_equal,
+                .compare_not_equal,
+                => true,
+                // else => |t| @panic(@tagName(t)),
+            };
+            analyzer.token_i += @as(u32, 1) + @intFromBool(extra_token);
 
             // TODO: fix this
             const right = try analyzer.expressionPrecedence(precedence + 1);
 
-            const operation_id: Node.Id = switch (is_bang_equal) {
-                true => .compare_not_equal,
-                false => switch (analyzer.tokens[operator_token].id) {
-                    else => |t| @panic(@tagName(t)),
-                },
-            };
+            const node_id = operator_node_id.get(operator);
 
             result = try analyzer.addNode(.{
-                .id = operation_id,
+                .id = node_id,
                 .token = operator_token,
                 .left = result,
                 .right = right,
             });
 
-            const associativity: Associativity = switch (operation_id) {
-                .compare_equal, .compare_not_equal, .compare_less_than, .compare_greater_than, .compare_less_or_equal, .compare_greater_or_equal => .none,
-                else => .left,
-            };
+            const associativity = operator_associativity.get(operator);
 
             if (associativity == .none) {
                 banned_precedence = precedence;

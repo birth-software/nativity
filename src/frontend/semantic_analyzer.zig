@@ -38,7 +38,17 @@ pub const Logger = enum {
     block,
     call,
 
-    pub var bitset = std.EnumSet(Logger).initEmpty();
+    pub var bitset = std.EnumSet(Logger).initMany(&.{
+        .type,
+        .identifier,
+        .symbol_declaration,
+        .scope_node,
+        .node,
+        .typecheck,
+        .@"switch",
+        .block,
+        .call,
+    });
 };
 
 const lexical_analyzer = @import("lexical_analyzer.zig");
@@ -145,7 +155,7 @@ const Analyzer = struct {
                 try statement_nodes.append(analyzer.allocator, block_node.left);
                 try statement_nodes.append(analyzer.allocator, block_node.right);
             },
-            .block, .comptime_block => unreachable, //statement_nodes = analyzer.getNodeList(scope_index, block_node.left.unwrap()),
+            .block, .comptime_block => statement_nodes = analyzer.getScopeNodeList(scope_index, analyzer.getScopeNode(scope_index, block_node.left)),
             else => |t| @panic(@tagName(t)),
         }
 
@@ -509,6 +519,33 @@ const Analyzer = struct {
 
         return .{
             .@"return" = return_value_allocation.index,
+        };
+    }
+
+    fn processBinaryOperation(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) !Value {
+        const node = analyzer.getScopeNode(scope_index, node_index);
+
+        const left_allocation = try analyzer.unresolvedAllocate(scope_index, expect_type, node.left);
+        const right_allocation = try analyzer.unresolvedAllocate(scope_index, expect_type, node.right);
+        const left_type = left_allocation.ptr.getType(analyzer.module);
+        const right_type = right_allocation.ptr.getType(analyzer.module);
+        if (!left_type.eq(right_type)) {
+            unreachable;
+        }
+
+        const binary_operation = try analyzer.module.binary_operations.append(analyzer.allocator, .{
+            .left = left_allocation.index,
+            .right = right_allocation.index,
+            .type = left_type,
+            .id = switch (node.id) {
+                .add => .add,
+                .sub => .sub,
+                else => |t| @panic(@tagName(t)),
+            },
+        });
+
+        return .{
+            .binary_operation = binary_operation.index,
         };
     }
 
@@ -968,6 +1005,9 @@ const Analyzer = struct {
                 .type = try analyzer.resolveType(scope_index, node_index),
             },
             .@"return" => try analyzer.processReturn(scope_index, expect_type, node_index),
+            .add,
+            .sub,
+            => try analyzer.processBinaryOperation(scope_index, expect_type, node_index),
             else => |t| @panic(@tagName(t)),
         };
     }

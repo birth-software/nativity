@@ -536,6 +536,22 @@ pub const Cast = struct {
     pub const Allocation = List.Allocation;
 };
 
+pub const BinaryOperation = struct {
+    left: Value.Index,
+    right: Value.Index,
+    type: Type.Index,
+    id: Id,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+
+    const Id = enum {
+        add,
+        sub,
+    };
+};
+
 pub const CallingConvention = enum {
     system_v,
 };
@@ -565,6 +581,7 @@ pub const Value = union(enum) {
     extern_function: Function.Prototype.Index,
     sign_extend: Cast.Index,
     zero_extend: Cast.Index,
+    binary_operation: BinaryOperation.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -585,6 +602,7 @@ pub const Value = union(enum) {
             .bool, .void, .undefined, .function, .type, .enum_field => true,
             .integer => |integer| integer.type.eq(Type.comptime_int),
             .call => false,
+            .binary_operation => false,
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -598,6 +616,7 @@ pub const Value = union(enum) {
             .type => Type.type,
             .enum_field => |enum_field_index| module.enums.get(module.enum_fields.get(enum_field_index).parent).type,
             .function => |function_index| module.functions.get(function_index).prototype,
+            .binary_operation => |binary_operation| module.binary_operations.get(binary_operation).type,
             else => |t| @panic(@tagName(t)),
         };
 
@@ -693,6 +712,7 @@ pub const Module = struct {
     function_name_map: data_structures.AutoArrayHashMap(Function.Index, u32) = .{},
     arrays: BlockList(Array) = .{},
     casts: BlockList(Cast) = .{},
+    binary_operations: BlockList(BinaryOperation) = .{},
     string_literal_types: data_structures.AutoArrayHashMap(u32, Type.Index) = .{},
     array_types: data_structures.AutoArrayHashMap(Array, Type.Index) = .{},
     entry_point: Function.Index = Function.Index.invalid,
@@ -1170,7 +1190,7 @@ pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
     const print_stack_trace = true;
     switch (print_stack_trace) {
-        true => std.builtin.default_panic(message, stack_trace, return_address),
+        true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {
             writer.writeAll("\nPANIC: ") catch {};
             writer.writeAll(message) catch {};

@@ -43,9 +43,10 @@ pub const Result = struct {
     stack_references: BlockList(StackReference) = .{},
     string_literals: BlockList(StringLiteral) = .{},
     casts: BlockList(Cast) = .{},
+    binary_operations: BlockList(BinaryOperation) = .{},
+    section_manager: emit.SectionManager,
     module: *Module,
     entry_point: Function.Index = Function.Index.invalid,
-    section_manager: emit.SectionManager,
 
     pub fn getFunctionName(ir: *Result, function_index: Function.Declaration.Index) []const u8 {
         return ir.module.getName(ir.module.function_name_map.get(@bitCast(function_index)).?).?;
@@ -115,7 +116,7 @@ pub const BasicBlock = struct {
     fn hasJump(basic_block: *BasicBlock, ir: *Result) bool {
         if (basic_block.instructions.items.len > 0) {
             const last_instruction = ir.instructions.get(basic_block.instructions.getLast());
-            return switch (last_instruction.*) {
+            return switch (last_instruction.u) {
                 .jump => true,
                 else => false,
             };
@@ -145,8 +146,23 @@ const Syscall = struct {
     pub const Index = List.Index;
 };
 
+pub const AtomicOrder = enum {
+    unordered,
+    monotonic,
+    acquire,
+    release,
+    acquire_release,
+    sequentially_consistent,
+};
+
 pub const Load = struct {
     instruction: Instruction.Index,
+    ordering: ?AtomicOrder = null,
+    @"volatile": bool = false,
+
+    pub fn isUnordered(load: *const Load) bool {
+        return (load.ordering == null or load.ordering == .unordered) and !load.@"volatile";
+    }
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -155,6 +171,9 @@ pub const Load = struct {
 pub const Store = struct {
     source: Instruction.Index,
     destination: Instruction.Index,
+    ordering: ?AtomicOrder = null,
+    @"volatile": bool = false,
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
@@ -202,6 +221,22 @@ pub const Copy = struct {
 pub const Cast = struct {
     value: Instruction.Index,
     type: Type,
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const BinaryOperation = struct {
+    left: Instruction.Index,
+    right: Instruction.Index,
+    id: Id,
+    type: Type,
+
+    const Id = enum {
+        add,
+        sub,
+    };
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
@@ -257,21 +292,27 @@ pub const Type = enum {
     }
 };
 
-pub const Instruction = union(enum) {
-    call: Call.Index,
-    jump: Jump.Index,
-    load: Load.Index,
-    phi: Phi.Index,
-    ret: Return.Index,
-    store: Store.Index,
-    syscall: Syscall.Index,
-    copy: Instruction.Index,
-    @"unreachable",
-    argument: Argument.Index,
-    load_integer: Integer,
-    load_string_literal: StringLiteral.Index,
-    stack: StackReference.Index,
-    sign_extend: Cast.Index,
+pub const Instruction = struct {
+    u: U,
+    use_list: ArrayList(Instruction.Index) = .{},
+
+    const U = union(enum) {
+        call: Call.Index,
+        jump: Jump.Index,
+        load: Load.Index,
+        phi: Phi.Index,
+        ret: Return.Index,
+        store: Store.Index,
+        syscall: Syscall.Index,
+        copy: Instruction.Index,
+        @"unreachable",
+        argument: Argument.Index,
+        load_integer: Integer,
+        load_string_literal: StringLiteral.Index,
+        stack: StackReference.Index,
+        sign_extend: Cast.Index,
+        binary_operation: BinaryOperation.Index,
+    };
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -319,15 +360,15 @@ pub const Function = struct {
             for (block.instructions.items, 0..) |instruction_index, block_instruction_index| {
                 try writer.print("%{} (${}): ", .{ block_instruction_index, instruction_index.uniqueInteger() });
                 const instruction = function.ir.instructions.get(instruction_index);
-                try writer.print("{s}", .{@tagName(instruction.*)});
-                switch (instruction.*) {
+                if (instruction.u != .binary_operation) try writer.writeAll(@tagName(instruction.u));
+                switch (instruction.u) {
                     .syscall => |syscall_index| {
                         const syscall = function.ir.syscalls.get(syscall_index);
                         try writer.writeAll(" (");
                         for (syscall.arguments.items, 0..) |arg_index, i| {
-                            const arg_value = function.ir.instructions.get(arg_index).*;
+                            const arg_value = function.ir.instructions.get(arg_index);
 
-                            try writer.print("${}: {s}", .{ i, @tagName(arg_value) });
+                            try writer.print("${}: {s}", .{ i, @tagName(arg_value.u) });
 
                             if (i < syscall.arguments.items.len - 1) {
                                 try writer.writeAll(", ");
@@ -344,8 +385,8 @@ pub const Function = struct {
                         const ret = function.ir.returns.get(ret_index);
                         switch (ret.instruction.invalid) {
                             false => {
-                                const ret_value = function.ir.instructions.get(ret.instruction).*;
-                                try writer.print(" {s}", .{@tagName(ret_value)});
+                                const ret_value = function.ir.instructions.get(ret.instruction);
+                                try writer.print(" {s}", .{@tagName(ret_value.u)});
                             },
                             true => try writer.writeAll(" void"),
                         }
@@ -356,17 +397,17 @@ pub const Function = struct {
                     // },
                     .store => |store_index| {
                         const store = function.ir.stores.get(store_index);
-                        const source = function.ir.instructions.get(store.source).*;
-                        const destination = function.ir.instructions.get(store.destination).*;
-                        try writer.print(" {s}, {s}", .{ @tagName(destination), @tagName(source) });
+                        const source = function.ir.instructions.get(store.source);
+                        const destination = function.ir.instructions.get(store.destination);
+                        try writer.print(" {s}, {s}", .{ @tagName(destination.u), @tagName(source.u) });
                     },
                     .call => |call_index| {
                         const call = function.ir.calls.get(call_index);
                         try writer.print(" ${} {s}(", .{ call.function.uniqueInteger(), function.ir.getFunctionName(call.function) });
                         for (call.arguments, 0..) |arg_index, i| {
-                            const arg_value = function.ir.instructions.get(arg_index).*;
+                            const arg_value = function.ir.instructions.get(arg_index);
 
-                            try writer.print("${}: {s}", .{ i, @tagName(arg_value) });
+                            try writer.print("${}: {s}", .{ i, @tagName(arg_value.u) });
 
                             if (i < call.arguments.len - 1) {
                                 try writer.writeAll(", ");
@@ -398,6 +439,11 @@ pub const Function = struct {
                         const load = function.ir.loads.get(load_index);
                         try writer.print(" ${}", .{load.instruction.uniqueInteger()});
                     },
+                    .binary_operation => |binary_operation_index| {
+                        const binary_operation = function.ir.binary_operations.get(binary_operation_index);
+                        try writer.writeAll(@tagName(binary_operation.id));
+                        try writer.print(" {s} ${}, ${}", .{ @tagName(binary_operation.type), binary_operation.left.uniqueInteger(), binary_operation.right.uniqueInteger() });
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
 
@@ -411,6 +457,14 @@ pub const Function = struct {
     }
 };
 
+pub const Integer = struct {
+    value: extern union {
+        signed: i64,
+        unsigned: u64,
+    },
+    type: Type,
+};
+
 pub const Builder = struct {
     allocator: Allocator,
     ir: Result,
@@ -418,6 +472,13 @@ pub const Builder = struct {
 
     fn currentFunction(builder: *Builder) *Function {
         return builder.ir.function_definitions.get(builder.current_function_index);
+    }
+
+    fn useInstruction(builder: *Builder, args: struct {
+        instruction: Instruction.Index,
+        user: Instruction.Index,
+    }) !void {
+        try builder.ir.instructions.get(args.instruction).use_list.append(builder.allocator, args.user);
     }
 
     fn buildFunction(builder: *Builder, sema_function: Compilation.Function) !Function.Index {
@@ -440,7 +501,9 @@ pub const Builder = struct {
                     .type = try builder.translateType(sema_argument_declaration.type),
                 });
                 const value_allocation = try builder.ir.instructions.append(builder.allocator, .{
-                    .argument = argument_allocation.index,
+                    .u = .{
+                        .argument = argument_allocation.index,
+                    },
                 });
                 function_declaration.arguments.putAssumeCapacity(sema_argument_declaration_index, value_allocation.index);
             }
@@ -466,7 +529,9 @@ pub const Builder = struct {
                 if (!is_noreturn) {
                     const exit_block = try builder.newBlock();
                     const phi_instruction = try builder.appendToBlock(exit_block, .{
-                        .phi = Phi.Index.invalid,
+                        .u = .{
+                            .phi = Phi.Index.invalid,
+                        },
                     });
                     // phi.ptr.* = .{
                     //     .value = Value.Index.invalid,
@@ -475,11 +540,16 @@ pub const Builder = struct {
                     //     .next = Phi.Index.invalid,
                     // };
                     const ret = try builder.appendToBlock(exit_block, .{
-                        .ret = (try builder.ir.returns.append(builder.allocator, .{
-                            .instruction = phi_instruction,
-                        })).index,
+                        .u = .{
+                            .ret = (try builder.ir.returns.append(builder.allocator, .{
+                                .instruction = phi_instruction,
+                            })).index,
+                        },
                     });
-                    _ = ret;
+                    try builder.useInstruction(.{
+                        .instruction = phi_instruction,
+                        .user = ret,
+                    });
                     function.return_phi_node = phi_instruction;
                     function.return_phi_block = exit_block;
                 }
@@ -488,7 +558,7 @@ pub const Builder = struct {
 
                 for (function_declaration.arguments.keys(), function_declaration.arguments.values()) |sema_argument_index, ir_argument_instruction_index| {
                     const ir_argument_instruction = builder.ir.instructions.get(ir_argument_instruction_index);
-                    const ir_argument = builder.ir.arguments.get(ir_argument_instruction.argument);
+                    const ir_argument = builder.ir.arguments.get(ir_argument_instruction.u.argument);
 
                     _ = try builder.stackReference(.{
                         .type = ir_argument.type,
@@ -499,10 +569,11 @@ pub const Builder = struct {
                 for (function_declaration.arguments.keys(), function_declaration.arguments.values()) |sema_argument_index, ir_argument_instruction_index| {
                     const stack_reference = builder.currentFunction().stack_map.get(sema_argument_index).?;
 
-                    _ = try builder.store(.{
+                    const store_instruction = try builder.store(.{
                         .source = ir_argument_instruction_index,
                         .destination = stack_reference,
                     });
+                    _ = store_instruction;
                 }
 
                 const sema_block = sema_function.getBodyBlock(builder.ir.module);
@@ -511,10 +582,12 @@ pub const Builder = struct {
                 if (!is_noreturn and sema_block.reaches_end) {
                     if (!builder.ir.blocks.get(builder.currentFunction().current_basic_block).hasJump(&builder.ir)) {
                         _ = try builder.append(.{
-                            .jump = try builder.jump(.{
-                                .source = builder.currentFunction().current_basic_block,
-                                .destination = builder.currentFunction().return_phi_block,
-                            }),
+                            .u = .{
+                                .jump = try builder.jump(.{
+                                    .source = builder.currentFunction().current_basic_block,
+                                    .destination = builder.currentFunction().return_phi_block,
+                                }),
+                            },
                         });
                     }
                 }
@@ -525,6 +598,527 @@ pub const Builder = struct {
                 return function_allocation.index;
             },
         }
+    }
+
+    fn blockInsideBasicBlock(builder: *Builder, sema_block: *Compilation.Block, block_index: BasicBlock.Index) !BasicBlock.Index {
+        const current_function = builder.currentFunction();
+        current_function.current_basic_block = block_index;
+        try builder.block(sema_block, .{});
+        return current_function.current_basic_block;
+    }
+
+    const BlockOptions = packed struct {
+        emit_exit_block: bool = true,
+    };
+
+    fn emitSyscallArgument(builder: *Builder, sema_syscall_argument_value_index: Compilation.Value.Index) !Instruction.Index {
+        const sema_syscall_argument_value = builder.ir.module.values.get(sema_syscall_argument_value_index);
+        return switch (sema_syscall_argument_value.*) {
+            .integer => |integer| try builder.processInteger(integer),
+            .sign_extend => |cast_index| try builder.processCast(cast_index, .sign_extend),
+            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn processCast(builder: *Builder, sema_cast_index: Compilation.Cast.Index, cast_type: CastType) !Instruction.Index {
+        const sema_cast = builder.ir.module.casts.get(sema_cast_index);
+        const sema_source_value = builder.ir.module.values.get(sema_cast.value);
+        const source_value = switch (sema_source_value.*) {
+            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            else => |t| @panic(@tagName(t)),
+        };
+
+        const cast_allocation = try builder.ir.casts.append(builder.allocator, .{
+            .value = source_value,
+            .type = try builder.translateType(sema_cast.type),
+        });
+
+        const result = try builder.append(.{
+            .u = @unionInit(Instruction.U, switch (cast_type) {
+                inline else => |ct| @tagName(ct),
+            }, cast_allocation.index),
+        });
+
+        return result;
+    }
+
+    fn processDeclarationReferenceRaw(builder: *Builder, declaration_index: Compilation.Declaration.Index) !Instruction.Index {
+        const sema_declaration = builder.ir.module.declarations.get(declaration_index);
+        const result = switch (sema_declaration.scope_type) {
+            .local => builder.currentFunction().stack_map.get(declaration_index).?,
+            .global => unreachable,
+        };
+        return result;
+    }
+
+    fn loadDeclarationReference(builder: *Builder, declaration_index: Compilation.Declaration.Index) !Instruction.Index {
+        const stack_instruction = try builder.processDeclarationReferenceRaw(declaration_index);
+        const load = try builder.ir.loads.append(builder.allocator, .{
+            .instruction = stack_instruction,
+        });
+        return try builder.append(.{
+            .u = .{
+                .load = load.index,
+            },
+        });
+    }
+
+    fn processInteger(builder: *Builder, integer_value: Compilation.Value.Integer) !Instruction.Index {
+        const integer = Integer{
+            .value = .{
+                .unsigned = integer_value.value,
+            },
+            .type = try builder.translateType(integer_value.type),
+        };
+        assert(integer.type.isInteger());
+        const instruction_allocation = try builder.ir.instructions.append(builder.allocator, .{
+            .u = .{
+                .load_integer = integer,
+            },
+        });
+        // const load_integer = try builder.append(.{
+        //     .load_integer = integer,
+        // });
+        return instruction_allocation.index;
+    }
+
+    fn processSyscall(builder: *Builder, sema_syscall_index: Compilation.Syscall.Index) anyerror!Instruction.Index {
+        const sema_syscall = builder.ir.module.syscalls.get(sema_syscall_index);
+        var arguments = try ArrayList(Instruction.Index).initCapacity(builder.allocator, sema_syscall.argument_count + 1);
+
+        const sema_syscall_number = sema_syscall.number;
+        assert(!sema_syscall_number.invalid);
+        const number_value_index = try builder.emitSyscallArgument(sema_syscall_number);
+
+        arguments.appendAssumeCapacity(number_value_index);
+
+        for (sema_syscall.getArguments()) |sema_syscall_argument| {
+            assert(!sema_syscall_argument.invalid);
+            const argument_value_index = try builder.emitSyscallArgument(sema_syscall_argument);
+            arguments.appendAssumeCapacity(argument_value_index);
+        }
+
+        const syscall_allocation = try builder.ir.syscalls.append(builder.allocator, .{
+            .arguments = arguments,
+        });
+
+        const instruction_index = try builder.append(.{
+            .u = .{
+                .syscall = syscall_allocation.index,
+            },
+        });
+
+        for (arguments.items) |argument| {
+            try builder.useInstruction(.{
+                .instruction = argument,
+                .user = instruction_index,
+            });
+        }
+
+        return instruction_index;
+    }
+
+    fn processBinaryOperation(builder: *Builder, sema_binary_operation_index: Compilation.BinaryOperation.Index) !Instruction.Index {
+        const sema_binary_operation = builder.ir.module.binary_operations.get(sema_binary_operation_index);
+
+        const left = try builder.emitBinaryOperationOperand(sema_binary_operation.left);
+        const right = try builder.emitBinaryOperationOperand(sema_binary_operation.right);
+
+        const binary_operation = try builder.ir.binary_operations.append(builder.allocator, .{
+            .left = left,
+            .right = right,
+            .id = switch (sema_binary_operation.id) {
+                .add => .add,
+                .sub => .sub,
+            },
+            .type = try builder.translateType(sema_binary_operation.type),
+        });
+
+        const instruction = try builder.append(.{
+            .u = .{
+                .binary_operation = binary_operation.index,
+            },
+        });
+
+        try builder.useInstruction(.{
+            .instruction = left,
+            .user = instruction,
+        });
+
+        try builder.useInstruction(.{
+            .instruction = right,
+            .user = instruction,
+        });
+
+        return instruction;
+    }
+
+    fn block(builder: *Builder, sema_block: *Compilation.Block, options: BlockOptions) anyerror!void {
+        for (sema_block.statements.items) |sema_statement_index| {
+            const sema_statement = builder.ir.module.values.get(sema_statement_index);
+            switch (sema_statement.*) {
+                .loop => |loop_index| {
+                    const sema_loop = builder.ir.module.loops.get(loop_index);
+                    const sema_loop_condition = builder.ir.module.values.get(sema_loop.condition);
+                    const sema_loop_body = builder.ir.module.values.get(sema_loop.body);
+                    const condition: Compilation.Value.Index = switch (sema_loop_condition.*) {
+                        .bool => |bool_value| switch (bool_value) {
+                            true => Compilation.Value.Index.invalid,
+                            false => unreachable,
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    };
+
+                    const original_block = builder.currentFunction().current_basic_block;
+                    const jump_to_loop = try builder.append(.{
+                        .u = .{
+                            .jump = undefined,
+                        },
+                    });
+                    const loop_body_block = try builder.newBlock();
+                    const loop_prologue_block = if (options.emit_exit_block) try builder.newBlock() else BasicBlock.Index.invalid;
+
+                    const loop_head_block = switch (!condition.invalid) {
+                        false => loop_body_block,
+                        true => unreachable,
+                    };
+
+                    builder.ir.instructions.get(jump_to_loop).u.jump = try builder.jump(.{
+                        .source = original_block,
+                        .destination = loop_head_block,
+                    });
+
+                    const sema_body_block = builder.ir.module.blocks.get(sema_loop_body.block);
+                    builder.currentFunction().current_basic_block = try builder.blockInsideBasicBlock(sema_body_block, loop_body_block);
+                    if (!loop_prologue_block.invalid) {
+                        builder.ir.blocks.get(loop_prologue_block).seal();
+                    }
+
+                    if (sema_body_block.reaches_end) {
+                        _ = try builder.append(.{
+                            .u = .{
+                                .jump = try builder.jump(.{
+                                    .source = builder.currentFunction().current_basic_block,
+                                    .destination = loop_head_block,
+                                }),
+                            },
+                        });
+                    }
+
+                    builder.ir.blocks.get(builder.currentFunction().current_basic_block).filled = true;
+                    builder.ir.blocks.get(loop_body_block).seal();
+                    if (!loop_head_block.eq(loop_body_block)) {
+                        unreachable;
+                    }
+
+                    if (!loop_prologue_block.invalid) {
+                        builder.currentFunction().current_basic_block = loop_prologue_block;
+                    }
+                },
+                .syscall => |sema_syscall_index| _ = try builder.processSyscall(sema_syscall_index),
+                .@"unreachable" => _ = try builder.append(.{
+                    .u = .{
+                        .@"unreachable" = {},
+                    },
+                }),
+                .@"return" => |sema_ret_index| {
+                    const sema_ret = builder.ir.module.returns.get(sema_ret_index);
+                    const return_value = try builder.emitReturnValue(sema_ret.value);
+                    const phi_instruction = builder.ir.instructions.get(builder.currentFunction().return_phi_node);
+                    const phi = switch (phi_instruction.u.phi.invalid) {
+                        false => unreachable,
+                        true => (try builder.ir.phis.append(builder.allocator, std.mem.zeroes(Phi))).ptr,
+                    }; //builder.ir.phis.get(phi_instruction.phi);
+                    const exit_jump = try builder.jump(.{
+                        .source = builder.currentFunction().current_basic_block,
+                        .destination = switch (!phi_instruction.u.phi.invalid) {
+                            true => phi.block,
+                            false => builder.currentFunction().return_phi_block,
+                        },
+                    });
+
+                    phi_instruction.u.phi = (try builder.ir.phis.append(builder.allocator, .{
+                        .instruction = return_value,
+                        .jump = exit_jump,
+                        .next = phi_instruction.u.phi,
+                        .block = phi.block,
+                    })).index;
+
+                    try builder.useInstruction(.{
+                        .instruction = return_value,
+                        .user = builder.currentFunction().return_phi_node,
+                    });
+
+                    _ = try builder.append(.{
+                        .u = .{
+                            .jump = exit_jump,
+                        },
+                    });
+                },
+                .declaration => |sema_declaration_index| {
+                    const sema_declaration = builder.ir.module.declarations.get(sema_declaration_index);
+                    //logln("Name: {s}\n", .{builder.module.getName(sema_declaration.name).?});
+                    assert(sema_declaration.scope_type == .local);
+                    const declaration_type = builder.ir.module.types.get(sema_declaration.type);
+                    switch (declaration_type.*) {
+                        .comptime_int => unreachable,
+                        else => {
+                            var value_index = try builder.emitDeclarationInitValue(sema_declaration.init_value);
+                            const value = builder.ir.instructions.get(value_index);
+                            value_index = switch (value.u) {
+                                .load_integer,
+                                .call,
+                                .binary_operation,
+                                => value_index,
+                                // .call => try builder.load(value_index),
+                                else => |t| @panic(@tagName(t)),
+                            };
+
+                            const ir_type = try builder.translateType(sema_declaration.type);
+
+                            const stack_i = try builder.stackReference(.{
+                                .type = ir_type,
+                                .sema = sema_declaration_index,
+                            });
+                            const store_instruction = try builder.store(.{
+                                .source = value_index,
+                                .destination = stack_i,
+                            });
+                            _ = store_instruction;
+                        },
+                    }
+                },
+                .call => |sema_call_index| _ = try builder.processCall(sema_call_index),
+                else => |t| @panic(@tagName(t)),
+            }
+        }
+    }
+
+    fn emitDeclarationInitValue(builder: *Builder, declaration_init_value_index: Compilation.Value.Index) !Instruction.Index {
+        const declaration_init_value = builder.ir.module.values.get(declaration_init_value_index);
+        return switch (declaration_init_value.*) {
+            .call => |call_index| try builder.processCall(call_index),
+            .integer => |integer| try builder.processInteger(integer),
+            .binary_operation => |binary_operation_index| try builder.processBinaryOperation(binary_operation_index),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn emitReturnValue(builder: *Builder, return_value_index: Compilation.Value.Index) !Instruction.Index {
+        const return_value = builder.ir.module.values.get(return_value_index);
+        return switch (return_value.*) {
+            .syscall => |syscall_index| try builder.processSyscall(syscall_index),
+            .integer => |integer| try builder.processInteger(integer),
+            .call => |call_index| try builder.processCall(call_index),
+            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn emitBinaryOperationOperand(builder: *Builder, binary_operation_index: Compilation.Value.Index) !Instruction.Index {
+        const value = builder.ir.module.values.get(binary_operation_index);
+        return switch (value.*) {
+            .integer => |integer| try builder.processInteger(integer),
+            .call => |call_index| try builder.processCall(call_index),
+            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn stackReference(builder: *Builder, arguments: struct {
+        type: Type,
+        sema: Compilation.Declaration.Index,
+        alignment: ?u64 = null,
+    }) !Instruction.Index {
+        const size = arguments.type.getSize();
+        assert(size > 0);
+        const alignment = if (arguments.alignment) |a| a else arguments.type.getAlignment();
+        builder.currentFunction().current_stack_offset = std.mem.alignForward(u64, builder.currentFunction().current_stack_offset, alignment);
+        builder.currentFunction().current_stack_offset += size;
+        const stack_offset = builder.currentFunction().current_stack_offset;
+        const stack_reference_allocation = try builder.ir.stack_references.append(builder.allocator, .{
+            .offset = stack_offset,
+            .type = arguments.type,
+            .alignment = alignment,
+        });
+
+        const instruction_index = try builder.append(.{
+            .u = .{
+                .stack = stack_reference_allocation.index,
+            },
+        });
+
+        try builder.currentFunction().stack_map.put(builder.allocator, arguments.sema, instruction_index);
+
+        return instruction_index;
+    }
+
+    fn store(builder: *Builder, descriptor: Store) !Instruction.Index {
+        const store_allocation = try builder.ir.stores.append(builder.allocator, descriptor);
+
+        const result = try builder.append(.{
+            .u = .{
+                .store = store_allocation.index,
+            },
+        });
+
+        try builder.useInstruction(.{
+            .instruction = descriptor.source,
+            .user = result,
+        });
+
+        try builder.useInstruction(.{
+            .instruction = descriptor.destination,
+            .user = result,
+        });
+
+        return result;
+    }
+
+    fn emitCallArgument(builder: *Builder, call_argument_value_index: Compilation.Value.Index) !Instruction.Index {
+        const call_argument_value = builder.ir.module.values.get(call_argument_value_index);
+        return switch (call_argument_value.*) {
+            .integer => |integer| try builder.processInteger(integer),
+            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            .string_literal => |string_literal_index| try builder.processStringLiteral(string_literal_index),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn processCall(builder: *Builder, sema_call_index: Compilation.Call.Index) anyerror!Instruction.Index {
+        const sema_call = builder.ir.module.calls.get(sema_call_index);
+        const sema_argument_list_index = sema_call.arguments;
+        const argument_list: []const Instruction.Index = switch (sema_argument_list_index.invalid) {
+            false => blk: {
+                var argument_list = ArrayList(Instruction.Index){};
+                const sema_argument_list = builder.ir.module.argument_lists.get(sema_argument_list_index);
+                try argument_list.ensureTotalCapacity(builder.allocator, sema_argument_list.array.items.len);
+                for (sema_argument_list.array.items) |sema_argument_value_index| {
+                    const argument_value_index = try builder.emitCallArgument(sema_argument_value_index);
+                    argument_list.appendAssumeCapacity(argument_value_index);
+                }
+                break :blk argument_list.items;
+            },
+            true => &.{},
+        };
+
+        const call_index = try builder.call(.{
+            .function = switch (builder.ir.module.values.get(sema_call.value).*) {
+                .function => |function_index| .{
+                    .index = function_index.index,
+                    .block = function_index.block,
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .arguments = argument_list,
+        });
+
+        const instruction_index = try builder.append(.{
+            .u = .{
+                .call = call_index,
+            },
+        });
+
+        for (argument_list) |argument| {
+            try builder.useInstruction(.{
+                .instruction = argument,
+                .user = instruction_index,
+            });
+        }
+
+        return instruction_index;
+    }
+
+    fn processStringLiteral(builder: *Builder, string_literal_hash: u32) !Instruction.Index {
+        const string_literal = builder.ir.module.string_literals.getValue(string_literal_hash).?;
+
+        if (builder.ir.section_manager.rodata == null) {
+            const rodata_index = try builder.ir.section_manager.addSection(.{
+                .name = ".rodata",
+                .size_guess = 0,
+                .alignment = 0x1000,
+                .flags = .{
+                    .read = true,
+                    .write = false,
+                    .execute = false,
+                },
+                .type = .loadable_program,
+            });
+
+            builder.ir.section_manager.rodata = @intCast(rodata_index);
+        }
+
+        const rodata_index = builder.ir.section_manager.rodata orelse unreachable;
+        const rodata_section_offset = builder.ir.section_manager.getSectionOffset(rodata_index);
+
+        try builder.ir.section_manager.appendToSection(rodata_index, string_literal);
+        try builder.ir.section_manager.appendByteToSection(rodata_index, 0);
+
+        const string_literal_allocation = try builder.ir.string_literals.append(builder.allocator, .{
+            .offset = @intCast(rodata_section_offset),
+        });
+
+        const result = try builder.append(.{
+            .u = .{
+                .load_string_literal = string_literal_allocation.index,
+            },
+        });
+
+        return result;
+    }
+
+    fn translateType(builder: *Builder, type_index: Compilation.Type.Index) !Type {
+        const sema_type = builder.ir.module.types.get(type_index);
+        return switch (sema_type.*) {
+            .integer => |integer| switch (integer.bit_count) {
+                8 => .i8,
+                16 => .i16,
+                32 => .i32,
+                64 => .i64,
+                else => unreachable,
+            },
+            // TODO
+            .pointer => .i64,
+            .void => .void,
+            .noreturn => .noreturn,
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
+    fn call(builder: *Builder, descriptor: Call) !Call.Index {
+        const call_allocation = try builder.ir.calls.append(builder.allocator, descriptor);
+        return call_allocation.index;
+    }
+
+    fn jump(builder: *Builder, descriptor: Jump) !Jump.Index {
+        const destination_block = builder.ir.blocks.get(descriptor.destination);
+        assert(!destination_block.sealed);
+        assert(!descriptor.source.invalid);
+        const jump_allocation = try builder.ir.jumps.append(builder.allocator, descriptor);
+        return jump_allocation.index;
+    }
+
+    fn append(builder: *Builder, instruction: Instruction) !Instruction.Index {
+        assert(!builder.current_function_index.invalid);
+        const current_function = builder.currentFunction();
+        assert(!current_function.current_basic_block.invalid);
+        return builder.appendToBlock(current_function.current_basic_block, instruction);
+    }
+
+    fn appendToBlock(builder: *Builder, block_index: BasicBlock.Index, instruction: Instruction) !Instruction.Index {
+        const instruction_allocation = try builder.ir.instructions.append(builder.allocator, instruction);
+        try builder.ir.blocks.get(block_index).instructions.append(builder.allocator, instruction_allocation.index);
+
+        return instruction_allocation.index;
+    }
+
+    fn newBlock(builder: *Builder) !BasicBlock.Index {
+        const new_block_allocation = try builder.ir.blocks.append(builder.allocator, .{});
+        const current_function = builder.currentFunction();
+        try current_function.blocks.append(builder.allocator, new_block_allocation.index);
+
+        return new_block_allocation.index;
     }
 
     const BlockSearcher = struct {
@@ -542,7 +1136,7 @@ pub const Builder = struct {
             const block_to_visit = builder.ir.blocks.get(block_index);
             const last_instruction_index = block_to_visit.instructions.items[block_to_visit.instructions.items.len - 1];
             const last_instruction = builder.ir.instructions.get(last_instruction_index);
-            const block_to_search = switch (last_instruction.*) {
+            const block_to_search = switch (last_instruction.u) {
                 .jump => |jump_index| blk: {
                     const ir_jump = builder.ir.jumps.get(jump_index);
                     assert(ir_jump.source.eq(block_index));
@@ -598,7 +1192,7 @@ pub const Builder = struct {
 
                 if (basic_block.instructions.items.len > 0) {
                     const instruction = builder.ir.instructions.get(basic_block.instructions.getLast());
-                    switch (instruction.*) {
+                    switch (instruction.u) {
                         .jump => |jump_index| {
                             const jump_instruction = builder.ir.jumps.get(jump_index);
                             const source = basic_block_index;
@@ -640,7 +1234,7 @@ pub const Builder = struct {
             const basic_block = builder.ir.blocks.get(basic_block_index);
             for (basic_block.instructions.items, 0..) |instruction_index, index| {
                 const instruction = builder.ir.instructions.get(instruction_index);
-                switch (instruction.*) {
+                switch (instruction.u) {
                     .copy => try instructions_to_delete.append(builder.allocator, @intCast(index)),
                     else => {},
                 }
@@ -657,10 +1251,10 @@ pub const Builder = struct {
 
     fn removeUnreachablePhis(builder: *Builder, reachable_blocks: []const BasicBlock.Index, instruction_index: Instruction.Index) !bool {
         const instruction = builder.ir.instructions.get(instruction_index);
-        return switch (instruction.*) {
+        return switch (instruction.u) {
             .phi => blk: {
                 var did_something = false;
-                var head = &instruction.phi;
+                var head = &instruction.u.phi;
                 next: while (!head.invalid) {
                     const phi = builder.ir.phis.get(head.*);
                     const phi_jump = builder.ir.jumps.get(phi.jump);
@@ -685,7 +1279,7 @@ pub const Builder = struct {
 
     fn removeTrivialPhis(builder: *Builder, instruction_index: Instruction.Index) !bool {
         const instruction = builder.ir.instructions.get(instruction_index);
-        return switch (instruction.*) {
+        return switch (instruction.u) {
             .phi => |phi_index| blk: {
                 const trivial_phi: ?Instruction.Index = trivial_blk: {
                     var only_value = Instruction.Index.invalid;
@@ -694,7 +1288,7 @@ pub const Builder = struct {
                     while (!it.invalid) {
                         const phi = builder.ir.phis.get(it);
                         const phi_value = builder.ir.instructions.get(phi.instruction);
-                        if (phi_value.* == .phi) unreachable;
+                        if (phi_value.u == .phi) unreachable;
                         // TODO: undefined
                         if (!only_value.invalid) {
                             if (!only_value.eq(phi.instruction)) {
@@ -718,18 +1312,22 @@ pub const Builder = struct {
                             unreachable;
                         } else {
                             instruction.* = .{
-                                .copy = trivial_value,
+                                .u = .{
+                                    .copy = trivial_value,
+                                },
                             };
                         }
                     } else {
                         logln(.ir, .phi_removal, "TODO: maybe this phi removal is wrong?", .{});
                         instruction.* = .{
-                            .copy = trivial_value,
+                            .u = .{
+                                .copy = trivial_value,
+                            },
                         };
                     }
                 }
 
-                break :blk instruction.* != .phi;
+                break :blk instruction.u != .phi;
             },
             else => false,
         };
@@ -737,14 +1335,14 @@ pub const Builder = struct {
 
     fn removeCopyReferences(builder: *Builder, instruction_index: Instruction.Index) !bool {
         const instruction = builder.ir.instructions.get(instruction_index);
-        return switch (instruction.*) {
+        return switch (instruction.u) {
             .copy => false,
             else => {
                 var did_something = false;
 
-                const operands: []const *Instruction.Index = switch (instruction.*) {
+                const operands: []const *Instruction.Index = switch (instruction.u) {
                     .jump, .@"unreachable", .load_integer, .load_string_literal, .stack, .argument => &.{},
-                    .ret => &.{&builder.ir.returns.get(instruction.ret).instruction},
+                    .ret => &.{&builder.ir.returns.get(instruction.u.ret).instruction},
                     // TODO: arguments
                     .call => blk: {
                         var list = ArrayList(*Instruction.Index){};
@@ -772,6 +1370,10 @@ pub const Builder = struct {
                         const load = builder.ir.loads.get(load_index);
                         break :blk &.{&load.instruction};
                     },
+                    .binary_operation => |binary_operation_index| blk: {
+                        const binary_operation = builder.ir.binary_operations.get(binary_operation_index);
+                        break :blk &.{ &binary_operation.left, &binary_operation.right };
+                    },
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -779,7 +1381,7 @@ pub const Builder = struct {
                     switch (operand_instruction_index_pointer.invalid) {
                         false => {
                             const operand_value = builder.ir.instructions.get(operand_instruction_index_pointer.*);
-                            switch (operand_value.*) {
+                            switch (operand_value.u) {
                                 .copy => |copy_value| {
                                     operand_instruction_index_pointer.* = copy_value;
                                     did_something = true;
@@ -791,6 +1393,7 @@ pub const Builder = struct {
                                 .syscall,
                                 .sign_extend,
                                 .load,
+                                .binary_operation,
                                 => {},
                                 else => |t| @panic(@tagName(t)),
                             }
@@ -803,426 +1406,4 @@ pub const Builder = struct {
             },
         };
     }
-
-    fn blockInsideBasicBlock(builder: *Builder, sema_block: *Compilation.Block, block_index: BasicBlock.Index) !BasicBlock.Index {
-        const current_function = builder.currentFunction();
-        current_function.current_basic_block = block_index;
-        try builder.block(sema_block, .{});
-        return current_function.current_basic_block;
-    }
-
-    const BlockOptions = packed struct {
-        emit_exit_block: bool = true,
-    };
-
-    fn emitSyscallArgument(builder: *Builder, sema_syscall_argument_value_index: Compilation.Value.Index) !Instruction.Index {
-        const sema_syscall_argument_value = builder.ir.module.values.get(sema_syscall_argument_value_index);
-        return switch (sema_syscall_argument_value.*) {
-            .integer => |integer| try builder.processInteger(integer),
-            .sign_extend => |cast_index| try builder.processCast(cast_index, .sign_extend),
-            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
-            else => |t| @panic(@tagName(t)),
-        };
-    }
-
-    fn processCast(builder: *Builder, sema_cast_index: Compilation.Cast.Index, cast_type: CastType) !Instruction.Index {
-        const sema_cast = builder.ir.module.casts.get(sema_cast_index);
-        const sema_source_value = builder.ir.module.values.get(sema_cast.value);
-        const source_value = switch (sema_source_value.*) {
-            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
-            else => |t| @panic(@tagName(t)),
-        };
-
-        const cast_allocation = try builder.ir.casts.append(builder.allocator, .{
-            .value = source_value,
-            .type = try builder.translateType(sema_cast.type),
-        });
-
-        const result = try builder.append(@unionInit(Instruction, switch (cast_type) {
-            inline else => |ct| @tagName(ct),
-        }, cast_allocation.index));
-
-        return result;
-    }
-
-    fn processDeclarationReferenceRaw(builder: *Builder, declaration_index: Compilation.Declaration.Index) !Instruction.Index {
-        const sema_declaration = builder.ir.module.declarations.get(declaration_index);
-        const result = switch (sema_declaration.scope_type) {
-            .local => builder.currentFunction().stack_map.get(declaration_index).?,
-            .global => unreachable,
-        };
-        return result;
-    }
-
-    fn loadDeclarationReference(builder: *Builder, declaration_index: Compilation.Declaration.Index) !Instruction.Index {
-        const stack_instruction = try builder.processDeclarationReferenceRaw(declaration_index);
-        const load = try builder.ir.loads.append(builder.allocator, .{
-            .instruction = stack_instruction,
-        });
-        return try builder.append(.{
-            .load = load.index,
-        });
-    }
-
-    fn processInteger(builder: *Builder, integer_value: Compilation.Value.Integer) !Instruction.Index {
-        const integer = Integer{
-            .value = .{
-                .unsigned = integer_value.value,
-            },
-            .type = try builder.translateType(integer_value.type),
-        };
-        assert(integer.type.isInteger());
-        const instruction_allocation = try builder.ir.instructions.append(builder.allocator, .{
-            .load_integer = integer,
-        });
-        // const load_integer = try builder.append(.{
-        //     .load_integer = integer,
-        // });
-        return instruction_allocation.index;
-    }
-
-    fn processSyscall(builder: *Builder, sema_syscall_index: Compilation.Syscall.Index) anyerror!Instruction.Index {
-        const sema_syscall = builder.ir.module.syscalls.get(sema_syscall_index);
-        var arguments = try ArrayList(Instruction.Index).initCapacity(builder.allocator, sema_syscall.argument_count + 1);
-
-        const sema_syscall_number = sema_syscall.number;
-        assert(!sema_syscall_number.invalid);
-        const number_value_index = try builder.emitSyscallArgument(sema_syscall_number);
-
-        arguments.appendAssumeCapacity(number_value_index);
-
-        for (sema_syscall.getArguments()) |sema_syscall_argument| {
-            assert(!sema_syscall_argument.invalid);
-            const argument_value_index = try builder.emitSyscallArgument(sema_syscall_argument);
-            arguments.appendAssumeCapacity(argument_value_index);
-        }
-
-        // TODO: undo this mess
-        const syscall_allocation = try builder.ir.syscalls.append(builder.allocator, .{
-            .arguments = arguments,
-        });
-
-        const instruction_index = try builder.append(.{ .syscall = syscall_allocation.index });
-        return instruction_index;
-    }
-
-    fn block(builder: *Builder, sema_block: *Compilation.Block, options: BlockOptions) anyerror!void {
-        for (sema_block.statements.items) |sema_statement_index| {
-            const sema_statement = builder.ir.module.values.get(sema_statement_index);
-            switch (sema_statement.*) {
-                .loop => |loop_index| {
-                    const sema_loop = builder.ir.module.loops.get(loop_index);
-                    const sema_loop_condition = builder.ir.module.values.get(sema_loop.condition);
-                    const sema_loop_body = builder.ir.module.values.get(sema_loop.body);
-                    const condition: Compilation.Value.Index = switch (sema_loop_condition.*) {
-                        .bool => |bool_value| switch (bool_value) {
-                            true => Compilation.Value.Index.invalid,
-                            false => unreachable,
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    };
-
-                    const original_block = builder.currentFunction().current_basic_block;
-                    const jump_to_loop = try builder.append(.{
-                        .jump = undefined,
-                    });
-                    const loop_body_block = try builder.newBlock();
-                    const loop_prologue_block = if (options.emit_exit_block) try builder.newBlock() else BasicBlock.Index.invalid;
-
-                    const loop_head_block = switch (!condition.invalid) {
-                        false => loop_body_block,
-                        true => unreachable,
-                    };
-
-                    builder.ir.instructions.get(jump_to_loop).jump = try builder.jump(.{
-                        .source = original_block,
-                        .destination = loop_head_block,
-                    });
-
-                    const sema_body_block = builder.ir.module.blocks.get(sema_loop_body.block);
-                    builder.currentFunction().current_basic_block = try builder.blockInsideBasicBlock(sema_body_block, loop_body_block);
-                    if (!loop_prologue_block.invalid) {
-                        builder.ir.blocks.get(loop_prologue_block).seal();
-                    }
-
-                    if (sema_body_block.reaches_end) {
-                        _ = try builder.append(.{
-                            .jump = try builder.jump(.{
-                                .source = builder.currentFunction().current_basic_block,
-                                .destination = loop_head_block,
-                            }),
-                        });
-                    }
-
-                    builder.ir.blocks.get(builder.currentFunction().current_basic_block).filled = true;
-                    builder.ir.blocks.get(loop_body_block).seal();
-                    if (!loop_head_block.eq(loop_body_block)) {
-                        unreachable;
-                    }
-
-                    if (!loop_prologue_block.invalid) {
-                        builder.currentFunction().current_basic_block = loop_prologue_block;
-                    }
-                },
-                .syscall => |sema_syscall_index| _ = try builder.processSyscall(sema_syscall_index),
-                .@"unreachable" => _ = try builder.append(.{
-                    .@"unreachable" = {},
-                }),
-                .@"return" => |sema_ret_index| {
-                    const sema_ret = builder.ir.module.returns.get(sema_ret_index);
-                    const return_value = try builder.emitReturnValue(sema_ret.value);
-                    const phi_instruction = builder.ir.instructions.get(builder.currentFunction().return_phi_node);
-                    const phi = switch (phi_instruction.phi.invalid) {
-                        false => unreachable,
-                        true => (try builder.ir.phis.append(builder.allocator, std.mem.zeroes(Phi))).ptr,
-                    }; //builder.ir.phis.get(phi_instruction.phi);
-                    const exit_jump = try builder.jump(.{
-                        .source = builder.currentFunction().current_basic_block,
-                        .destination = switch (!phi_instruction.phi.invalid) {
-                            true => phi.block,
-                            false => builder.currentFunction().return_phi_block,
-                        },
-                    });
-                    phi_instruction.phi = (try builder.ir.phis.append(builder.allocator, .{
-                        .instruction = return_value,
-                        .jump = exit_jump,
-                        .next = phi_instruction.phi,
-                        .block = phi.block,
-                    })).index;
-
-                    _ = try builder.append(.{
-                        .jump = exit_jump,
-                    });
-                },
-                .declaration => |sema_declaration_index| {
-                    const sema_declaration = builder.ir.module.declarations.get(sema_declaration_index);
-                    //logln("Name: {s}\n", .{builder.module.getName(sema_declaration.name).?});
-                    assert(sema_declaration.scope_type == .local);
-                    const declaration_type = builder.ir.module.types.get(sema_declaration.type);
-                    switch (declaration_type.*) {
-                        .comptime_int => unreachable,
-                        else => {
-                            var value_index = try builder.emitDeclarationInitValue(sema_declaration.init_value);
-                            const value = builder.ir.instructions.get(value_index);
-                            value_index = switch (value.*) {
-                                .load_integer,
-                                .call,
-                                => value_index,
-                                // .call => try builder.load(value_index),
-                                else => |t| @panic(@tagName(t)),
-                            };
-
-                            const ir_type = try builder.translateType(sema_declaration.type);
-                            _ = try builder.store(.{
-                                .source = value_index,
-                                .destination = try builder.stackReference(.{
-                                    .type = ir_type,
-                                    .sema = sema_declaration_index,
-                                }),
-                            });
-                        },
-                    }
-                },
-                .call => |sema_call_index| _ = try builder.processCall(sema_call_index),
-                else => |t| @panic(@tagName(t)),
-            }
-        }
-    }
-
-    fn emitDeclarationInitValue(builder: *Builder, declaration_init_value_index: Compilation.Value.Index) !Instruction.Index {
-        const declaration_init_value = builder.ir.module.values.get(declaration_init_value_index);
-        return switch (declaration_init_value.*) {
-            .call => |call_index| try builder.processCall(call_index),
-            .integer => |integer| try builder.processInteger(integer),
-            else => |t| @panic(@tagName(t)),
-        };
-    }
-
-    fn emitReturnValue(builder: *Builder, return_value_index: Compilation.Value.Index) !Instruction.Index {
-        const return_value = builder.ir.module.values.get(return_value_index);
-        return switch (return_value.*) {
-            .syscall => |syscall_index| try builder.processSyscall(syscall_index),
-            .integer => |integer| try builder.processInteger(integer),
-            .call => |call_index| try builder.processCall(call_index),
-            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
-            else => |t| @panic(@tagName(t)),
-        };
-    }
-
-    fn stackReference(builder: *Builder, arguments: struct {
-        type: Type,
-        sema: Compilation.Declaration.Index,
-        alignment: ?u64 = null,
-    }) !Instruction.Index {
-        const size = arguments.type.getSize();
-        assert(size > 0);
-        const alignment = if (arguments.alignment) |a| a else arguments.type.getAlignment();
-        builder.currentFunction().current_stack_offset = std.mem.alignForward(u64, builder.currentFunction().current_stack_offset, alignment);
-        builder.currentFunction().current_stack_offset += size;
-        const stack_offset = builder.currentFunction().current_stack_offset;
-        const stack_reference_allocation = try builder.ir.stack_references.append(builder.allocator, .{
-            .offset = stack_offset,
-            .type = arguments.type,
-            .alignment = alignment,
-        });
-
-        const instruction_index = try builder.append(.{
-            .stack = stack_reference_allocation.index,
-        });
-
-        try builder.currentFunction().stack_map.put(builder.allocator, arguments.sema, instruction_index);
-
-        return instruction_index;
-    }
-
-    fn store(builder: *Builder, descriptor: Store) !void {
-        const store_allocation = try builder.ir.stores.append(builder.allocator, descriptor);
-        _ = try builder.append(.{
-            .store = store_allocation.index,
-        });
-    }
-
-    fn emitCallArgument(builder: *Builder, call_argument_value_index: Compilation.Value.Index) !Instruction.Index {
-        const call_argument_value = builder.ir.module.values.get(call_argument_value_index);
-        return switch (call_argument_value.*) {
-            .integer => |integer| try builder.processInteger(integer),
-            .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
-            .string_literal => |string_literal_index| try builder.processStringLiteral(string_literal_index),
-            else => |t| @panic(@tagName(t)),
-        };
-    }
-
-    fn processCall(builder: *Builder, sema_call_index: Compilation.Call.Index) anyerror!Instruction.Index {
-        const sema_call = builder.ir.module.calls.get(sema_call_index);
-        const sema_argument_list_index = sema_call.arguments;
-        const argument_list: []const Instruction.Index = switch (sema_argument_list_index.invalid) {
-            false => blk: {
-                var argument_list = ArrayList(Instruction.Index){};
-                const sema_argument_list = builder.ir.module.argument_lists.get(sema_argument_list_index);
-                try argument_list.ensureTotalCapacity(builder.allocator, sema_argument_list.array.items.len);
-                for (sema_argument_list.array.items) |sema_argument_value_index| {
-                    const argument_value_index = try builder.emitCallArgument(sema_argument_value_index);
-                    argument_list.appendAssumeCapacity(argument_value_index);
-                }
-                break :blk argument_list.items;
-            },
-            true => &.{},
-        };
-
-        const call_index = try builder.call(.{
-            .function = switch (builder.ir.module.values.get(sema_call.value).*) {
-                .function => |function_index| .{
-                    .index = function_index.index,
-                    .block = function_index.block,
-                },
-                else => |t| @panic(@tagName(t)),
-            },
-            .arguments = argument_list,
-        });
-
-        const instruction_index = try builder.append(.{
-            .call = call_index,
-        });
-
-        return instruction_index;
-    }
-
-    fn processStringLiteral(builder: *Builder, string_literal_hash: u32) !Instruction.Index {
-        const string_literal = builder.ir.module.string_literals.getValue(string_literal_hash).?;
-
-        if (builder.ir.section_manager.rodata == null) {
-            const rodata_index = try builder.ir.section_manager.addSection(.{
-                .name = ".rodata",
-                .size_guess = 0,
-                .alignment = 0x1000,
-                .flags = .{
-                    .read = true,
-                    .write = false,
-                    .execute = false,
-                },
-                .type = .loadable_program,
-            });
-
-            builder.ir.section_manager.rodata = @intCast(rodata_index);
-        }
-
-        const rodata_index = builder.ir.section_manager.rodata orelse unreachable;
-        const rodata_section_offset = builder.ir.section_manager.getSectionOffset(rodata_index);
-
-        try builder.ir.section_manager.appendToSection(rodata_index, string_literal);
-        try builder.ir.section_manager.appendByteToSection(rodata_index, 0);
-
-        const string_literal_allocation = try builder.ir.string_literals.append(builder.allocator, .{
-            .offset = @intCast(rodata_section_offset),
-        });
-
-        const result = try builder.append(.{
-            .load_string_literal = string_literal_allocation.index,
-        });
-
-        return result;
-    }
-
-    fn translateType(builder: *Builder, type_index: Compilation.Type.Index) !Type {
-        const sema_type = builder.ir.module.types.get(type_index);
-        return switch (sema_type.*) {
-            .integer => |integer| switch (integer.bit_count) {
-                8 => .i8,
-                16 => .i16,
-                32 => .i32,
-                64 => .i64,
-                else => unreachable,
-            },
-            // TODO
-            .pointer => .i64,
-            .void => .void,
-            .noreturn => .noreturn,
-            else => |t| @panic(@tagName(t)),
-        };
-    }
-
-    fn call(builder: *Builder, descriptor: Call) !Call.Index {
-        const call_allocation = try builder.ir.calls.append(builder.allocator, descriptor);
-        return call_allocation.index;
-    }
-
-    fn jump(builder: *Builder, descriptor: Jump) !Jump.Index {
-        const destination_block = builder.ir.blocks.get(descriptor.destination);
-        assert(!destination_block.sealed);
-        assert(!descriptor.source.invalid);
-        const jump_allocation = try builder.ir.jumps.append(builder.allocator, descriptor);
-        return jump_allocation.index;
-    }
-
-    fn append(builder: *Builder, instruction: Instruction) !Instruction.Index {
-        assert(!builder.current_function_index.invalid);
-        const current_function = builder.currentFunction();
-        assert(!current_function.current_basic_block.invalid);
-        return builder.appendToBlock(current_function.current_basic_block, instruction);
-    }
-
-    fn appendToBlock(builder: *Builder, block_index: BasicBlock.Index, instruction: Instruction) !Instruction.Index {
-        const instruction_allocation = try builder.ir.instructions.append(builder.allocator, instruction);
-        try builder.ir.blocks.get(block_index).instructions.append(builder.allocator, instruction_allocation.index);
-
-        return instruction_allocation.index;
-    }
-
-    fn newBlock(builder: *Builder) !BasicBlock.Index {
-        const new_block_allocation = try builder.ir.blocks.append(builder.allocator, .{});
-        const current_function = builder.currentFunction();
-        const function_block_index = current_function.blocks.items.len;
-        _ = function_block_index;
-        try current_function.blocks.append(builder.allocator, new_block_allocation.index);
-
-        return new_block_allocation.index;
-    }
-};
-
-pub const Integer = struct {
-    value: extern union {
-        signed: i64,
-        unsigned: u64,
-    },
-    type: Type,
 };
