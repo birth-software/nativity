@@ -34,14 +34,5 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: master
-      - name: Zig environment variables
-        run: zig env
       - name: Test
-        run: |
-          zig build test -Dall --summary all
-          zig build run -- test/first/main.nat
-          nat/first
-          zig build run -- test/stack/main.nat
-          nat/stack
-          zig build run -- test/hello_world/main.nat
-          nat/hello_world
+        run: ./ci.sh

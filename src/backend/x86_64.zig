@@ -40,18 +40,18 @@ pub const Logger = enum {
     pub var bitset = std.EnumSet(Logger).initMany(&.{
         .instruction_selection_ir_function,
         .instruction_selection_mir_function,
-        // .instruction_selection_register_operand_list,
-        // .register_allocation_block,
-        // .register_allocation_problematic_hint,
-        // .register_allocation_assignment,
-        // .register_allocation_reload,
+        .instruction_selection_register_operand_list,
+        .register_allocation_block,
+        .register_allocation_problematic_hint,
+        .register_allocation_assignment,
+        .register_allocation_reload,
         .register_allocation_function_before,
         .register_allocation_new_instruction,
         .register_allocation_new_instruction_function_before,
         .register_allocation_instruction_avoid_copy,
         .register_allocation_function_after,
         // .register_allocation_operand_list_verification,
-        .encoding,
+        // .encoding,
     });
 };
 
@@ -2481,19 +2481,16 @@ pub const MIR = struct {
                         },
                         .call => |ir_call_index| {
                             const ir_call = mir.ir.calls.get(ir_call_index);
-                            var argument_index = ir_call.arguments.len;
-                            while (argument_index > 0) {
-                                argument_index -= 1;
+                            var argument_virtual_registers = try ArrayList(Register).initCapacity(mir.allocator, ir_call.arguments.len);
+                            for (ir_call.arguments) |ir_argument_index| {
+                                const register = try instruction_selection.getRegisterForValue(mir, ir_argument_index);
+                                argument_virtual_registers.appendAssumeCapacity(register);
+                            }
 
-                                const ir_argument_index = ir_call.arguments[argument_index];
-                                // print("index: {}", .{index});
-                                const source_register = try instruction_selection.getRegisterForValue(mir, ir_argument_index);
-                                const source_value_type = resolveType(getIrType(mir.ir, ir_argument_index));
-                                const source_register_class = register_classes.get(source_value_type);
+                            for (argument_virtual_registers.items, 0..) |argument_virtual_register, argument_index| {
+                                const source_register_class = mir.virtual_registers.get(argument_virtual_register.index.virtual).register_class;
                                 const argument_register = calling_convention.argument_registers.get(source_register_class)[argument_index];
-                                // print("Argument register: {}", .{argument_register});
-
-                                const destination_register = Register{
+                                const argument_physical_register = Register{
                                     .index = .{
                                         .physical = argument_register,
                                     },
@@ -2508,7 +2505,7 @@ pub const MIR = struct {
                                 const source_operand = Operand{
                                     .id = operand_id,
                                     .u = .{
-                                        .register = source_register,
+                                        .register = argument_virtual_register,
                                     },
                                     .flags = .{},
                                 };
@@ -2516,9 +2513,11 @@ pub const MIR = struct {
                                 const destination_operand = Operand{
                                     .id = operand_id,
                                     .u = .{
-                                        .register = destination_register,
+                                        .register = argument_physical_register,
                                     },
-                                    .flags = .{},
+                                    .flags = .{
+                                        .type = .def,
+                                    },
                                 };
 
                                 const copy = try mir.buildInstruction(instruction_selection, .copy, &.{
@@ -2934,7 +2933,7 @@ pub const MIR = struct {
 
             live_register.last_use = instruction_index;
 
-            register_allocator.markUsedRegisterInInstruction(live_register.physical);
+            register_allocator.setRegisterUsedInInstruction(live_register.physical, true);
             return mir.setPhysicalRegister(instruction_selection, operand_index, live_register.physical);
         }
 
@@ -2949,14 +2948,23 @@ pub const MIR = struct {
             const register_class = mir.virtual_registers.get(live_register.virtual).register_class;
 
             if (maybe_hint) |hint_register| {
-                if (hint_register.index == .physical
-                // TODO : and isAllocatable
-                and isRegisterInClass(hint_register.index.physical, register_class) and !register_allocator.isRegisterUsedInInstruction(hint_register.index.physical, look_at_physical_register_uses)) {
-                    if (register_allocator.register_states.get(hint_register.index.physical) == .free) {
-                        register_allocator.assignVirtualToPhysicalRegister(live_register, hint_register.index.physical);
-                        return;
+                logln(.codegen, .register_allocation_problematic_hint, "Hint register 1: {s}", .{@tagName(hint_register.index.physical)});
+                if (hint_register.index == .physical) {
+                    const hint_physical_register = hint_register.index.physical;
+                    if (isRegisterInClass(hint_physical_register, register_class)) {
+                        logln(.codegen, .register_allocation_problematic_hint, "Hint register 1 {s} is in register class {s}", .{ @tagName(hint_physical_register), @tagName(register_class) });
+                        const is_used_in_instruction = register_allocator.isRegisterUsedInInstruction(hint_physical_register, look_at_physical_register_uses);
+                        logln(.codegen, .register_allocation_problematic_hint, "Hint register 1 {s} is {s} in instruction", .{ @tagName(hint_physical_register), if (is_used_in_instruction) "used" else "unused" });
+                        if (!is_used_in_instruction) {
+                            logln(.codegen, .register_allocation_problematic_hint, "Register {s} used in instruction: false", .{@tagName(hint_physical_register)});
+                            if (register_allocator.register_states.get(hint_physical_register) == .free) {
+                                register_allocator.assignVirtualToPhysicalRegister(live_register, hint_physical_register);
+                                return;
+                            }
+                        }
                     }
                 }
+                // TODO : and isAllocatable
             }
 
             logln(.codegen, .register_allocation_problematic_hint, "Tracing copies for VR{} in instruction #{}", .{ virtual_register.uniqueInteger(), instruction_index.uniqueInteger() });
@@ -2965,7 +2973,7 @@ pub const MIR = struct {
             if (maybe_hint2) |hint| {
                 // TODO
                 const allocatable = true;
-                logln(.codegen, .register_allocation_problematic_hint, "Hint: {}. Register class: {s}", .{ hint, @tagName(register_class) });
+                logln(.codegen, .register_allocation_problematic_hint, "Hint register 2: {}. Register class: {s}", .{ hint, @tagName(register_class) });
 
                 if (hint == .physical and allocatable and isRegisterInClass(hint.physical, register_class) and !register_allocator.isRegisterUsedInInstruction(hint.physical, look_at_physical_register_uses)) {
                     const physical_register = hint.physical;
@@ -2994,29 +3002,30 @@ pub const MIR = struct {
             // }
             // print("", .{});
             for (register_class_members) |candidate_register| {
-                if (register_allocator.isRegisterUsedInInstruction(candidate_register, look_at_physical_register_uses)) continue;
-                const spill_cost = register_allocator.computeSpillCost(candidate_register);
+                if (!register_allocator.isRegisterUsedInInstruction(candidate_register, look_at_physical_register_uses)) {
+                    const spill_cost = register_allocator.computeSpillCost(candidate_register);
 
-                if (spill_cost == 0) {
-                    register_allocator.assignVirtualToPhysicalRegister(live_register, candidate_register);
-                    return;
-                }
-
-                if (maybe_hint) |hint| {
-                    if (hint.index.physical == candidate_register) {
-                        unreachable;
+                    if (spill_cost == 0) {
+                        register_allocator.assignVirtualToPhysicalRegister(live_register, candidate_register);
+                        return;
                     }
-                }
 
-                if (maybe_hint2) |hint| {
-                    if (hint.physical == candidate_register) {
-                        unreachable;
+                    if (maybe_hint) |hint| {
+                        if (hint.index.physical == candidate_register) {
+                            unreachable;
+                        }
                     }
-                }
 
-                if (spill_cost < best_cost) {
-                    best_register = candidate_register;
-                    best_cost = spill_cost;
+                    if (maybe_hint2) |hint| {
+                        if (hint.physical == candidate_register) {
+                            unreachable;
+                        }
+                    }
+
+                    if (spill_cost < best_cost) {
+                        best_register = candidate_register;
+                        best_cost = spill_cost;
+                    }
                 }
             }
 
@@ -3058,7 +3067,6 @@ pub const MIR = struct {
             // }
 
             const result = register_allocator.used_in_instruction.contains(physical_register);
-            logln(.codegen, .register_allocation_problematic_hint, "Register {s} used in instruction: {}", .{ @tagName(physical_register), result });
             return result;
         }
 
@@ -3193,7 +3201,7 @@ pub const MIR = struct {
         fn usePhysicalRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction_index: Instruction.Index, physical_register: Register.Physical) !bool {
             const displaced_any = try register_allocator.displacePhysicalRegister(mir, instruction_selection, instruction_index, physical_register);
             register_allocator.register_states.set(physical_register, .preassigned);
-            register_allocator.markUsedRegisterInInstruction(physical_register);
+            register_allocator.setRegisterUsedInInstruction(physical_register, true);
             return displaced_any;
         }
 
@@ -3257,13 +3265,18 @@ pub const MIR = struct {
             }
         }
 
-        fn markUsedRegisterInInstruction(register_allocator: *RegisterAllocator, physical_register: Register.Physical) void {
-            register_allocator.used_in_instruction.setPresent(physical_register, true);
+        fn setRegisterUsedInInstruction(register_allocator: *RegisterAllocator, physical_register: Register.Physical, value: bool) void {
+            logln(.codegen, .register_allocation_problematic_hint, "Marked {s} {s} in instruction", .{ @tagName(physical_register), if (value) "used" else "unused" });
+            register_allocator.used_in_instruction.setPresent(physical_register, value);
         }
 
-        fn unmarkUsedRegisterInInstruction(register_allocator: *RegisterAllocator, physical_register: Register.Physical) void {
-            register_allocator.used_in_instruction.setPresent(physical_register, false);
-        }
+        // fn markUsedRegisterInInstruction(register_allocator: *RegisterAllocator, physical_register: Register.Physical) void {
+        //     register_allocator.used_in_instruction.setPresent(physical_register, true);
+        // }
+        //
+        // fn unmarkUsedRegisterInInstruction(register_allocator: *RegisterAllocator, physical_register: Register.Physical) void {
+        //     register_allocator.used_in_instruction.setPresent(physical_register, false);
+        // }
 
         fn definePhysicalRegister(register_allocator: *RegisterAllocator, mir: *MIR, instruction_selection: *InstructionSelection, instruction_index: Instruction.Index, physical_register: Register.Physical) !bool {
             const displaced_any = try register_allocator.displacePhysicalRegister(mir, instruction_selection, instruction_index, physical_register);
@@ -3313,7 +3326,7 @@ pub const MIR = struct {
 
             // bundle?
 
-            register_allocator.markUsedRegisterInInstruction(physical_register);
+            register_allocator.setRegisterUsedInInstruction(physical_register, true);
             return mir.setPhysicalRegister(instruction_selection, operand_index, physical_register);
         }
 
@@ -3587,7 +3600,7 @@ pub const MIR = struct {
                                     .def => switch (register.index) {
                                         .physical => |physical_register| {
                                             register_allocator.freePhysicalRegister(physical_register);
-                                            register_allocator.unmarkUsedRegisterInInstruction(physical_register);
+                                            register_allocator.setRegisterUsedInInstruction(physical_register, false);
                                         },
                                         .virtual => {},
                                     },
