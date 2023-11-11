@@ -490,10 +490,14 @@ pub const Builder = struct {
                     const ir_argument_instruction = builder.ir.instructions.get(ir_argument_instruction_index);
                     const ir_argument = builder.ir.arguments.get(ir_argument_instruction.argument);
 
-                    const stack_reference = try builder.stackReference(.{
+                    _ = try builder.stackReference(.{
                         .type = ir_argument.type,
                         .sema = sema_argument_index,
                     });
+                }
+
+                for (function_declaration.arguments.keys(), function_declaration.arguments.values()) |sema_argument_index, ir_argument_instruction_index| {
+                    const stack_reference = builder.currentFunction().stack_map.get(sema_argument_index).?;
 
                     _ = try builder.store(.{
                         .source = ir_argument_instruction_index,

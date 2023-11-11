@@ -13,7 +13,6 @@
                 "test/hello_world/main.nat"
             ],
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "zig build"
         },
         // {
         //     "type": "cppvsdbg",
