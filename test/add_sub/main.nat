@@ -1,0 +1,8 @@
+const main = fn() s32 {
+    const a: s32 = 1;
+    const b: s32 = 2;
+    const c: s32 = a + b;
+    const d: s32 = 3;
+    const e: s32 = d - c;
+    return e;
+}
