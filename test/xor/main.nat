@@ -1,0 +1,7 @@
+const main = fn() s32 {
+    var a: s32 = 561;
+    var b: s32 = 124;
+    var c: s32 = a ^ b;
+    var d: s32 = a ^ b;
+    return c ^ d;
+}

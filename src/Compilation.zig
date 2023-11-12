@@ -549,6 +549,9 @@ pub const BinaryOperation = struct {
     const Id = enum {
         add,
         sub,
+        logical_and,
+        logical_xor,
+        logical_or,
     };
 };
 

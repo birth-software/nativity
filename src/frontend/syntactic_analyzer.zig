@@ -38,7 +38,18 @@ pub const Logger = enum {
     precedence,
     @"switch",
 
-    pub var bitset = std.EnumSet(Logger).initEmpty();
+    pub var bitset = std.EnumSet(Logger).initMany(&.{
+        .token_errors,
+        .symbol_declaration,
+        .node_creation,
+        .main_node,
+        .container_members,
+        .block,
+        .assign,
+        .suffix,
+        .precedence,
+        .@"switch",
+    });
 };
 
 // TODO: pack it to be more efficient
@@ -143,6 +154,10 @@ pub const Node = packed struct(u128) {
         function_prototype = 60,
         add = 61,
         sub = 62,
+        logical_and = 63,
+        logical_xor = 64,
+        expression_group = 65,
+        logical_or = 66,
     };
 };
 
@@ -171,7 +186,7 @@ const Analyzer = struct {
             const result = token_i;
             return result;
         } else {
-            logln(.parser, .token_errors, "Unexpected token {s} when expected {s}\n", .{ @tagName(token.id), @tagName(token_id) });
+            logln(.parser, .token_errors, "Unexpected token {s} when expected {s}\n| |\n v \n```\n{s}\n```", .{ @tagName(token.id), @tagName(token_id), analyzer.source_file[token.start..] });
             return error.unexpected_token;
         }
     }
@@ -699,6 +714,9 @@ const Analyzer = struct {
         compare_not_equal,
         add,
         sub,
+        logical_and,
+        logical_xor,
+        logical_or,
     };
 
     const operator_precedence = std.EnumArray(PrecedenceOperator, i32).init(.{
@@ -706,6 +724,9 @@ const Analyzer = struct {
         .compare_not_equal = 30,
         .add = 60,
         .sub = 60,
+        .logical_and = 40,
+        .logical_xor = 40,
+        .logical_or = 40,
     });
 
     const operator_associativity = std.EnumArray(PrecedenceOperator, Associativity).init(.{
@@ -713,12 +734,19 @@ const Analyzer = struct {
         .compare_not_equal = .none,
         .add = .left,
         .sub = .left,
+        .logical_and = .left,
+        .logical_xor = .left,
+        .logical_or = .left,
     });
+
     const operator_node_id = std.EnumArray(PrecedenceOperator, Node.Id).init(.{
         .compare_equal = .compare_equal,
         .compare_not_equal = .compare_not_equal,
         .add = .add,
         .sub = .sub,
+        .logical_and = .logical_and,
+        .logical_xor = .logical_xor,
+        .logical_or = .logical_or,
     });
 
     fn expressionPrecedence(analyzer: *Analyzer, minimum_precedence: i32) !Node.Index {
@@ -734,7 +762,16 @@ const Analyzer = struct {
             const token = analyzer.tokens[analyzer.token_i];
             // logln("Looping in expression precedence with token {}\n", .{token});
             const operator: PrecedenceOperator = switch (token.id) {
-                .equal, .semicolon, .right_parenthesis, .right_brace, .comma, .period, .fixed_keyword_const, .fixed_keyword_var => break,
+                .equal,
+                .semicolon,
+                .right_parenthesis,
+                .right_brace,
+                .comma,
+                .period,
+                .fixed_keyword_const,
+                .fixed_keyword_var,
+                .identifier,
+                => break,
                 else => blk: {
                     const next_token_index = analyzer.token_i + 1;
                     if (next_token_index < analyzer.tokens.len) {
@@ -757,6 +794,18 @@ const Analyzer = struct {
                                 .minus => unreachable,
                                 .equal => unreachable,
                                 else => .sub,
+                            },
+                            .ampersand => switch (next_token_id) {
+                                .equal => unreachable,
+                                else => .logical_and,
+                            },
+                            .caret => switch (next_token_id) {
+                                .equal => unreachable,
+                                else => .logical_xor,
+                            },
+                            .vertical_bar => switch (next_token_id) {
+                                .equal => unreachable,
+                                else => .logical_or,
                             },
                             else => |t| @panic(@tagName(t)),
                         };
@@ -781,6 +830,9 @@ const Analyzer = struct {
             const extra_token = switch (operator) {
                 .add,
                 .sub,
+                .logical_and,
+                .logical_xor,
+                .logical_or,
                 => false,
                 .compare_equal,
                 .compare_not_equal,
@@ -844,7 +896,19 @@ const Analyzer = struct {
                 .colon => unreachable,
                 else => try analyzer.curlySuffixExpression(),
             },
-            .string_literal, .number_literal, .fixed_keyword_true, .fixed_keyword_false, .hash, .fixed_keyword_unreachable, .fixed_keyword_switch, .period, .fixed_keyword_enum, .keyword_signed_integer, .keyword_unsigned_integer => try analyzer.curlySuffixExpression(),
+            .string_literal,
+            .number_literal,
+            .fixed_keyword_true,
+            .fixed_keyword_false,
+            .hash,
+            .fixed_keyword_unreachable,
+            .fixed_keyword_switch,
+            .period,
+            .fixed_keyword_enum,
+            .keyword_signed_integer,
+            .keyword_unsigned_integer,
+            .left_parenthesis,
+            => try analyzer.curlySuffixExpression(),
             .fixed_keyword_fn => try analyzer.function(),
             .fixed_keyword_return => try analyzer.addNode(.{
                 .id = .@"return",
@@ -1028,6 +1092,7 @@ const Analyzer = struct {
     fn primaryTypeExpression(analyzer: *Analyzer) !Node.Index {
         const token_i = analyzer.token_i;
         const token = analyzer.tokens[token_i];
+
         return try switch (token.id) {
             .string_literal => blk: {
                 analyzer.token_i += 1;
@@ -1157,11 +1222,20 @@ const Analyzer = struct {
                     .right = Node.Index.invalid,
                 });
             },
-            else => |foo| {
-                switch (foo) {
-                    .identifier => std.debug.panic("{s}: {s}", .{ @tagName(foo), analyzer.bytes(token_i) }),
-                    else => @panic(@tagName(foo)),
-                }
+            .left_parenthesis => blk: {
+                analyzer.token_i += 1;
+                const expr = try analyzer.expression();
+                _ = try analyzer.expectToken(.right_parenthesis);
+                break :blk try analyzer.addNode(.{
+                    .id = .expression_group,
+                    .token = token_i,
+                    .left = expr,
+                    .right = Node.Index.invalid,
+                });
+            },
+            else => |t| switch (t) {
+                .identifier => std.debug.panic("{s}: {s}", .{ @tagName(t), analyzer.bytes(token_i) }),
+                else => @panic(@tagName(t)),
             },
         };
     }

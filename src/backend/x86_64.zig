@@ -1487,6 +1487,8 @@ const Instruction = struct {
         add32rr,
         add32rm,
         add32mr,
+        and32rm,
+        and32rr,
         call64pcrel32,
         copy,
         lea64r,
@@ -1501,12 +1503,15 @@ const Instruction = struct {
         mov32mi,
         movsx64rm32,
         movsx64rr32,
+        or32rm,
+        or32rr,
         ret,
         sub32rr,
         sub32rm,
         syscall,
         ud2,
         xor32rr,
+        xor32rm,
     };
 
     pub const Descriptor = struct {
@@ -1853,6 +1858,42 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
             },
         },
     },
+    .and32rr = .{
+        // .format = .mrm_dest_reg, // right?
+        .opcode = 0x21,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+    },
+    .and32rm = .{
+        // .format = .mrm_dest_reg, // right?
+        .opcode = 0x23,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+        },
+    },
     .call64pcrel32 = .{
         // .format = .no_operands,
         .opcode = 0xe8,
@@ -2040,6 +2081,42 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
             },
         },
     },
+    .or32rm = .{
+        // .format = .mrm_dest_reg,
+        .opcode = 0x0b,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+        },
+    },
+    .or32rr = .{
+        // .format = .mrm_dest_reg,
+        .opcode = 0x09,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+    },
     .ret = .{
         // .format = .no_operands,
         .opcode = 0xc3,
@@ -2102,6 +2179,24 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
             .two_byte_prefix = true,
         },
     },
+    .xor32rm = .{
+        // .format = .mrm_dest_reg,
+        .opcode = 0x33,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+        },
+    },
     .xor32rr = .{
         // .format = .mrm_dest_reg,
         .opcode = 0x31,
@@ -2109,6 +2204,10 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
             .{
                 .id = .gp32,
                 .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
             },
             .{
                 .id = .gp32,
@@ -2826,12 +2925,76 @@ pub const MIR = struct {
                             const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
                             const value_type = resolveType(ir_binary_operation.type);
 
-                            if (is_right_load and !is_left_load) {
+                            if (!is_left_load and is_right_load) {
                                 unreachable;
-                            } else if (!is_right_load and is_left_load) {
+                            } else if (is_left_load and !is_right_load) {
                                 unreachable;
-                            } else if (!is_right_load and !is_left_load) {
-                                unreachable;
+                            } else if (!is_left_load and !is_right_load) {
+                                const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
+                                    .add => switch (value_type) {
+                                        .i32 => .add32rr,
+                                        else => unreachable,
+                                    },
+                                    .sub => switch (value_type) {
+                                        .i32 => .sub32rr,
+                                        else => unreachable,
+                                    },
+                                    .logical_and => switch (value_type) {
+                                        .i32 => .and32rr,
+                                        else => unreachable,
+                                    },
+                                    .logical_xor => switch (value_type) {
+                                        .i32 => .xor32rr,
+                                        else => unreachable,
+                                    },
+                                    .logical_or => switch (value_type) {
+                                        .i32 => .or32rr,
+                                        else => unreachable,
+                                    },
+                                };
+
+                                const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                                const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
+                                const right_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.right);
+                                const destination_operand_id = instruction_descriptor.operands[0].id;
+                                const left_operand_id = instruction_descriptor.operands[1].id;
+
+                                const right_operand_id = instruction_descriptor.operands[2].id;
+
+                                const destination_operand = Operand{
+                                    .id = destination_operand_id,
+                                    .u = .{
+                                        .register = destination_register,
+                                    },
+                                    .flags = .{
+                                        .type = .def,
+                                    },
+                                };
+
+                                const left_operand = Operand{
+                                    .id = left_operand_id,
+                                    .u = .{
+                                        .register = left_register,
+                                    },
+                                    .flags = .{},
+                                };
+
+                                const right_operand = Operand{
+                                    .id = right_operand_id,
+                                    .u = .{
+                                        .register = right_register,
+                                    },
+                                    .flags = .{},
+                                };
+                                const binary_op_instruction = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                                    destination_operand,
+                                    left_operand,
+                                    right_operand,
+                                });
+
+                                try instruction_selection.instruction_cache.append(mir.allocator, binary_op_instruction);
+
+                                try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
                             } else {
                                 // If both operands come from memory (both operands are loads), load the left one into a register and operate from the stack with the right one, when possible
                                 const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
@@ -2843,6 +3006,18 @@ pub const MIR = struct {
                                         .i32 => .sub32rm,
                                         else => unreachable,
                                     },
+                                    .logical_and => switch (value_type) {
+                                        .i32 => .and32rm,
+                                        else => unreachable,
+                                    },
+                                    .logical_xor => switch (value_type) {
+                                        .i32 => .xor32rm,
+                                        else => unreachable,
+                                    },
+                                    .logical_or => switch (value_type) {
+                                        .i32 => .or32rm,
+                                        else => unreachable,
+                                    },
                                 };
 
                                 try instruction_selection.folded_loads.putNoClobber(mir.allocator, ir_binary_operation.right, {});
@@ -2852,7 +3027,6 @@ pub const MIR = struct {
                                 const destination_operand_id = instruction_descriptor.operands[0].id;
                                 const left_operand_id = instruction_descriptor.operands[1].id;
                                 const right_operand_id = instruction_descriptor.operands[2].id;
-                                assert(right_operand_id == .i32mem);
                                 const ir_load = mir.ir.loads.get(mir.ir.instructions.get(ir_binary_operation.right).u.load);
                                 const right_operand_addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_load.instruction);
 
@@ -4457,7 +4631,7 @@ pub const MIR = struct {
                             };
                             try image.section_manager.appendCodeByte(@bitCast(modrm));
                         },
-                        .add32rm, .sub32rm => {
+                        .add32rm, .sub32rm, .and32rm, .xor32rm, .or32rm => {
                             assert(instruction.operands.items.len == 3);
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
