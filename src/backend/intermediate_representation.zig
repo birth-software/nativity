@@ -235,6 +235,9 @@ pub const BinaryOperation = struct {
     const Id = enum {
         add,
         sub,
+        logical_and,
+        logical_xor,
+        logical_or,
     };
 
     pub const List = BlockList(@This());
@@ -731,6 +734,9 @@ pub const Builder = struct {
             .id = switch (sema_binary_operation.id) {
                 .add => .add,
                 .sub => .sub,
+                .logical_and => .logical_and,
+                .logical_xor => .logical_xor,
+                .logical_or => .logical_or,
             },
             .type = try builder.translateType(sema_binary_operation.type),
         });
@@ -912,16 +918,18 @@ pub const Builder = struct {
             .integer => |integer| try builder.processInteger(integer),
             .call => |call_index| try builder.processCall(call_index),
             .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            .binary_operation => |binary_operation_index| try builder.processBinaryOperation(binary_operation_index),
             else => |t| @panic(@tagName(t)),
         };
     }
 
-    fn emitBinaryOperationOperand(builder: *Builder, binary_operation_index: Compilation.Value.Index) !Instruction.Index {
+    fn emitBinaryOperationOperand(builder: *Builder, binary_operation_index: Compilation.Value.Index) anyerror!Instruction.Index {
         const value = builder.ir.module.values.get(binary_operation_index);
         return switch (value.*) {
             .integer => |integer| try builder.processInteger(integer),
             .call => |call_index| try builder.processCall(call_index),
             .declaration_reference => |declaration_reference| try builder.loadDeclarationReference(declaration_reference.value),
+            .binary_operation => |boi| try builder.processBinaryOperation(boi),
             else => |t| @panic(@tagName(t)),
         };
     }

@@ -540,6 +540,9 @@ const Analyzer = struct {
             .id = switch (node.id) {
                 .add => .add,
                 .sub => .sub,
+                .logical_and => .logical_and,
+                .logical_xor => .logical_xor,
+                .logical_or => .logical_or,
                 else => |t| @panic(@tagName(t)),
             },
         });
@@ -1007,7 +1010,11 @@ const Analyzer = struct {
             .@"return" => try analyzer.processReturn(scope_index, expect_type, node_index),
             .add,
             .sub,
+            .logical_and,
+            .logical_xor,
+            .logical_or,
             => try analyzer.processBinaryOperation(scope_index, expect_type, node_index),
+            .expression_group => return try analyzer.resolveNode(value, scope_index, expect_type, node.left), //unreachable,
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -1469,12 +1476,15 @@ const Analyzer = struct {
                     },
                     .integer => |destination_int| switch (source_type.*) {
                         .integer => |source_int| {
-                            if (destination_int.getSize() < source_int.getSize()) {
-                                @panic("Destination integer type is smaller than sourcE");
-                            } else if (destination_int.getSize() > source_int.getSize()) {
+                            const dst_size = destination_int.getSize();
+                            const src_size = source_int.getSize();
+                            logln(.sema, .typecheck, "Dst size: {}. Src size: {}", .{ dst_size, src_size });
+                            if (dst_size < src_size) {
+                                @panic("Destination integer type is smaller than source");
+                            } else if (dst_size > src_size) {
                                 unreachable;
                             } else {
-                                unreachable;
+                                return TypeCheckResult.success;
                             }
                         },
                         .comptime_int => return TypeCheckResult.success,

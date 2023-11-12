@@ -115,8 +115,13 @@ pub const Result = struct {
 
 pub const Logger = enum {
     main,
+    new_token,
+    number_literals,
 
-    pub var bitset = std.EnumSet(Logger).initEmpty();
+    pub var bitset = std.EnumSet(Logger).initMany(&.{
+        // .new_token,
+        .number_literals,
+    });
 };
 
 pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !Result {
@@ -164,12 +169,27 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else .identifier;
             },
-            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/' => |operator| blk: {
+            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/', '&', '|', '^' => |operator| blk: {
                 index += 1;
                 break :blk @enumFromInt(operator);
             },
             '0'...'9' => blk: {
-                while (text[index] >= '0' and text[index] <= '9') {
+                // Detect other non-decimal literals
+                if (text[index] == '0' and index + 1 < text.len) {
+                    logln(.lexer, .number_literals, "Number starts with 0. Checking for non-decimal literals...", .{});
+                    if (text[index + 1] == 'x') {
+                        logln(.lexer, .number_literals, "Hex", .{});
+                        index += 2;
+                    } else if (text[index + 1] == 'b') {
+                        logln(.lexer, .number_literals, "Bin", .{});
+                        index += 2;
+                    } else if (text[index + 1] == 'o') {
+                        logln(.lexer, .number_literals, "Decimal", .{});
+                        index += 2;
+                    }
+                }
+
+                while (text[index] >= '0' and text[index] <= '9' or text[index] >= 'a' and text[index] <= 'f' or text[index] >= 'A' and text[index] <= 'F') {
                     index += 1;
                 }
 
@@ -197,18 +217,21 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                 index += 1;
                 continue;
             },
-            else => |foo| {
-                std.debug.panic("NI: '{c}'", .{foo});
+            else => |ch| {
+                std.debug.panic("NI: '{c}'", .{ch});
             },
         };
 
         const end_index = index;
-
-        try tokens.append(allocator, .{
+        const token = Token{
             .start = @intCast(start_index),
             .len = @intCast(end_index - start_index),
             .id = token_id,
-        });
+        };
+
+        logln(.lexer, .new_token, "New token {s} added: {s}", .{ @tagName(token.id), text[token.start..][0..token.len] });
+
+        try tokens.append(allocator, token);
     }
 
     for (tokens.items, 0..) |token, i| {
