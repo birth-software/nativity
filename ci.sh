@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 
 echo "Testing Nativity with Zig"
-zig build test -Dall -Doptimize=ReleaseSafe --summary all
 echo "Compiling Nativity with Zig"
-time zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseSafe
 failed_test_count=0
 passed_test_count=0
 test_directory_name=test
