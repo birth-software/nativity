@@ -40,18 +40,19 @@ pub const Logger = enum {
     pub var bitset = std.EnumSet(Logger).initMany(&.{
         .instruction_selection_ir_function,
         .instruction_selection_mir_function,
-        // .instruction_selection_register_operand_list,
-        // .register_allocation_block,
-        // .register_allocation_problematic_hint,
-        // .register_allocation_assignment,
-        // .register_allocation_reload,
-        // .register_allocation_function_before,
-        // .register_allocation_new_instruction,
-        // .register_allocation_new_instruction_function_before,
-        // .register_allocation_instruction_avoid_copy,
+        .instruction_selection_register_operand_list,
+        .instruction_selection_new_instruction,
+        .register_allocation_block,
+        .register_allocation_problematic_hint,
+        .register_allocation_assignment,
+        .register_allocation_reload,
+        .register_allocation_function_before,
+        .register_allocation_new_instruction,
+        .register_allocation_new_instruction_function_before,
+        .register_allocation_instruction_avoid_copy,
         .register_allocation_function_after,
-        // .register_allocation_operand_list_verification,
-        // .encoding,
+        .register_allocation_operand_list_verification,
+        .encoding,
     });
 };
 
@@ -91,6 +92,7 @@ const Register = struct {
         gp32,
         gp64,
         gp64_nosp,
+        ccr,
 
         pub const Descriptor = struct {
             size: u16,
@@ -817,6 +819,11 @@ const register_class_descriptors = std.EnumArray(Register.Class, Register.Class.
         .spill_size = 64,
         .spill_alignment = 64,
     },
+    .ccr = .{
+        .size = 32,
+        .spill_size = 32,
+        .spill_alignment = 32,
+    },
 });
 
 const registers_by_class = RegisterGroupMap.init(.{
@@ -858,6 +865,9 @@ const registers_by_class = RegisterGroupMap.init(.{
         .rbp,
         .rsp,
     },
+    .ccr = &.{
+        .eflags,
+    },
     .gp64_nosp = &.{},
 });
 
@@ -874,6 +884,7 @@ const system_v = CallingConvention{
         .gp32 = &system_v_gp32_argument_registers,
         .gp64 = &system_v_gp64_argument_registers,
         .gp64_nosp = &.{},
+        .ccr = &.{},
     }),
     .syscall_registers = &system_v_syscall_registers,
 };
@@ -911,6 +922,7 @@ const ValueType = struct {
         i32 = 5,
         i64 = 6,
         // i128 = 7,
+        ccr = 15,
     };
 };
 
@@ -936,12 +948,20 @@ const value_types = std.EnumArray(ValueType.Id, ValueType).init(.{
         .data_type = .integer,
         .scalarness = .scalar,
     },
+    .ccr = .{
+        .size = @sizeOf(u32),
+        .element_count = 1,
+        .element_type = @intFromEnum(ValueType.Id.i32),
+        .data_type = .integer,
+        .scalarness = .scalar,
+    },
 });
 
 const register_classes = std.EnumArray(ValueType.Id, Register.Class).init(.{
     .any = .any,
     .i32 = .gp32,
     .i64 = .gp64,
+    .ccr = .ccr,
 });
 
 const Memory = struct {
@@ -1295,6 +1315,7 @@ const InstructionSelection = struct {
             if (!gop.value_ptr.isValid()) {
                 gop.value_ptr.* = register;
             } else if (!std.meta.eql(gop.value_ptr.index, register.index)) {
+                logln(.codegen, .instruction_selection_new_instruction, "Already found register: {}\ngot: {}", .{ gop.value_ptr.index, register.index });
                 unreachable;
             }
         }
@@ -1488,9 +1509,13 @@ const Instruction = struct {
         add32rm,
         add32mr,
         and32rm,
+        and32mr,
         and32rr,
         call64pcrel32,
         copy,
+        idiv32r,
+        idiv32m,
+        imul32mr,
         imul32rm,
         imul32rr,
         lea64r,
@@ -1506,12 +1531,15 @@ const Instruction = struct {
         movsx64rm32,
         movsx64rr32,
         or32rm,
+        or32mr,
         or32rr,
         ret,
+        sub32mr,
         sub32rr,
         sub32rm,
         syscall,
         ud2,
+        xor32mr,
         xor32rr,
         xor32rm,
     };
@@ -1521,6 +1549,8 @@ const Instruction = struct {
         opcode: u16,
         // format: Format = .pseudo,
         flags: Flags = .{},
+        implicit_definitions: []const Register.Physical = &.{},
+        implicit_uses: []const Register.Physical = &.{},
 
         const Flags = packed struct {
             implicit_def: bool = false,
@@ -1711,6 +1741,7 @@ pub const Operand = struct {
         imm64,
         i64i32imm_brtarget,
         lea64mem,
+        ccr,
     };
     pub const Type = enum(u1) {
         use = 0,
@@ -1803,6 +1834,7 @@ const register_class_operand_matcher = std.EnumArray(Operand.Id, Register.Class)
     .imm32 = .not_a_register,
     .imm64 = .not_a_register,
     .lea64mem = .not_a_register,
+    .ccr = .ccr,
 });
 
 const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descriptor).init(.{
@@ -1823,6 +1855,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .add32mr = .{
         // .format = .mrm_dest_reg, // right?
@@ -1841,6 +1874,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .add32rm = .{
         // .format = .mrm_dest_reg, // right?
@@ -1859,6 +1893,26 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
+    },
+    .and32mr = .{
+        // .format = .mrm_dest_reg, // right?
+        .opcode = 0x21,
+        .operands = &.{
+            .{
+                .id = .i32mem,
+                .kind = .dst,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+        .implicit_definitions = &.{.eflags},
     },
     .and32rr = .{
         // .format = .mrm_dest_reg, // right?
@@ -1877,6 +1931,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .and32rm = .{
         // .format = .mrm_dest_reg, // right?
@@ -1895,6 +1950,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .call64pcrel32 = .{
         // .format = .no_operands,
@@ -1905,6 +1961,8 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{},
+        .implicit_uses = &.{},
     },
     .copy = .{
         // .format = .pseudo,
@@ -1919,6 +1977,51 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+    },
+    .idiv32r = .{
+        .opcode = 0xf7,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+    },
+    .idiv32m = .{
+        .opcode = 0xf7,
+        .operands = &.{
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+        },
+        .implicit_definitions = &.{
+            .eax,
+            .edx,
+            .eflags,
+        },
+        .implicit_uses = &.{
+            .eax,
+            .edx,
+        },
+    },
+    .imul32mr = .{
+        .opcode = 0x6b,
+        .operands = &.{
+            .{
+                .id = .i32mem,
+                .kind = .dst,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+        .implicit_definitions = &.{.eflags},
     },
     .imul32rr = .{
         .opcode = 0x6b,
@@ -1936,6 +2039,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .imul32rm = .{
         .opcode = 0x6b,
@@ -1953,6 +2057,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .lea64r = .{
         // .format = .mrm_source_mem,
@@ -2134,6 +2239,26 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
+    },
+    .or32mr = .{
+        // .format = .mrm_dest_reg,
+        .opcode = 0x09,
+        .operands = &.{
+            .{
+                .id = .i32mem,
+                .kind = .dst,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+        .implicit_definitions = &.{.eflags},
     },
     .or32rr = .{
         // .format = .mrm_dest_reg,
@@ -2152,6 +2277,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .ret = .{
         // .format = .no_operands,
@@ -2162,6 +2288,25 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+    },
+    .sub32mr = .{
+        // .format = .mrm_dest_reg, // right?
+        .opcode = 0x29,
+        .operands = &.{
+            .{
+                .id = .i32mem,
+                .kind = .dst,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+        .implicit_definitions = &.{.eflags},
     },
     .sub32rr = .{
         // .format = .mrm_dest_reg, // right?
@@ -2180,6 +2325,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .sub32rm = .{
         // .format = .mrm_dest_reg, // right?
@@ -2198,6 +2344,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
     .syscall = .{
         // .format = .no_operands,
@@ -2232,6 +2379,26 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
+    },
+    .xor32mr = .{
+        // .format = .mrm_dest_reg,
+        .opcode = 0x31,
+        .operands = &.{
+            .{
+                .id = .i32mem,
+                .kind = .dst,
+            },
+            .{
+                .id = .i32mem,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+        .implicit_definitions = &.{.eflags},
     },
     .xor32rr = .{
         // .format = .mrm_dest_reg,
@@ -2250,6 +2417,7 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
                 .kind = .src,
             },
         },
+        .implicit_definitions = &.{.eflags},
     },
 });
 
@@ -2715,7 +2883,7 @@ pub const MIR = struct {
                                 const source_immediate = ir_source.u.load_integer;
                                 const instruction_descriptor = instruction_descriptors.getPtrConst(instruction_id);
 
-                                const source_operand_index = instruction_descriptor.operands.len - 1;
+                                const source_operand_index = 1;
                                 const source_operand_id = instruction_descriptor.operands[source_operand_index].id;
                                 const source_operand = Operand{
                                     .id = source_operand_id,
@@ -2753,7 +2921,7 @@ pub const MIR = struct {
                                         };
 
                                         const instruction_descriptor = instruction_descriptors.getPtrConst(instruction_id);
-                                        const source_operand_index = instruction_descriptor.operands.len - 1;
+                                        const source_operand_index = 1;
                                         const source_operand_id = instruction_descriptor.operands[source_operand_index].id;
                                         const source_operand = Operand{
                                             .id = source_operand_id,
@@ -2942,173 +3110,376 @@ pub const MIR = struct {
                         },
                         .binary_operation => |ir_binary_operation_index| {
                             const ir_binary_operation = mir.ir.binary_operations.get(ir_binary_operation_index);
+                            const value_type = resolveType(ir_binary_operation.type);
 
+                            const is_left_load = switch (mir.ir.instructions.get(ir_binary_operation.left).u) {
+                                .load => true,
+                                else => false,
+                            };
                             const is_right_load = switch (mir.ir.instructions.get(ir_binary_operation.right).u) {
                                 .load => true,
                                 else => false,
                             };
 
-                            const is_left_load = switch (mir.ir.instructions.get(ir_binary_operation.right).u) {
-                                .load => true,
-                                else => false,
-                            };
-
-                            // TODO: optimize if the result is going to be stored?
-                            // for (ir_instruction.use_list.items) |use_index| {
-                            //     const use = mir.ir.instructions.get(use_index);
-                            //     std.debug.print("Use: {s}\n", .{@tagName(use.u)});
-                            // }
-                            const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
-                            const value_type = resolveType(ir_binary_operation.type);
-
-                            if (!is_left_load and is_right_load) {
-                                unreachable;
-                            } else if (is_left_load and !is_right_load) {
-                                unreachable;
-                            } else if (!is_left_load and !is_right_load) {
-                                const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
-                                    .add => switch (value_type) {
-                                        .i32 => .add32rr,
+                            switch (ir_binary_operation.id) {
+                                .signed_divide => {
+                                    const operand_id: Operand.Id = switch (value_type) {
+                                        .i32 => .gp32,
                                         else => unreachable,
-                                    },
-                                    .sub => switch (value_type) {
-                                        .i32 => .sub32rr,
+                                    };
+                                    const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
+
+                                    const low_physical_register: Register.Physical = switch (value_type) {
+                                        .i32 => .eax,
                                         else => unreachable,
-                                    },
-                                    .logical_and => switch (value_type) {
-                                        .i32 => .and32rr,
+                                    };
+                                    const high_physical_register: Register.Physical = switch (value_type) {
+                                        .i32 => .edx,
                                         else => unreachable,
-                                    },
-                                    .logical_xor => switch (value_type) {
-                                        .i32 => .xor32rr,
-                                        else => unreachable,
-                                    },
-                                    .logical_or => switch (value_type) {
-                                        .i32 => .or32rr,
-                                        else => unreachable,
-                                    },
-                                    .multiply => switch (value_type) {
-                                        .i32 => .imul32rr,
-                                        else => unreachable,
-                                    },
-                                };
+                                    };
+                                    const left_operand = Operand{
+                                        .id = operand_id,
+                                        .u = .{
+                                            .register = left_register,
+                                        },
+                                        .flags = .{},
+                                    };
+                                    const low_operand = Operand{
+                                        .id = operand_id,
+                                        .u = .{
+                                            .register = .{
+                                                .index = .{
+                                                    .physical = low_physical_register,
+                                                },
+                                            },
+                                        },
+                                        .flags = .{
+                                            .type = .def,
+                                        },
+                                    };
+                                    const copy_low = try mir.buildInstruction(instruction_selection, .copy, &.{
+                                        low_operand,
+                                        left_operand,
+                                    });
+                                    try instruction_selection.instruction_cache.append(mir.allocator, copy_low);
 
-                                const instruction_descriptor = instruction_descriptors.get(instruction_id);
-                                const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
-                                const right_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.right);
-                                const destination_operand_id = instruction_descriptor.operands[0].id;
-                                const left_operand_id = instruction_descriptor.operands[1].id;
+                                    if (is_right_load) {
+                                        try instruction_selection.folded_loads.putNoClobber(mir.allocator, ir_binary_operation.right, {});
 
-                                const right_operand_id = instruction_descriptor.operands[2].id;
+                                        const instruction_id: Instruction.Id = switch (value_type) {
+                                            .i32 => .idiv32m,
+                                            else => |t| @panic(@tagName(t)),
+                                        };
+                                        const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                                        const right_operand_id = instruction_descriptor.operands[0].id;
+                                        const ir_load = mir.ir.loads.get(mir.ir.instructions.get(ir_binary_operation.right).u.load);
+                                        const right_operand_addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_load.instruction);
+                                        const right_operand = Operand{
+                                            .id = right_operand_id,
+                                            .u = .{
+                                                .memory = .{
+                                                    .addressing_mode = right_operand_addressing_mode,
+                                                },
+                                            },
+                                            .flags = .{},
+                                        };
+                                        const div = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                                            right_operand,
+                                        });
+                                        try instruction_selection.instruction_cache.append(mir.allocator, div);
+                                    } else {
+                                        const instruction_id: Instruction.Id = switch (value_type) {
+                                            .i32 => .idiv32r,
+                                            else => |t| @panic(@tagName(t)),
+                                        };
+                                        const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                                        _ = instruction_descriptor;
+                                        const right_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.right);
+                                        _ = high_physical_register;
 
-                                const destination_operand = Operand{
-                                    .id = destination_operand_id,
-                                    .u = .{
-                                        .register = destination_register,
-                                    },
-                                    .flags = .{
-                                        .type = .def,
-                                    },
-                                };
+                                        const right_operand = Operand{
+                                            .id = operand_id,
+                                            .u = .{
+                                                .register = right_register,
+                                            },
+                                            .flags = .{},
+                                        };
 
-                                const left_operand = Operand{
-                                    .id = left_operand_id,
-                                    .u = .{
-                                        .register = left_register,
-                                    },
-                                    .flags = .{},
-                                };
+                                        const div = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                                            right_operand,
+                                        });
+                                        try instruction_selection.instruction_cache.append(mir.allocator, div);
+                                    }
 
-                                const right_operand = Operand{
-                                    .id = right_operand_id,
-                                    .u = .{
-                                        .register = right_register,
-                                    },
-                                    .flags = .{},
-                                };
-                                const binary_op_instruction = try mir.buildInstruction(instruction_selection, instruction_id, &.{
-                                    destination_operand,
-                                    left_operand,
-                                    right_operand,
-                                });
+                                    const register_class = register_classes.get(value_type);
+                                    _ = register_class;
+                                    const result_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
+                                    const result_operand = Operand{
+                                        .id = operand_id,
+                                        .u = .{
+                                            .register = result_register,
+                                        },
+                                        .flags = .{
+                                            .type = .def,
+                                        },
+                                    };
+                                    const division_result_register = Register{
+                                        .index = .{
+                                            .physical = switch (value_type) {
+                                                .i32 => .eax,
+                                                else => unreachable,
+                                            },
+                                        },
+                                    };
 
-                                try instruction_selection.instruction_cache.append(mir.allocator, binary_op_instruction);
+                                    const division_result_operand = Operand{
+                                        .id = operand_id,
+                                        .u = .{
+                                            .register = division_result_register,
+                                        },
+                                        .flags = .{},
+                                    };
+                                    const result_copy = try mir.buildInstruction(instruction_selection, .copy, &.{
+                                        result_operand,
+                                        division_result_operand,
+                                    });
+                                    try instruction_selection.instruction_cache.append(mir.allocator, result_copy);
 
-                                try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
-                            } else {
-                                // If both operands come from memory (both operands are loads), load the left one into a register and operate from the stack with the right one, when possible
-                                const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
-                                    .add => switch (value_type) {
-                                        .i32 => .add32rm,
-                                        else => unreachable,
-                                    },
-                                    .sub => switch (value_type) {
-                                        .i32 => .sub32rm,
-                                        else => unreachable,
-                                    },
-                                    .logical_and => switch (value_type) {
-                                        .i32 => .and32rm,
-                                        else => unreachable,
-                                    },
-                                    .logical_xor => switch (value_type) {
-                                        .i32 => .xor32rm,
-                                        else => unreachable,
-                                    },
-                                    .logical_or => switch (value_type) {
-                                        .i32 => .or32rm,
-                                        else => unreachable,
-                                    },
-                                    .multiply => switch (value_type) {
-                                        .i32 => .imul32rm,
-                                        else => unreachable,
-                                    },
-                                };
+                                    try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, result_register, false);
+                                },
+                                else => {
 
-                                try instruction_selection.folded_loads.putNoClobber(mir.allocator, ir_binary_operation.right, {});
+                                    // TODO: optimize if the result is going to be stored?
+                                    // for (ir_instruction.use_list.items) |use_index| {
+                                    //     const use = mir.ir.instructions.get(use_index);
+                                    //     std.debug.print("Use: {s}\n", .{@tagName(use.u)});
+                                    // }
 
-                                const instruction_descriptor = instruction_descriptors.get(instruction_id);
-                                const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
-                                const destination_operand_id = instruction_descriptor.operands[0].id;
-                                const left_operand_id = instruction_descriptor.operands[1].id;
-                                const right_operand_id = instruction_descriptor.operands[2].id;
-                                const ir_load = mir.ir.loads.get(mir.ir.instructions.get(ir_binary_operation.right).u.load);
-                                const right_operand_addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_load.instruction);
+                                    if (!is_left_load and is_right_load) {
+                                        unreachable;
+                                    } else if (is_left_load and !is_right_load) {
+                                        try instruction_selection.folded_loads.putNoClobber(mir.allocator, ir_binary_operation.left, {});
+                                        const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
+                                            .add => switch (value_type) {
+                                                .i32 => .add32mr,
+                                                else => unreachable,
+                                            },
+                                            .sub => switch (value_type) {
+                                                .i32 => .sub32mr,
+                                                else => unreachable,
+                                            },
+                                            .logical_and => switch (value_type) {
+                                                .i32 => .and32mr,
+                                                else => unreachable,
+                                            },
+                                            .logical_xor => switch (value_type) {
+                                                .i32 => .xor32mr,
+                                                else => unreachable,
+                                            },
+                                            .logical_or => switch (value_type) {
+                                                .i32 => .or32mr,
+                                                else => unreachable,
+                                            },
+                                            .signed_multiply => switch (value_type) {
+                                                .i32 => .imul32mr,
+                                                else => unreachable,
+                                            },
+                                            .signed_divide => unreachable,
+                                        };
 
-                                const destination_operand = Operand{
-                                    .id = destination_operand_id,
-                                    .u = .{
-                                        .register = destination_register,
-                                    },
-                                    .flags = .{
-                                        .type = .def,
-                                    },
-                                };
+                                        const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                                        // const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
+                                        const destination_operand_id = instruction_descriptor.operands[0].id;
+                                        const left_operand_id = instruction_descriptor.operands[1].id;
+                                        const right_operand_id = instruction_descriptor.operands[2].id;
+                                        // const ir_load = mir.ir.loads.get(mir.ir.instructions.get(ir_binary_operation.right).u.load);
+                                        // const right_operand_addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_load.instruction);
+                                        const ir_load = mir.ir.loads.get(mir.ir.instructions.get(ir_binary_operation.left).u.load);
 
-                                const left_operand = Operand{
-                                    .id = left_operand_id,
-                                    .u = .{
-                                        .register = left_register,
-                                    },
-                                    .flags = .{},
-                                };
+                                        const right_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.right);
+                                        const right_operand = Operand{
+                                            .id = right_operand_id,
+                                            .u = .{
+                                                .register = right_register,
+                                            },
+                                            .flags = .{},
+                                        };
 
-                                const right_operand = Operand{
-                                    .id = right_operand_id,
-                                    .u = .{
-                                        .memory = .{ .addressing_mode = right_operand_addressing_mode },
-                                    },
-                                    .flags = .{},
-                                };
+                                        const left_operand_addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_load.instruction);
+                                        const destination_operand = Operand{
+                                            .id = destination_operand_id,
+                                            .u = .{
+                                                .memory = .{ .addressing_mode = left_operand_addressing_mode },
+                                            },
+                                            .flags = .{},
+                                        };
 
-                                const binary_op_instruction = try mir.buildInstruction(instruction_selection, instruction_id, &.{
-                                    destination_operand,
-                                    left_operand,
-                                    right_operand,
-                                });
+                                        const left_operand = Operand{
+                                            .id = left_operand_id,
+                                            .u = .{
+                                                .memory = .{ .addressing_mode = left_operand_addressing_mode },
+                                            },
+                                            .flags = .{},
+                                        };
 
-                                try instruction_selection.instruction_cache.append(mir.allocator, binary_op_instruction);
+                                        const binary_op_instruction = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                                            destination_operand,
+                                            left_operand,
+                                            right_operand,
+                                        });
 
-                                try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
+                                        try instruction_selection.instruction_cache.append(mir.allocator, binary_op_instruction);
+                                    } else if (!is_left_load and !is_right_load) {
+                                        const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
+                                        const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
+                                            .add => switch (value_type) {
+                                                .i32 => .add32rr,
+                                                else => unreachable,
+                                            },
+                                            .sub => switch (value_type) {
+                                                .i32 => .sub32rr,
+                                                else => unreachable,
+                                            },
+                                            .logical_and => switch (value_type) {
+                                                .i32 => .and32rr,
+                                                else => unreachable,
+                                            },
+                                            .logical_xor => switch (value_type) {
+                                                .i32 => .xor32rr,
+                                                else => unreachable,
+                                            },
+                                            .logical_or => switch (value_type) {
+                                                .i32 => .or32rr,
+                                                else => unreachable,
+                                            },
+                                            .signed_multiply => switch (value_type) {
+                                                .i32 => .imul32rr,
+                                                else => unreachable,
+                                            },
+                                            .signed_divide => unreachable,
+                                        };
+
+                                        const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                                        const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
+                                        const right_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.right);
+                                        const destination_operand_id = instruction_descriptor.operands[0].id;
+                                        const left_operand_id = instruction_descriptor.operands[1].id;
+
+                                        const right_operand_id = instruction_descriptor.operands[2].id;
+
+                                        const destination_operand = Operand{
+                                            .id = destination_operand_id,
+                                            .u = .{
+                                                .register = destination_register,
+                                            },
+                                            .flags = .{
+                                                .type = .def,
+                                            },
+                                        };
+
+                                        const left_operand = Operand{
+                                            .id = left_operand_id,
+                                            .u = .{
+                                                .register = left_register,
+                                            },
+                                            .flags = .{},
+                                        };
+
+                                        const right_operand = Operand{
+                                            .id = right_operand_id,
+                                            .u = .{
+                                                .register = right_register,
+                                            },
+                                            .flags = .{},
+                                        };
+
+                                        const binary_op_instruction = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                                            destination_operand,
+                                            left_operand,
+                                            right_operand,
+                                        });
+
+                                        try instruction_selection.instruction_cache.append(mir.allocator, binary_op_instruction);
+
+                                        try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
+                                    } else {
+                                        const destination_register = try instruction_selection.getRegisterForValue(mir, ir_instruction_index);
+                                        // If both operands come from memory (both operands are loads), load the left one into a register and operate from the stack with the right one, when possible
+                                        const instruction_id: Instruction.Id = switch (ir_binary_operation.id) {
+                                            .add => switch (value_type) {
+                                                .i32 => .add32rm,
+                                                else => unreachable,
+                                            },
+                                            .sub => switch (value_type) {
+                                                .i32 => .sub32rm,
+                                                else => unreachable,
+                                            },
+                                            .logical_and => switch (value_type) {
+                                                .i32 => .and32rm,
+                                                else => unreachable,
+                                            },
+                                            .logical_xor => switch (value_type) {
+                                                .i32 => .xor32rm,
+                                                else => unreachable,
+                                            },
+                                            .logical_or => switch (value_type) {
+                                                .i32 => .or32rm,
+                                                else => unreachable,
+                                            },
+                                            .signed_multiply => switch (value_type) {
+                                                .i32 => .imul32rm,
+                                                else => unreachable,
+                                            },
+                                            .signed_divide => unreachable,
+                                        };
+
+                                        try instruction_selection.folded_loads.putNoClobber(mir.allocator, ir_binary_operation.right, {});
+
+                                        const instruction_descriptor = instruction_descriptors.get(instruction_id);
+                                        const left_register = try instruction_selection.getRegisterForValue(mir, ir_binary_operation.left);
+                                        const destination_operand_id = instruction_descriptor.operands[0].id;
+                                        const left_operand_id = instruction_descriptor.operands[1].id;
+                                        const right_operand_id = instruction_descriptor.operands[2].id;
+                                        const ir_load = mir.ir.loads.get(mir.ir.instructions.get(ir_binary_operation.right).u.load);
+                                        const right_operand_addressing_mode = instruction_selection.getAddressingModeFromIr(mir, ir_load.instruction);
+
+                                        const destination_operand = Operand{
+                                            .id = destination_operand_id,
+                                            .u = .{
+                                                .register = destination_register,
+                                            },
+                                            .flags = .{
+                                                .type = .def,
+                                            },
+                                        };
+
+                                        const left_operand = Operand{
+                                            .id = left_operand_id,
+                                            .u = .{
+                                                .register = left_register,
+                                            },
+                                            .flags = .{},
+                                        };
+
+                                        const right_operand = Operand{
+                                            .id = right_operand_id,
+                                            .u = .{
+                                                .memory = .{ .addressing_mode = right_operand_addressing_mode },
+                                            },
+                                            .flags = .{},
+                                        };
+
+                                        const binary_op_instruction = try mir.buildInstruction(instruction_selection, instruction_id, &.{
+                                            destination_operand,
+                                            left_operand,
+                                            right_operand,
+                                        });
+
+                                        try instruction_selection.instruction_cache.append(mir.allocator, binary_op_instruction);
+
+                                        try instruction_selection.updateValueMap(mir.allocator, ir_instruction_index, destination_register, false);
+                                    }
+                                },
                             }
                         },
                         else => |t| @panic(@tagName(t)),
@@ -3762,20 +4133,21 @@ pub const MIR = struct {
             const instruction = mir.instructions.get(instruction_index);
             const operand = mir.operands.get(operand_index);
             const gop = try register_allocator.live_virtual_registers.getOrPut(mir.allocator, virtual_register);
+            const live_register = gop.value_ptr;
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{
                     .virtual = virtual_register,
                 };
                 if (!operand.flags.dead_or_kill) {
-                    var live_out = false;
-                    if (live_out) {
+                    if (live_register.live_out) {
                         // TODO
+                        unreachable;
                     } else {
                         operand.flags.dead_or_kill = true;
                     }
                 }
             }
-            const live_register = gop.value_ptr;
+
             if (live_register.physical == .no_register) {
                 try register_allocator.allocateVirtualRegister(mir, instruction_selection, instruction_index, live_register, null, look_at_physical_register_uses);
             } else {
@@ -3785,6 +4157,7 @@ pub const MIR = struct {
             const physical_register = live_register.physical;
             assert(physical_register != .no_register);
             if (live_register.reloaded or live_register.live_out) {
+                logln(.codegen, .register_allocation_problematic_hint, "Live register: {}", .{live_register});
                 const instruction_descriptor = instruction_descriptors.get(instruction.id);
                 if (!instruction_descriptor.flags.implicit_def) {
                     const spill_before = mir.getNextInstructionIndex(instruction_index);
@@ -3987,8 +4360,7 @@ pub const MIR = struct {
                     var early_clobber = false;
                     var assign_live_throughs = false;
 
-                    for (instruction.operands.items, 0..) |operand_index, operand_i| {
-                        _ = operand_i;
+                    for (instruction.operands.items) |operand_index| {
                         const operand = mir.operands.get(operand_index);
                         switch (operand.u) {
                             .register => |register| switch (register.index) {
@@ -4183,7 +4555,7 @@ pub const MIR = struct {
                 continue;
             }
 
-            mir.verifyUseList(vr.use_def_list_head, vr_index);
+            // mir.verifyUseList(vr.use_def_list_head, vr_index);
             vr_index = vr_it.getCurrentIndex();
         }
 
@@ -4296,7 +4668,6 @@ pub const MIR = struct {
 
                     switch (instruction.id) {
                         .mov32r0 => {
-                            assert(instruction.operands.items.len == 1);
                             const operand = mir.operands.get(instruction.operands.items[0]);
                             const gp_register_encoding = getGP32Encoding(operand.*);
                             const new_instruction_id = Instruction.Id.xor32rr;
@@ -4313,7 +4684,6 @@ pub const MIR = struct {
                         },
                         .ret => {},
                         .mov32mr => {
-                            assert(instruction.operands.items.len == 2);
                             const source_operand = mir.operands.get(instruction.operands.items[1]);
                             const source_gp32 = getGP32Encoding(source_operand.*);
 
@@ -4343,8 +4713,6 @@ pub const MIR = struct {
                             }
                         },
                         .mov64mr => {
-                            assert(instruction.operands.items.len == 2);
-
                             const rex = Rex{
                                 .b = false,
                                 .x = false,
@@ -4382,8 +4750,6 @@ pub const MIR = struct {
                             }
                         },
                         .mov32rm => {
-                            assert(instruction.operands.items.len == 2);
-
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
                             try image.section_manager.appendCodeByte(opcode);
@@ -4414,8 +4780,6 @@ pub const MIR = struct {
                             }
                         },
                         .mov64rm => {
-                            assert(instruction.operands.items.len == 2);
-
                             const rex = Rex{
                                 .b = false,
                                 .x = false,
@@ -4454,8 +4818,6 @@ pub const MIR = struct {
                             }
                         },
                         .mov32ri => {
-                            assert(instruction.operands.items.len == 2);
-
                             const source_operand = mir.operands.get(instruction.operands.items[1]);
                             const source_immediate: u32 = @intCast(source_operand.u.immediate);
 
@@ -4468,7 +4830,6 @@ pub const MIR = struct {
                             try image.section_manager.appendCode(std.mem.asBytes(&source_immediate));
                         },
                         .mov32ri64 => {
-                            assert(instruction.operands.items.len == 2);
                             const source_operand = mir.operands.get(instruction.operands.items[1]);
                             const source_immediate: u32 = @intCast(source_operand.u.immediate);
 
@@ -4484,8 +4845,6 @@ pub const MIR = struct {
                             try image.section_manager.appendCode(std.mem.asBytes(&source_immediate));
                         },
                         .movsx64rm32 => {
-                            assert(instruction.operands.items.len == 2);
-
                             const destination_operand = mir.operands.get(instruction.operands.items[0]);
                             const destination_register = getGP64Encoding(destination_operand.*);
 
@@ -4526,7 +4885,6 @@ pub const MIR = struct {
                         .ud2 => try image.section_manager.appendCode(&.{ 0x0f, 0x0b }),
                         .call64pcrel32 => {
                             // TODO: emit relocation
-                            assert(instruction.operands.items.len == 1);
                             const operand = mir.operands.get(instruction.operands.items[0]);
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
@@ -4555,7 +4913,6 @@ pub const MIR = struct {
                             }
                         },
                         .copy => {
-                            assert(instruction.operands.items.len == 2);
                             const destination_operand = mir.operands.get(instruction.operands.items[0]);
                             const source_operand = mir.operands.get(instruction.operands.items[1]);
                             assert(destination_operand.id == source_operand.id);
@@ -4598,7 +4955,6 @@ pub const MIR = struct {
                             }
                         },
                         .lea64r => {
-                            assert(instruction.operands.items.len == 2);
                             const rex = Rex{
                                 .b = false,
                                 .x = false,
@@ -4652,7 +5008,6 @@ pub const MIR = struct {
                         .sub32rr,
                         .imul32rr,
                         => {
-                            assert(instruction.operands.items.len == 3);
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
                             try image.section_manager.appendCodeByte(opcode);
@@ -4679,8 +5034,6 @@ pub const MIR = struct {
                             try image.section_manager.appendCodeByte(@bitCast(modrm));
                         },
                         .mov32mi => {
-                            assert(instruction.operands.items.len == 2);
-
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
                             try image.section_manager.appendCodeByte(opcode);
@@ -4711,6 +5064,31 @@ pub const MIR = struct {
 
                             try image.section_manager.appendCode(std.mem.asBytes(&source_immediate));
                         },
+                        .idiv32m => {
+                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
+                            const opcode = @as(u8, @intCast(instruction_descriptor.opcode));
+                            try image.section_manager.appendCodeByte(opcode);
+
+                            const destination_operand_index = instruction.operands.items[0];
+                            const destination_operand = mir.operands.get(destination_operand_index);
+                            switch (destination_operand.u.memory.addressing_mode.base) {
+                                .register_base => unreachable,
+                                .frame_index => |frame_index| {
+                                    const modrm = ModRm{
+                                        .rm = @intFromEnum(Encoding.GP64.bp),
+                                        .reg = 7,
+                                        .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
+                                    };
+                                    try image.section_manager.appendCodeByte(@bitCast(modrm));
+
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
+                                    const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
+
+                                    const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
+                                    try image.section_manager.appendCode(stack_bytes);
+                                },
+                            }
+                        },
                         .add32rm,
                         .sub32rm,
                         .and32rm,
@@ -4718,7 +5096,6 @@ pub const MIR = struct {
                         .or32rm,
                         .imul32rm,
                         => {
-                            assert(instruction.operands.items.len == 3);
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
                             try image.section_manager.appendCodeByte(opcode);
@@ -4744,6 +5121,43 @@ pub const MIR = struct {
                                     const modrm = ModRm{
                                         .rm = @intFromEnum(Encoding.GP64.bp),
                                         .reg = @intCast(@intFromEnum(destination_register)),
+                                        .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
+                                    };
+                                    try image.section_manager.appendCodeByte(@bitCast(modrm));
+
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
+                                    const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
+
+                                    const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
+                                    try image.section_manager.appendCode(stack_bytes);
+                                },
+                            }
+                        },
+                        .sub32mr => {
+                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
+                            const opcode: u8 = @intCast(instruction_descriptor.opcode);
+                            try image.section_manager.appendCodeByte(opcode);
+
+                            const destination_operand_index = instruction.operands.items[0];
+                            const left_operand_index = instruction.operands.items[1];
+                            const right_operand_index = instruction.operands.items[2];
+
+                            const destination_operand = mir.operands.get(destination_operand_index);
+                            const left_operand = mir.operands.get(left_operand_index);
+                            const right_operand = mir.operands.get(right_operand_index);
+
+                            const right_register = getGP32Encoding(right_operand.*);
+
+                            assert(left_operand.id == .i32mem);
+                            assert(destination_operand.id == .i32mem);
+                            const left_memory = left_operand.u.memory;
+
+                            switch (left_memory.addressing_mode.base) {
+                                .register_base => unreachable,
+                                .frame_index => |frame_index| {
+                                    const modrm = ModRm{
+                                        .rm = @intFromEnum(Encoding.GP64.bp),
+                                        .reg = @intCast(@intFromEnum(right_register)),
                                         .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
                                     };
                                     try image.section_manager.appendCodeByte(@bitCast(modrm));
@@ -4872,9 +5286,9 @@ pub const MIR = struct {
 
     fn buildInstruction(mir: *MIR, instruction_selection: *InstructionSelection, instruction: Instruction.Id, operands: []const Operand) !Instruction.Index {
         // Some sanity check
+        const descriptor = instruction_descriptors.getPtrConst(instruction);
         {
             if (instruction != .copy) {
-                const descriptor = instruction_descriptors.getPtrConst(instruction);
                 if (descriptor.operands.len == operands.len) {
                     for (descriptor.operands, operands) |descriptor_operand, operand| {
                         switch (descriptor_operand.id) {
@@ -4886,13 +5300,13 @@ pub const MIR = struct {
                     switch (instruction) {
                         .ret => {},
                         .syscall => {},
-                        else => unreachable,
+                        else => |t| @panic(@tagName(t)),
                     }
                 }
             }
         }
 
-        var list = try ArrayList(Operand.Index).initCapacity(mir.allocator, operands.len);
+        var list = try ArrayList(Operand.Index).initCapacity(mir.allocator, operands.len + descriptor.implicit_definitions.len + descriptor.implicit_uses.len);
         const instruction_allocation = try mir.instructions.addOne(mir.allocator);
         // TODO: MachineRegisterInfo::addRegOperandToUseList
         for (operands) |operand_value| {
@@ -4916,17 +5330,62 @@ pub const MIR = struct {
             }
         }
 
+        for (descriptor.implicit_definitions) |implicitly_defined_register| {
+            const operand_allocation = try mir.operands.append(mir.allocator, Operand{
+                .id = switch (implicitly_defined_register) {
+                    .eflags => .ccr,
+                    .eax => .gp32,
+                    .edx => .gp32,
+                    else => |t| @panic(@tagName(t)),
+                },
+                .u = .{
+                    .register = .{
+                        .index = .{
+                            .physical = implicitly_defined_register,
+                        },
+                    },
+                },
+                .flags = .{
+                    .type = .def,
+                    .implicit = true,
+                },
+            });
+            list.appendAssumeCapacity(operand_allocation.index);
+            const operand_index = operand_allocation.index;
+            operand_allocation.ptr.parent = instruction_allocation.index;
+            mir.addRegisterOperandFromUseList(instruction_selection, operand_index);
+        }
+
+        for (descriptor.implicit_uses) |implicitly_used_register| {
+            const operand_allocation = try mir.operands.append(mir.allocator, Operand{
+                .id = switch (implicitly_used_register) {
+                    .eax => .gp32,
+                    .edx => .gp32,
+                    else => |t| @panic(@tagName(t)),
+                },
+                .u = .{
+                    .register = .{
+                        .index = .{
+                            .physical = implicitly_used_register,
+                        },
+                    },
+                },
+                .flags = .{
+                    .type = .use,
+                    .implicit = true,
+                },
+            });
+            list.appendAssumeCapacity(operand_allocation.index);
+            const operand_index = operand_allocation.index;
+            operand_allocation.ptr.parent = instruction_allocation.index;
+            mir.addRegisterOperandFromUseList(instruction_selection, operand_index);
+        }
+
         instruction_allocation.ptr.* = .{
             .id = instruction,
             .operands = list,
             .parent = instruction_selection.current_block,
         };
-
-        if (instruction == .copy) {
-            const i = instruction_allocation.ptr.*;
-            _ = i;
-            // print("Built copy: DST: {}. SRC: {}", .{ mir.operands.get(i.operands.items[0]).u.register.index, mir.operands.get(i.operands.items[1]).u.register.index });
-        }
 
         return instruction_allocation.index;
     }
