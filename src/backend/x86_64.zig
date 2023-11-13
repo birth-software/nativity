@@ -40,15 +40,15 @@ pub const Logger = enum {
     pub var bitset = std.EnumSet(Logger).initMany(&.{
         .instruction_selection_ir_function,
         .instruction_selection_mir_function,
-        .instruction_selection_register_operand_list,
-        .register_allocation_block,
-        .register_allocation_problematic_hint,
-        .register_allocation_assignment,
-        .register_allocation_reload,
-        .register_allocation_function_before,
-        .register_allocation_new_instruction,
-        .register_allocation_new_instruction_function_before,
-        .register_allocation_instruction_avoid_copy,
+        // .instruction_selection_register_operand_list,
+        // .register_allocation_block,
+        // .register_allocation_problematic_hint,
+        // .register_allocation_assignment,
+        // .register_allocation_reload,
+        // .register_allocation_function_before,
+        // .register_allocation_new_instruction,
+        // .register_allocation_new_instruction_function_before,
+        // .register_allocation_instruction_avoid_copy,
         .register_allocation_function_after,
         // .register_allocation_operand_list_verification,
         // .encoding,
@@ -1491,6 +1491,8 @@ const Instruction = struct {
         and32rr,
         call64pcrel32,
         copy,
+        imul32rm,
+        imul32rr,
         lea64r,
         mov32r0,
         mov32rm,
@@ -1914,6 +1916,40 @@ const instruction_descriptors = std.EnumArray(Instruction.Id, Instruction.Descri
             },
             .{
                 .id = .unknown,
+                .kind = .src,
+            },
+        },
+    },
+    .imul32rr = .{
+        .opcode = 0x6b,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+        },
+    },
+    .imul32rm = .{
+        .opcode = 0x6b,
+        .operands = &.{
+            .{
+                .id = .gp32,
+                .kind = .dst,
+            },
+            .{
+                .id = .gp32,
+                .kind = .src,
+            },
+            .{
+                .id = .i32mem,
                 .kind = .src,
             },
         },
@@ -2951,6 +2987,10 @@ pub const MIR = struct {
                                         .i32 => .or32rr,
                                         else => unreachable,
                                     },
+                                    .multiply => switch (value_type) {
+                                        .i32 => .imul32rr,
+                                        else => unreachable,
+                                    },
                                 };
 
                                 const instruction_descriptor = instruction_descriptors.get(instruction_id);
@@ -3016,6 +3056,10 @@ pub const MIR = struct {
                                     },
                                     .logical_or => switch (value_type) {
                                         .i32 => .or32rm,
+                                        else => unreachable,
+                                    },
+                                    .multiply => switch (value_type) {
+                                        .i32 => .imul32rm,
                                         else => unreachable,
                                     },
                                 };
@@ -4604,7 +4648,10 @@ pub const MIR = struct {
                                 else => |t| @panic(@tagName(t)),
                             }
                         },
-                        .add32rr, .sub32rr => {
+                        .add32rr,
+                        .sub32rr,
+                        .imul32rr,
+                        => {
                             assert(instruction.operands.items.len == 3);
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
@@ -4631,7 +4678,46 @@ pub const MIR = struct {
                             };
                             try image.section_manager.appendCodeByte(@bitCast(modrm));
                         },
-                        .add32rm, .sub32rm, .and32rm, .xor32rm, .or32rm => {
+                        .mov32mi => {
+                            assert(instruction.operands.items.len == 2);
+
+                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
+                            const opcode: u8 = @intCast(instruction_descriptor.opcode);
+                            try image.section_manager.appendCodeByte(opcode);
+
+                            const destination_operand_index = instruction.operands.items[0];
+                            const destination_operand = mir.operands.get(destination_operand_index);
+                            switch (destination_operand.u.memory.addressing_mode.base) {
+                                .register_base => unreachable,
+                                .frame_index => |frame_index| {
+                                    const modrm = ModRm{
+                                        .rm = @intFromEnum(Encoding.GP64.bp),
+                                        .reg = 0,
+                                        .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
+                                    };
+                                    try image.section_manager.appendCodeByte(@bitCast(modrm));
+
+                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
+                                    const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
+
+                                    const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
+                                    try image.section_manager.appendCode(stack_bytes);
+                                },
+                            }
+
+                            const source_operand_index = instruction.operands.items[1];
+                            const source_operand = mir.operands.get(source_operand_index);
+                            const source_immediate: u32 = @intCast(source_operand.u.immediate);
+
+                            try image.section_manager.appendCode(std.mem.asBytes(&source_immediate));
+                        },
+                        .add32rm,
+                        .sub32rm,
+                        .and32rm,
+                        .xor32rm,
+                        .or32rm,
+                        .imul32rm,
+                        => {
                             assert(instruction.operands.items.len == 3);
                             const instruction_descriptor = instruction_descriptors.get(instruction.id);
                             const opcode: u8 = @intCast(instruction_descriptor.opcode);
@@ -4669,39 +4755,6 @@ pub const MIR = struct {
                                     try image.section_manager.appendCode(stack_bytes);
                                 },
                             }
-                        },
-                        .mov32mi => {
-                            assert(instruction.operands.items.len == 2);
-
-                            const instruction_descriptor = instruction_descriptors.get(instruction.id);
-                            const opcode: u8 = @intCast(instruction_descriptor.opcode);
-                            try image.section_manager.appendCodeByte(opcode);
-
-                            const destination_operand_index = instruction.operands.items[0];
-                            const destination_operand = mir.operands.get(destination_operand_index);
-                            switch (destination_operand.u.memory.addressing_mode.base) {
-                                .register_base => unreachable,
-                                .frame_index => |frame_index| {
-                                    const modrm = ModRm{
-                                        .rm = @intFromEnum(Encoding.GP64.bp),
-                                        .reg = 0,
-                                        .mod = @as(u2, @intFromBool(false)) << 1 | @intFromBool(true),
-                                    };
-                                    try image.section_manager.appendCodeByte(@bitCast(modrm));
-
-                                    const stack_offset = computeStackOffset(function.instruction_selection.stack_objects.items[0 .. frame_index + 1]);
-                                    const displacement_bytes: u3 = if (std.math.cast(i8, stack_offset)) |_| @sizeOf(i8) else if (std.math.cast(i32, stack_offset)) |_| @sizeOf(i32) else unreachable;
-
-                                    const stack_bytes = std.mem.asBytes(&stack_offset)[0..displacement_bytes];
-                                    try image.section_manager.appendCode(stack_bytes);
-                                },
-                            }
-
-                            const source_operand_index = instruction.operands.items[1];
-                            const source_operand = mir.operands.get(source_operand_index);
-                            const source_immediate: u32 = @intCast(source_operand.u.immediate);
-
-                            try image.section_manager.appendCode(std.mem.asBytes(&source_immediate));
                         },
                         else => |t| @panic(@tagName(t)),
                     }

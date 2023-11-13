@@ -238,6 +238,7 @@ pub const BinaryOperation = struct {
         logical_and,
         logical_xor,
         logical_or,
+        multiply,
     };
 
     pub const List = BlockList(@This());
@@ -737,6 +738,7 @@ pub const Builder = struct {
                 .logical_and => .logical_and,
                 .logical_xor => .logical_xor,
                 .logical_or => .logical_or,
+                .multiply => .multiply,
             },
             .type = try builder.translateType(sema_binary_operation.type),
         });

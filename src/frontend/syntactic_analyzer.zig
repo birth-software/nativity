@@ -158,6 +158,7 @@ pub const Node = packed struct(u128) {
         logical_xor = 64,
         expression_group = 65,
         logical_or = 66,
+        multiply = 67,
     };
 };
 
@@ -717,6 +718,7 @@ const Analyzer = struct {
         logical_and,
         logical_xor,
         logical_or,
+        multiply,
     };
 
     const operator_precedence = std.EnumArray(PrecedenceOperator, i32).init(.{
@@ -727,6 +729,7 @@ const Analyzer = struct {
         .logical_and = 40,
         .logical_xor = 40,
         .logical_or = 40,
+        .multiply = 70,
     });
 
     const operator_associativity = std.EnumArray(PrecedenceOperator, Associativity).init(.{
@@ -737,6 +740,7 @@ const Analyzer = struct {
         .logical_and = .left,
         .logical_xor = .left,
         .logical_or = .left,
+        .multiply = .left,
     });
 
     const operator_node_id = std.EnumArray(PrecedenceOperator, Node.Id).init(.{
@@ -747,6 +751,7 @@ const Analyzer = struct {
         .logical_and = .logical_and,
         .logical_xor = .logical_xor,
         .logical_or = .logical_or,
+        .multiply = .multiply,
     });
 
     fn expressionPrecedence(analyzer: *Analyzer, minimum_precedence: i32) !Node.Index {
@@ -807,6 +812,10 @@ const Analyzer = struct {
                                 .equal => unreachable,
                                 else => .logical_or,
                             },
+                            .asterisk => switch (next_token_id) {
+                                .equal => unreachable,
+                                else => .multiply,
+                            },
                             else => |t| @panic(@tagName(t)),
                         };
                     } else {
@@ -833,6 +842,7 @@ const Analyzer = struct {
                 .logical_and,
                 .logical_xor,
                 .logical_or,
+                .multiply,
                 => false,
                 .compare_equal,
                 .compare_not_equal,
