@@ -2,13 +2,7 @@ name: CI
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/ci.yml"
-      - "**.zig"
   push:
-    paths:
-      - ".github/workflows/ci.yml"
-      - "**.zig"
     branches:
       - main
   schedule:
