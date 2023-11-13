@@ -544,6 +544,7 @@ const Analyzer = struct {
                 .logical_xor => .logical_xor,
                 .logical_or => .logical_or,
                 .multiply => .multiply,
+                .divide => .divide,
                 else => |t| @panic(@tagName(t)),
             },
         });
@@ -1015,6 +1016,7 @@ const Analyzer = struct {
             .logical_xor,
             .logical_or,
             .multiply,
+            .divide,
             => try analyzer.processBinaryOperation(scope_index, expect_type, node_index),
             .expression_group => return try analyzer.resolveNode(value, scope_index, expect_type, node.left), //unreachable,
             else => |t| @panic(@tagName(t)),

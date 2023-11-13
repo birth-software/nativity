@@ -238,7 +238,8 @@ pub const BinaryOperation = struct {
         logical_and,
         logical_xor,
         logical_or,
-        multiply,
+        signed_multiply,
+        signed_divide,
     };
 
     pub const List = BlockList(@This());
@@ -729,6 +730,9 @@ pub const Builder = struct {
         const left = try builder.emitBinaryOperationOperand(sema_binary_operation.left);
         const right = try builder.emitBinaryOperationOperand(sema_binary_operation.right);
 
+        const sema_type = builder.ir.module.types.get(sema_binary_operation.type).*;
+        const binary_operation_type = try builder.translateType(sema_binary_operation.type);
+
         const binary_operation = try builder.ir.binary_operations.append(builder.allocator, .{
             .left = left,
             .right = right,
@@ -738,9 +742,24 @@ pub const Builder = struct {
                 .logical_and => .logical_and,
                 .logical_xor => .logical_xor,
                 .logical_or => .logical_or,
-                .multiply => .multiply,
+                .multiply => switch (sema_type) {
+                    .integer => |integer| switch (integer.signedness) {
+                        .signed => .signed_multiply,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                },
+                //.multiply,
+                .divide => switch (sema_type) {
+                    .integer => |integer| switch (integer.signedness) {
+                        .signed => .signed_divide,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                },
+                //.divide,
             },
-            .type = try builder.translateType(sema_binary_operation.type),
+            .type = binary_operation_type,
         });
 
         const instruction = try builder.append(.{

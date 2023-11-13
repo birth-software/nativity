@@ -553,6 +553,7 @@ pub const BinaryOperation = struct {
         logical_xor,
         logical_or,
         multiply,
+        divide,
     };
 };
 
