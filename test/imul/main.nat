@@ -1,5 +1,5 @@
 const main = fn () s32 {
     const a: s32 = 5;
     const b: s32 = 4;
-    return 5 * 4 - a * b;
+    return a * b - a * b;
 }

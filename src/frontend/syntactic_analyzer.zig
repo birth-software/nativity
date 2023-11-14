@@ -160,6 +160,8 @@ pub const Node = packed struct(u128) {
         logical_or = 66,
         multiply = 67,
         divide = 68,
+        shift_left = 69,
+        shift_right = 70,
     };
 };
 
@@ -721,6 +723,8 @@ const Analyzer = struct {
         logical_or,
         multiply,
         divide,
+        shift_left,
+        shift_right,
     };
 
     const operator_precedence = std.EnumArray(PrecedenceOperator, i32).init(.{
@@ -733,6 +737,8 @@ const Analyzer = struct {
         .logical_or = 40,
         .multiply = 70,
         .divide = 70,
+        .shift_left = 50,
+        .shift_right = 50,
     });
 
     const operator_associativity = std.EnumArray(PrecedenceOperator, Associativity).init(.{
@@ -745,6 +751,8 @@ const Analyzer = struct {
         .logical_or = .left,
         .multiply = .left,
         .divide = .left,
+        .shift_left = .left,
+        .shift_right = .left,
     });
 
     const operator_node_id = std.EnumArray(PrecedenceOperator, Node.Id).init(.{
@@ -757,6 +765,8 @@ const Analyzer = struct {
         .logical_or = .logical_or,
         .multiply = .multiply,
         .divide = .divide,
+        .shift_left = .shift_left,
+        .shift_right = .shift_right,
     });
 
     fn expressionPrecedence(analyzer: *Analyzer, minimum_precedence: i32) !Node.Index {
@@ -825,6 +835,14 @@ const Analyzer = struct {
                                 .equal => unreachable,
                                 else => .divide,
                             },
+                            .less => switch (next_token_id) {
+                                .less => .shift_left,
+                                else => unreachable,
+                            },
+                            .greater => switch (next_token_id) {
+                                .greater => .shift_right,
+                                else => unreachable,
+                            },
                             else => |t| @panic(@tagName(t)),
                         };
                     } else {
@@ -845,7 +863,7 @@ const Analyzer = struct {
             }
 
             const operator_token = analyzer.token_i;
-            const extra_token = switch (operator) {
+            const extra_tokens: u32 = switch (operator) {
                 .add,
                 .sub,
                 .logical_and,
@@ -853,13 +871,15 @@ const Analyzer = struct {
                 .logical_or,
                 .multiply,
                 .divide,
-                => false,
+                => 0,
                 .compare_equal,
                 .compare_not_equal,
-                => true,
+                .shift_right,
+                .shift_left,
+                => 1,
                 // else => |t| @panic(@tagName(t)),
             };
-            analyzer.token_i += @as(u32, 1) + @intFromBool(extra_token);
+            analyzer.token_i += @as(u32, 1) + extra_tokens;
 
             // TODO: fix this
             const right = try analyzer.expressionPrecedence(precedence + 1);

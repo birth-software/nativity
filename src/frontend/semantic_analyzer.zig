@@ -202,7 +202,7 @@ const Analyzer = struct {
                     const declaration_index = try analyzer.symbolDeclaration(scope_index, statement_node_index, .local);
                     const declaration = analyzer.module.declarations.get(declaration_index);
                     const init_value = analyzer.module.values.get(declaration.init_value);
-                    switch (init_value.isComptime() and declaration.mutability == .@"const") {
+                    switch (init_value.isComptime(analyzer.module) and declaration.mutability == .@"const") {
                         // Dont add comptime declaration statements
                         true => continue,
                         false => {
@@ -461,7 +461,7 @@ const Analyzer = struct {
     fn processAssignment(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Value {
         const node = analyzer.getScopeNode(scope_index, node_index);
         assert(node.id == .assign);
-        const assignment = switch (node.left.invalid) {
+        switch (node.left.invalid) {
             // In an assignment, the node being invalid means a discarding underscore, like this: ```_ = result```
             true => {
                 var result = Value{
@@ -477,23 +477,25 @@ const Analyzer = struct {
             false => {
                 // const id = analyzer.tokenIdentifier(.token);
                 // logln("id: {s}\n", .{id});
-                // const left = try analyzer.expression(scope_index, ExpectType.none, statement_node.left);
+                const left = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
+                const right = try analyzer.unresolvedAllocate(scope_index, ExpectType{
+                    .type_index = left.ptr.getType(analyzer.module),
+                }, node.right);
 
-                // if (analyzer.module.values.get(left).isComptime() and analyzer.module.values.get(right).isComptime()) {
-                //     unreachable;
-                // } else {
-                //                                 const assignment_index = try analyzer.module.assignments.append(analyzer.allocator, .{
-                //                                     .store = result.left,
-                //                                     .load = result.right,
-                //                                 });
-                //                                 return assignment_index;
-                // }
-                unreachable;
+                if (left.ptr.isComptime(analyzer.module) and right.ptr.isComptime(analyzer.module)) {
+                    unreachable;
+                } else {
+                    const assignment = try analyzer.module.assignments.append(analyzer.allocator, .{
+                        .store = left.index,
+                        .load = right.index,
+                    });
+
+                    return Value{
+                        .assign = assignment.index,
+                    };
+                }
             },
-        };
-        _ = assignment;
-
-        unreachable;
+        }
     }
 
     fn processReturn(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) !Value {
@@ -524,29 +526,46 @@ const Analyzer = struct {
 
     fn processBinaryOperation(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) !Value {
         const node = analyzer.getScopeNode(scope_index, node_index);
+        const binary_operation_id: Compilation.BinaryOperation.Id = switch (node.id) {
+            .add => .add,
+            .sub => .sub,
+            .logical_and => .logical_and,
+            .logical_xor => .logical_xor,
+            .logical_or => .logical_or,
+            .multiply => .multiply,
+            .divide => .divide,
+            .shift_left => .shift_left,
+            .shift_right => .shift_right,
+            else => |t| @panic(@tagName(t)),
+        };
+
+        const right_expect_type: ExpectType = switch (binary_operation_id) {
+            .add,
+            .sub,
+            .logical_and,
+            .logical_xor,
+            .logical_or,
+            .multiply,
+            .divide,
+            => expect_type,
+            .shift_left,
+            .shift_right,
+            => ExpectType{
+                .type_index = Type.u8,
+            },
+        };
 
         const left_allocation = try analyzer.unresolvedAllocate(scope_index, expect_type, node.left);
-        const right_allocation = try analyzer.unresolvedAllocate(scope_index, expect_type, node.right);
+        const right_allocation = try analyzer.unresolvedAllocate(scope_index, right_expect_type, node.right);
         const left_type = left_allocation.ptr.getType(analyzer.module);
         const right_type = right_allocation.ptr.getType(analyzer.module);
-        if (!left_type.eq(right_type)) {
-            unreachable;
-        }
+        _ = right_type;
 
         const binary_operation = try analyzer.module.binary_operations.append(analyzer.allocator, .{
             .left = left_allocation.index,
             .right = right_allocation.index,
             .type = left_type,
-            .id = switch (node.id) {
-                .add => .add,
-                .sub => .sub,
-                .logical_and => .logical_and,
-                .logical_xor => .logical_xor,
-                .logical_or => .logical_or,
-                .multiply => .multiply,
-                .divide => .divide,
-                else => |t| @panic(@tagName(t)),
-            },
+            .id = binary_operation_id,
         });
 
         return .{
@@ -606,11 +625,11 @@ const Analyzer = struct {
                     }
 
                     logln(.sema, .identifier, "Declaration resolved as: {}\n", .{init_value});
-                    logln(.sema, .identifier, "Declaration mutability: {s}. Is comptime: {}\n", .{ @tagName(declaration.mutability), init_value.isComptime() });
+                    logln(.sema, .identifier, "Declaration mutability: {s}. Is comptime: {}\n", .{ @tagName(declaration.mutability), init_value.isComptime(analyzer.module) });
 
                     const typecheck_result = try analyzer.typeCheck(expect_type, declaration.type);
 
-                    if (init_value.isComptime() and declaration.mutability == .@"const") {
+                    if (init_value.isComptime(analyzer.module) and declaration.mutability == .@"const") {
                         assert(!declaration.init_value.invalid);
                         assert(typecheck_result == .success);
                         return declaration.init_value;
@@ -1017,6 +1036,8 @@ const Analyzer = struct {
             .logical_or,
             .multiply,
             .divide,
+            .shift_left,
+            .shift_right,
             => try analyzer.processBinaryOperation(scope_index, expect_type, node_index),
             .expression_group => return try analyzer.resolveNode(value, scope_index, expect_type, node.left), //unreachable,
             else => |t| @panic(@tagName(t)),
