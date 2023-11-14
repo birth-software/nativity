@@ -1,6 +1,5 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 
 const data_structures = @import("../data_structures.zig");
@@ -22,21 +21,23 @@ pub const Writer = struct {
     }
 
     pub fn writeToMemory(writer: *Writer, image: *const emit.Result) !void {
-        print("File len: {}", .{writer.in_file.len});
+        //print("File len: {}", .{writer.in_file.len});
         const dos_header: *const ImageDosHeader = @ptrCast(@alignCast(writer.in_file.ptr));
-        print("File address: {}", .{dos_header.file_address_of_new_exe_header});
-        print("File: {s}", .{writer.in_file[0x40..]});
+        //print("File address: {}", .{dos_header.file_address_of_new_exe_header});
+        //print("File: {s}", .{writer.in_file[0x40..]});
         for (writer.in_file[0x40..], 0..) |byte, index| {
+            _ = index;
             if (byte == 'T') {
-                print("Index: {}", .{index});
+                //print("Index: {}", .{index});
                 break;
             }
         }
         assert(dos_header.magic_number == ImageDosHeader.magic);
         // assert(dos_header.file_address_of_new_exe_header == @sizeOf(ImageDosHeader));
-        print("{}", .{dos_header});
+        //print("{}", .{dos_header});
         const file_header: *const ImageFileHeader = @ptrCast(@alignCast(writer.in_file[dos_header.file_address_of_new_exe_header + 4 ..].ptr));
-        print("File header: {}", .{file_header});
+        _ = file_header;
+        //print("File header: {}", .{file_header});
 
         writer.append(std.mem.asBytes(&ImageDosHeader{
             .file_address_of_new_exe_header = 208,

@@ -546,7 +546,7 @@ pub const BinaryOperation = struct {
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
 
-    const Id = enum {
+    pub const Id = enum {
         add,
         sub,
         logical_and,
@@ -554,6 +554,8 @@ pub const BinaryOperation = struct {
         logical_or,
         multiply,
         divide,
+        shift_left,
+        shift_right,
     };
 };
 
@@ -602,12 +604,13 @@ pub const Value = union(enum) {
         }
     };
 
-    pub fn isComptime(value: Value) bool {
-        return switch (value) {
+    pub fn isComptime(value: *Value, module: *Module) bool {
+        return switch (value.*) {
             .bool, .void, .undefined, .function, .type, .enum_field => true,
             .integer => |integer| integer.type.eq(Type.comptime_int),
             .call => false,
             .binary_operation => false,
+            .declaration_reference => |declaration_reference| module.declarations.get(declaration_reference.value).mutability == .@"const" and isComptime(module.values.get(module.declarations.get(declaration_reference.value).init_value), module),
             else => |t| @panic(@tagName(t)),
         };
     }

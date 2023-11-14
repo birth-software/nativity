@@ -240,6 +240,8 @@ pub const BinaryOperation = struct {
         logical_or,
         signed_multiply,
         signed_divide,
+        shift_left,
+        shift_right,
     };
 
     pub const List = BlockList(@This());
@@ -749,7 +751,6 @@ pub const Builder = struct {
                     },
                     else => |t| @panic(@tagName(t)),
                 },
-                //.multiply,
                 .divide => switch (sema_type) {
                     .integer => |integer| switch (integer.signedness) {
                         .signed => .signed_divide,
@@ -757,7 +758,8 @@ pub const Builder = struct {
                     },
                     else => |t| @panic(@tagName(t)),
                 },
-                //.divide,
+                .shift_left => .shift_left,
+                .shift_right => .shift_right,
             },
             .type = binary_operation_type,
         });
@@ -917,6 +919,19 @@ pub const Builder = struct {
                     }
                 },
                 .call => |sema_call_index| _ = try builder.processCall(sema_call_index),
+                .assign => |sema_assignment_index| {
+                    const sema_assignment = builder.ir.module.assignments.get(sema_assignment_index);
+                    const sema_left = builder.ir.module.values.get(sema_assignment.store);
+                    assert(sema_left.* == .declaration_reference);
+                    const sema_declaration_index = sema_left.declaration_reference.value;
+                    const stack = builder.currentFunction().stack_map.get(sema_declaration_index).?;
+                    const value_index = try builder.emitDeclarationInitValue(sema_assignment.load);
+                    const store_instruction = try builder.store(.{
+                        .source = value_index,
+                        .destination = stack,
+                    });
+                    _ = store_instruction;
+                },
                 else => |t| @panic(@tagName(t)),
             }
         }
