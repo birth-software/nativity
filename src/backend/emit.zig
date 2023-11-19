@@ -9,6 +9,7 @@ const expectEqual = std.testing.expectEqual;
 const Compilation = @import("../Compilation.zig");
 
 const ir = @import("intermediate_representation.zig");
+const IR = ir.IR;
 
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
@@ -234,7 +235,7 @@ pub fn get(comptime arch: std.Target.Cpu.Arch) type {
     };
 
     return struct {
-        pub fn initialize(allocator: Allocator, intermediate: *ir.Result, descriptor: Compilation.Module.Descriptor) !void {
+        pub fn initialize(allocator: Allocator, intermediate: *IR, descriptor: Compilation.Module.Descriptor) !void {
             switch (arch) {
                 .x86_64 => {
                     var mir = try backend.MIR.selectInstructions(allocator, intermediate, descriptor.target);

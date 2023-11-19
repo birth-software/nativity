@@ -31,6 +31,7 @@ pub fn BlockList(comptime T: type) type {
     };
 
     return struct {
+        // TODO: make this not reallocate the whole block. Instead, use a pointer to the block as the ArrayList item
         blocks: ArrayList(Block) = .{},
         len: usize = 0,
         first_block: u32 = 0,
@@ -38,14 +39,14 @@ pub fn BlockList(comptime T: type) type {
         const List = @This();
 
         pub const Index = packed struct(u32) {
-            index: u6,
+            element: u6,
             block: u24,
             _reserved: bool = false,
             invalid: bool = false,
 
             pub const invalid = Index{
                 .invalid = true,
-                .index = 0,
+                .element = 0,
                 .block = 0,
             };
 
@@ -63,41 +64,49 @@ pub fn BlockList(comptime T: type) type {
                 const block: u24 = @intCast(index / item_count);
                 const i: u6 = @intCast(index % item_count);
                 return .{
-                    .index = i,
+                    .element = i,
                     .block = block,
                 };
             }
         };
 
         pub const Iterator = struct {
-            block_index: u24,
-            element_index: u6,
-            list: *const List,
+            index: Index,
+            list: *List,
 
-            pub fn getCurrentIndex(i: *const Iterator) Index {
-                return .{
-                    .block = i.block_index,
-                    .index = @intCast(i.element_index),
-                };
-            }
+            pub const Pair = struct {
+                index: Index,
+            };
 
-            pub fn next(i: *Iterator) ?T {
-                return if (i.nextPointer()) |ptr| ptr.* else null;
-            }
+            pub fn nextIndex(i: *Iterator) ?Index {
+                // TODO: optimize with ctz and masking out already iterated indices in the bitmask
+                for (i.index.block..i.list.blocks.items.len) |block_index| {
+                    for (@as(u8, i.index.element)..item_count) |element_index| {
+                        if (i.list.blocks.items[block_index].bitset.isSet(element_index)) {
+                            const index = Index{
+                                .element = @intCast(element_index),
+                                .block = @intCast(block_index),
+                            };
 
-            pub fn nextPointer(i: *Iterator) ?*T {
-                for (i.block_index..i.list.blocks.items.len) |block_index| {
-                    for (@as(u8, i.element_index)..item_count) |element_index| {
-                        if (i.list.blocks.items[i.block_index].bitset.isSet(element_index)) {
-                            i.element_index = @intCast(element_index);
-                            i.element_index +%= 1;
-                            i.block_index = @as(u24, @intCast(block_index)) + @intFromBool(i.element_index < element_index);
-                            return &i.list.blocks.items[block_index].items[element_index];
+                            i.index = index;
+                            i.index.element +%= 1;
+                            i.index.block = @as(u24, @intCast(block_index)) + @intFromBool(i.index.element < element_index);
+
+                            return index;
                         }
                     }
                 }
 
                 return null;
+            }
+
+            pub fn nextPointer(i: *Iterator) ?*T {
+                if (i.nextIndex()) |index| {
+                    const result = i.list.get(index);
+                    return result;
+                } else {
+                    return null;
+                }
             }
         };
 
@@ -106,17 +115,19 @@ pub fn BlockList(comptime T: type) type {
             index: Index,
         };
 
-        pub fn iterator(list: *const List) Iterator {
+        pub fn iterator(list: *List) Iterator {
             return .{
-                .block_index = 0,
-                .element_index = 0,
+                .index = Index{
+                    .element = 0,
+                    .block = 0,
+                },
                 .list = list,
             };
         }
 
         pub fn get(list: *List, index: Index) *T {
             assert(!index.invalid);
-            return &list.blocks.items[index.block].items[index.index];
+            return &list.blocks.items[index.block].items[index.element];
         }
 
         pub fn append(list: *List, allocator: Allocator, element: T) !Allocation {
@@ -131,12 +142,12 @@ pub fn BlockList(comptime T: type) type {
             const result = switch (list.len < max_allocation) {
                 true => blk: {
                     const block = &list.blocks.items[list.first_block];
-                    if (block.allocateIndex()) |index| {
-                        const ptr = &block.items[index];
+                    if (block.allocateIndex()) |element_index| {
+                        const ptr = &block.items[element_index];
                         break :blk Allocation{
                             .ptr = ptr,
                             .index = .{
-                                .index = index,
+                                .element = element_index,
                                 .block = @intCast(list.first_block),
                             },
                         };
@@ -148,13 +159,13 @@ pub fn BlockList(comptime T: type) type {
                     const block_index = list.blocks.items.len;
                     const new_block = list.blocks.addOneAssumeCapacity();
                     new_block.* = .{};
-                    const index = new_block.allocateIndex() catch unreachable;
-                    const ptr = &new_block.items[index];
+                    const element_index = new_block.allocateIndex() catch unreachable;
+                    const ptr = &new_block.items[element_index];
                     list.first_block += @intFromBool(block_index != 0);
                     break :blk Allocation{
                         .ptr = ptr,
                         .index = .{
-                            .index = index,
+                            .element = element_index,
                             .block = @intCast(block_index),
                         },
                     };
@@ -174,7 +185,7 @@ pub fn BlockList(comptime T: type) type {
             }
         }
 
-        pub fn indexOf(list: *const List, elem: *const T) Index {
+        pub fn indexOf(list: *List, elem: *const T) Index {
             const address = @intFromPtr(elem);
             for (list.blocks.items, 0..) |*block, block_index| {
                 const base = @intFromPtr(&block.items[0]);
@@ -182,7 +193,7 @@ pub fn BlockList(comptime T: type) type {
                 if (address >= base and address < top) {
                     return .{
                         .block = @intCast(block_index),
-                        .index = @intCast(@divExact(address - base, @sizeOf(T))),
+                        .element = @intCast(@divExact(address - base, @sizeOf(T))),
                     };
                 }
             }

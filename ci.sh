@@ -2,7 +2,8 @@
 
 echo "Testing Nativity with Zig"
 echo "Compiling Nativity with Zig"
-zig build
+nativity_use_llvm=false
+zig build -Duse_llvm=$nativity_use_llvm
 failed_test_count=0
 passed_test_count=0
 test_directory_name=test
@@ -18,7 +19,7 @@ failed_tests=()
 for dir in $test_directory
 do
     MY_TESTNAME=${dir##*/}
-    zig build run -- $dir/main.nat
+    zig build run -Duse_llvm=$nativity_use_llvm -- $dir/main.nat -log ir
     if [[ "$?" == "0" ]]; then
         passed_compilation_count=$(($passed_compilation_count + 1))
         if [[ "$OSTYPE" == "linux-gnu"* ]]; then

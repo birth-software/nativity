@@ -6,6 +6,7 @@ pub const panic = Compilation.panic;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+
     try Compilation.init(allocator);
 }
 

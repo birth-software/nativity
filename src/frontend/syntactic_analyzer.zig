@@ -162,6 +162,7 @@ pub const Node = packed struct(u128) {
         divide = 68,
         shift_left = 69,
         shift_right = 70,
+        bool_type = 71,
     };
 };
 
@@ -611,7 +612,7 @@ const Analyzer = struct {
         analyzer.token_i += 1;
 
         _ = try analyzer.expectToken(.left_parenthesis);
-        const if_expression = try analyzer.expression();
+        const if_condition = try analyzer.expression();
         _ = try analyzer.expectToken(.right_parenthesis);
 
         const if_block = try analyzer.block(.{ .is_comptime = false });
@@ -619,7 +620,7 @@ const Analyzer = struct {
         const if_node = try analyzer.addNode(.{
             .id = .@"if",
             .token = if_token,
-            .left = if_expression,
+            .left = if_condition,
             .right = if_block,
         });
 
@@ -782,7 +783,6 @@ const Analyzer = struct {
             const token = analyzer.tokens[analyzer.token_i];
             // logln("Looping in expression precedence with token {}\n", .{token});
             const operator: PrecedenceOperator = switch (token.id) {
-                .equal,
                 .semicolon,
                 .right_parenthesis,
                 .right_brace,
@@ -1180,6 +1180,15 @@ const Analyzer = struct {
                 .right = Node.Index.invalid,
             }),
             .hash => analyzer.compilerIntrinsic(),
+            .fixed_keyword_bool => analyzer.addNode(.{
+                .id = .bool_type,
+                .token = blk: {
+                    analyzer.token_i += 1;
+                    break :blk token_i;
+                },
+                .left = Node.Index.invalid,
+                .right = Node.Index.invalid,
+            }),
             .keyword_unsigned_integer, .keyword_signed_integer => |signedness| analyzer.addNode(.{
                 .id = switch (signedness) {
                     .keyword_unsigned_integer => .unsigned_integer_type,

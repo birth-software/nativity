@@ -5,14 +5,18 @@ pub fn build(b: *std.Build) !void {
     all = b.option(bool, "all", "All") orelse false;
     const target = b.standardTargetOptions(.{});
     const optimization = b.standardOptimizeOption(.{});
+    const use_llvm = b.option(bool, "use_llvm", "Use LLVM as the backend for generate the compiler binary") orelse true;
     const exe = b.addExecutable(.{
         .name = "nativity",
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimization,
-        .use_llvm = true,
+        .use_llvm = use_llvm,
         .use_lld = false,
     });
+    exe.unwind_tables = false;
+    exe.omit_frame_pointer = false;
+
     b.installArtifact(exe);
     b.installDirectory(.{
         .source_dir = std.Build.LazyPath.relative("lib"),
@@ -31,6 +35,8 @@ pub fn build(b: *std.Build) !void {
     const debug_command = switch (@import("builtin").os.tag) {
         .linux => blk: {
             const result = b.addSystemCommand(&.{"gf2"});
+            result.addArg("-ex=r");
+            result.addArgs(&.{ "-ex", "up" });
             result.addArg("--args");
             result.addArtifactArg(exe);
             break :blk result;

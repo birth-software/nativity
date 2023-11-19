@@ -53,6 +53,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
     var target_triplet: []const u8 = "x86_64-linux-gnu";
+    var transpile_to_c: ?bool = null;
 
     var i: usize = 0;
     while (i < arguments.len) : (i += 1) {
@@ -112,6 +113,21 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
+        } else if (equal(u8, current_argument, "-transpile_to_c")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                if (std.mem.eql(u8, arg, "true")) {
+                    transpile_to_c = true;
+                } else if (std.mem.equal(u8, arg, "false")) {
+                    transpile_to_c = false;
+                } else {
+                    unreachable;
+                }
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
         } else {
             maybe_main_package_path = current_argument;
         }
@@ -133,6 +149,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
         .main_package_path = main_package_path,
         .executable_path = executable_path,
         .target = target,
+        .transpile_to_c = transpile_to_c orelse true,
     };
 }
 
@@ -236,7 +253,7 @@ pub const Type = union(enum) {
         pub fn getIndex(integer: Integer) Compilation.Type.Index {
             return .{
                 .block = 0,
-                .index = @ctz(integer.bit_count) - @ctz(@as(u8, 8)) + @as(u6, switch (integer.signedness) {
+                .element = @ctz(integer.bit_count) - @ctz(@as(u8, 8)) + @as(u6, switch (integer.signedness) {
                     .signed => Compilation.HardwareSignedIntegerType.offset,
                     .unsigned => Compilation.HardwareUnsignedIntegerType.offset,
                 }),
@@ -287,26 +304,6 @@ pub const Type = union(enum) {
 };
 
 // Each time an enum is added here, a corresponding insertion in the initialization must be made
-pub const Values = enum {
-    bool_false,
-    bool_true,
-    @"unreachable",
-
-    pub fn getIndex(value: Values) Value.Index {
-        const absolute: u32 = @intFromEnum(value);
-        const foo = @as(Value.Index, undefined);
-        const ElementT = @TypeOf(@field(foo, "index"));
-        const BlockT = @TypeOf(@field(foo, "block"));
-        const divider = std.math.maxInt(ElementT);
-        const element_index: ElementT = @intCast(absolute % divider);
-        const block_index: BlockT = @intCast(absolute / divider);
-        return .{
-            .index = element_index,
-            .block = block_index,
-        };
-    }
-};
-
 pub const Intrinsic = enum {
     @"error",
     import,
@@ -556,11 +553,23 @@ pub const BinaryOperation = struct {
         divide,
         shift_left,
         shift_right,
+        compare_equal,
     };
 };
 
 pub const CallingConvention = enum {
     system_v,
+};
+
+pub const Branch = struct {
+    condition: Value.Index,
+    true_expression: Value.Index,
+    false_expression: Value.Index,
+    reaches_end: bool,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
 };
 
 pub const Value = union(enum) {
@@ -572,7 +581,8 @@ pub const Value = union(enum) {
     undefined,
     @"unreachable",
     loop: Loop.Index,
-    function: Function.Index,
+    function_definition: Function.Index,
+    function_declaration: Function.Index,
     block: Block.Index,
     runtime: Runtime,
     assign: Assignment.Index,
@@ -589,6 +599,7 @@ pub const Value = union(enum) {
     sign_extend: Cast.Index,
     zero_extend: Cast.Index,
     binary_operation: BinaryOperation.Index,
+    branch: Branch.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -606,7 +617,7 @@ pub const Value = union(enum) {
 
     pub fn isComptime(value: *Value, module: *Module) bool {
         return switch (value.*) {
-            .bool, .void, .undefined, .function, .type, .enum_field => true,
+            .bool, .void, .undefined, .function_definition, .type, .enum_field => true,
             .integer => |integer| integer.type.eq(Type.comptime_int),
             .call => false,
             .binary_operation => false,
@@ -623,8 +634,11 @@ pub const Value = union(enum) {
             .string_literal => |string_literal_hash| module.string_literal_types.get(@intCast(module.getStringLiteral(string_literal_hash).?.len)).?,
             .type => Type.type,
             .enum_field => |enum_field_index| module.enums.get(module.enum_fields.get(enum_field_index).parent).type,
-            .function => |function_index| module.functions.get(function_index).prototype,
+            .function_definition => |function_index| module.function_definitions.get(function_index).prototype,
+            .function_declaration => |function_index| module.function_declarations.get(function_index).prototype,
             .binary_operation => |binary_operation| module.binary_operations.get(binary_operation).type,
+            .bool => Type.boolean,
+            .declaration => Type.void,
             else => |t| @panic(@tagName(t)),
         };
 
@@ -703,9 +717,10 @@ pub const Module = struct {
     scopes: BlockList(Scope) = .{},
     files: BlockList(File) = .{},
     values: BlockList(Value) = .{},
-    functions: BlockList(Function) = .{},
-    fields: BlockList(Field) = .{},
+    function_definitions: BlockList(Function) = .{},
+    function_declarations: BlockList(Function) = .{},
     function_prototypes: BlockList(Function.Prototype) = .{},
+    fields: BlockList(Field) = .{},
     types: BlockList(Type) = .{},
     blocks: BlockList(Block) = .{},
     loops: BlockList(Loop) = .{},
@@ -721,6 +736,7 @@ pub const Module = struct {
     arrays: BlockList(Array) = .{},
     casts: BlockList(Cast) = .{},
     binary_operations: BlockList(BinaryOperation) = .{},
+    branches: BlockList(Branch) = .{},
     string_literal_types: data_structures.AutoArrayHashMap(u32, Type.Index) = .{},
     array_types: data_structures.AutoArrayHashMap(Array, Type.Index) = .{},
     entry_point: Function.Index = Function.Index.invalid,
@@ -729,6 +745,7 @@ pub const Module = struct {
         main_package_path: []const u8,
         executable_path: []const u8,
         target: std.Target,
+        transpile_to_c: bool,
     };
 
     const ImportFileResult = struct {
@@ -1047,17 +1064,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
         _ = try module.types.append(compilation.base_allocator, type_data);
     }
 
-    _ = try module.values.append(compilation.base_allocator, .{
-        .bool = false,
-    });
-
-    _ = try module.values.append(compilation.base_allocator, .{
-        .bool = true,
-    });
-
-    _ = try module.values.append(compilation.base_allocator, .{
-        .@"unreachable" = {},
-    });
+    semantic_analyzer.unreachable_index = (try module.values.append(compilation.base_allocator, .@"unreachable")).index;
 
     const value_allocation = try module.values.append(compilation.base_allocator, .{
         .unresolved = .{
@@ -1196,13 +1203,14 @@ pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger
 }
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
-    const print_stack_trace = true;
+    const print_stack_trace = false;
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {
             writer.writeAll("\nPANIC: ") catch {};
             writer.writeAll(message) catch {};
             writer.writeByte('\n') catch {};
+            @breakpoint();
             std.os.abort();
         },
     }

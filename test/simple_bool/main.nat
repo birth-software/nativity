@@ -1,0 +1,8 @@
+const main = fn () s32 {
+    var false_boolean: bool = false;
+    if (false_boolean) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
