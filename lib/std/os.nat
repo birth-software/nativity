@@ -7,8 +7,8 @@ const system = switch (current) {
 
 const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [@]const u8, bytes_len: usize) ssize {
     switch (current) {
-        .linux => return #syscall(1, file_descriptor, bytes_ptr, bytes_len),
-        .macos => return macos.write(file_descriptor, bytes_ptr, bytes_len),
+        .linux => return #syscall(1, file_descriptor, #cast(bytes_ptr), bytes_len),
+        .macos => return macos.write(file_descriptor, #cast(bytes_ptr), bytes_len),
         .windows => {
             var written_bytes: u32 = 0;
             if (windows.WriteFile(file_descriptor, bytes_ptr, bytes_len, @written_bytes, false) != 0) {

@@ -1413,8 +1413,6 @@ const InstructionSelection = struct {
         }
 
         var gp_i: u8 = 0;
-        var fp_i: u8 = 0;
-        _ = fp_i;
 
         for (ir_arguments) |ir_argument_instruction_index| {
             const ir_argument_instruction = mir.ir.instructions.get(ir_argument_instruction_index);
@@ -4803,7 +4801,6 @@ pub const MIR = struct {
                     register_allocator.used_in_instruction = RegisterBitset.initEmpty();
 
                     var physical_register_use = false;
-                    var register_mask = false;
                     var virtual_register_definition = false;
                     var register_definition = false;
                     var early_clobber = false;
@@ -4906,9 +4903,9 @@ pub const MIR = struct {
                         }
                     }
 
-                    if (register_mask) {
-                        unreachable;
-                    }
+                    // if (register_mask) {
+                    //     unreachable;
+                    // }
 
                     // Physical register use
                     if (physical_register_use) {
@@ -4935,8 +4932,6 @@ pub const MIR = struct {
                         }
                     }
 
-                    var undef_use = false;
-                    _ = undef_use;
                     var rearranged_implicit_operands = true;
                     while (rearranged_implicit_operands) {
                         rearranged_implicit_operands = false;

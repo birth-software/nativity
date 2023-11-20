@@ -21,6 +21,7 @@ const syntactic_analyzer = @import("frontend/syntactic_analyzer.zig");
 const Node = syntactic_analyzer.Node;
 const semantic_analyzer = @import("frontend/semantic_analyzer.zig");
 const intermediate_representation = @import("backend/intermediate_representation.zig");
+const c_transpiler = @import("backend/c_transpiler.zig");
 const emit = @import("backend/emit.zig");
 
 test {
@@ -120,7 +121,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
                 const arg = arguments[i];
                 if (std.mem.eql(u8, arg, "true")) {
                     transpile_to_c = true;
-                } else if (std.mem.equal(u8, arg, "false")) {
+                } else if (std.mem.eql(u8, arg, "false")) {
                     transpile_to_c = false;
                 } else {
                     unreachable;
@@ -301,6 +302,18 @@ pub const Type = union(enum) {
         .bit_count = 8,
         .signedness = .unsigned,
     });
+    pub const @"u16" = Type.Integer.getIndex(.{
+        .bit_count = 16,
+        .signedness = .unsigned,
+    });
+    pub const @"u32" = Type.Integer.getIndex(.{
+        .bit_count = 32,
+        .signedness = .unsigned,
+    });
+    pub const @"u64" = Type.Integer.getIndex(.{
+        .bit_count = 64,
+        .signedness = .unsigned,
+    });
 };
 
 // Each time an enum is added here, a corresponding insertion in the initialization must be made
@@ -308,6 +321,7 @@ pub const Intrinsic = enum {
     @"error",
     import,
     syscall,
+    cast,
 };
 
 pub const FixedTypeKeyword = enum {
@@ -479,8 +493,8 @@ const Unresolved = struct {
 };
 
 pub const Assignment = struct {
-    store: Value.Index,
-    load: Value.Index,
+    destination: Value.Index,
+    source: Value.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -600,6 +614,7 @@ pub const Value = union(enum) {
     zero_extend: Cast.Index,
     binary_operation: BinaryOperation.Index,
     branch: Branch.Index,
+    cast: Cast.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -740,6 +755,7 @@ pub const Module = struct {
     string_literal_types: data_structures.AutoArrayHashMap(u32, Type.Index) = .{},
     array_types: data_structures.AutoArrayHashMap(Array, Type.Index) = .{},
     entry_point: Function.Index = Function.Index.invalid,
+    descriptor: Descriptor,
 
     pub const Descriptor = struct {
         main_package_path: []const u8,
@@ -972,6 +988,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
             };
             break :blk result;
         },
+        .descriptor = descriptor,
     };
 
     const std_package_dir = "lib/std";
@@ -1074,10 +1091,15 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     try semantic_analyzer.initialize(compilation, module, packages[0], value_allocation.ptr);
 
-    const ir = try intermediate_representation.initialize(compilation, module);
-
-    switch (descriptor.target.cpu.arch) {
-        inline else => |arch| try emit.get(arch).initialize(compilation.base_allocator, ir, descriptor),
+    if (descriptor.transpile_to_c) {
+        try c_transpiler.initialize(compilation, module, descriptor);
+    } else {
+        unreachable;
+        // const ir = try intermediate_representation.initialize(compilation, module);
+        //
+        // switch (descriptor.target.cpu.arch) {
+        //     inline else => |arch| try emit.get(arch).initialize(compilation.base_allocator, ir, descriptor),
+        // }
     }
 }
 
@@ -1159,6 +1181,7 @@ const LoggerScope = enum {
     sema,
     ir,
     codegen,
+    c,
 };
 
 const Logger = enum {
@@ -1177,6 +1200,7 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
             .sema => semantic_analyzer,
             .ir => intermediate_representation,
             .codegen => emit,
+            .c => c_transpiler,
         };
     }
 }

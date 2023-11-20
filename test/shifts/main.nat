@@ -1,5 +1,5 @@
 const main = fn() s32 {
-    const x: u32 = 1;
+    var x: u32 = 1;
     x = x << 5;
     x = x >> 5;
     const b: u32 = 1;

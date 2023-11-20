@@ -2,7 +2,7 @@
 
 echo "Testing Nativity with Zig"
 echo "Compiling Nativity with Zig"
-nativity_use_llvm=false
+nativity_use_llvm=true
 zig build -Duse_llvm=$nativity_use_llvm
 failed_test_count=0
 passed_test_count=0
