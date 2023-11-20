@@ -608,11 +608,11 @@ const Builder = struct {
                 .assign => |sema_assignment_index| {
                     const sema_assignment = builder.ir.module.assignments.get(sema_assignment_index);
                     const current_function = builder.ir.function_definitions.get(builder.current_function_index);
-                    const sema_declaration = builder.ir.module.values.get(sema_assignment.store).declaration_reference.value;
+                    const sema_declaration = builder.ir.module.values.get(sema_assignment.destination).declaration_reference.value;
                     const destination = current_function.stack_map.get(sema_declaration).?;
                     _ = try builder.emitAssignment(.{
                         .destination = destination,
-                        .sema_source = sema_assignment.load,
+                        .sema_source = sema_assignment.source,
                     });
                 },
                 else => |t| @panic(@tagName(t)),

@@ -151,7 +151,7 @@ pub const Result = struct {
     target: std.Target,
 
     pub fn create(section_manager: SectionManager, target: std.Target, entry_point_index: u32) !Result {
-        var result = Result{
+        const result = Result{
             .section_manager = section_manager,
             .target = target,
             .entry_point = entry_point_index,

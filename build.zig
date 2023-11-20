@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) !void {
     all = b.option(bool, "all", "All") orelse false;
     const target = b.standardTargetOptions(.{});
     const optimization = b.standardOptimizeOption(.{});
-    const use_llvm = b.option(bool, "use_llvm", "Use LLVM as the backend for generate the compiler binary") orelse true;
+    const use_llvm = b.option(bool, "use_llvm", "Use LLVM as the backend for generate the compiler binary") orelse false;
     const exe = b.addExecutable(.{
         .name = "nativity",
         .root_source_file = .{ .path = "src/main.zig" },

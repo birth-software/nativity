@@ -387,8 +387,6 @@ const Analyzer = struct {
                 const enum_field_name = analyzer.module.getName(e_field.name);
                 _ = enum_field_name;
 
-                var else_case_index: ?usize = null;
-                _ = else_case_index;
                 var existing_enums = ArrayList(u32){};
                 var switch_case_groups = try ArrayList(ArrayList(u32)).initCapacity(analyzer.allocator, switch_case_node_list.len);
 
@@ -551,8 +549,8 @@ const Analyzer = struct {
                     unreachable;
                 } else {
                     const assignment = try analyzer.module.assignments.append(analyzer.allocator, .{
-                        .store = left.index,
-                        .load = right.index,
+                        .destination = left.index,
+                        .source = right.index,
                     });
 
                     return Value{
@@ -898,6 +896,37 @@ const Analyzer = struct {
                         }
                         unreachable;
                     },
+                    .cast => {
+                        assert(node.id == .compiler_intrinsic_one);
+                        const value_to_cast = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
+                        const value_type = value_to_cast.ptr.getType(analyzer.module);
+                        assert(expect_type != .none);
+                        const cast_result = try analyzer.canCast(expect_type, value_type);
+                        if (cast_result == .success) {
+                            const cast = try analyzer.module.casts.append(analyzer.allocator, .{
+                                .value = value_to_cast.index,
+                                .type = switch (expect_type) {
+                                    .none => unreachable,
+                                    .flexible_integer => |flexible_integer| if (flexible_integer.sign) |sign| switch (sign) {
+                                        else => unreachable,
+                                    } else switch (flexible_integer.byte_count) {
+                                        1 => Type.u8,
+                                        2 => Type.u16,
+                                        4 => Type.u32,
+                                        8 => Type.u64,
+                                        else => unreachable,
+                                    },
+                                    else => unreachable,
+                                },
+                            });
+
+                            break :blk .{
+                                .cast = cast.index,
+                            };
+                        } else {
+                            std.debug.panic("Can't cast", .{});
+                        }
+                    },
                 }
                 unreachable;
             },
@@ -1140,11 +1169,17 @@ const Analyzer = struct {
         const string_literal_node = analyzer.getScopeNode(scope_index, node_index);
         assert(string_literal_node.id == .string_literal);
         const original_string_literal = analyzer.tokenStringLiteral(scope_index, string_literal_node.token);
-        const string_literal = for (original_string_literal) |ch| {
-            if (ch == '\\') {
-                break try fixupStringLiteral(analyzer.allocator, original_string_literal);
+        const string_literal = blk: {
+            if (!analyzer.module.descriptor.transpile_to_c) {
+                for (original_string_literal) |ch| {
+                    if (ch == '\\') {
+                        break :blk try fixupStringLiteral(analyzer.allocator, original_string_literal);
+                    }
+                }
             }
-        } else original_string_literal;
+
+            break :blk original_string_literal;
+        };
         const string_key = try analyzer.module.addStringLiteral(analyzer.allocator, string_literal);
         return string_key;
     }
@@ -1298,7 +1333,7 @@ const Analyzer = struct {
                 var function_prototype = try analyzer.processSimpleFunctionPrototype(scope_index, function_prototype_node.left);
                 const function_prototype_attribute_list_node = analyzer.getScopeNode(scope_index, function_prototype_node.right);
                 const attribute_node_list = analyzer.getScopeNodeList(scope_index, function_prototype_attribute_list_node);
-                var calling_convention: ?Compilation.CallingConvention = null;
+                const calling_convention: ?Compilation.CallingConvention = null;
 
                 for (attribute_node_list.items) |attribute_node_index| {
                     const attribute_node = analyzer.getScopeNode(scope_index, attribute_node_index);
@@ -1568,6 +1603,21 @@ const Analyzer = struct {
         zero_extend,
         sign_extend,
     };
+
+    fn canCast(analyzer: *Analyzer, expect_type: ExpectType, source: Type.Index) !TypeCheckResult {
+        return switch (expect_type) {
+            .none => unreachable,
+            .flexible_integer => |flexible_integer| blk: {
+                _ = flexible_integer;
+                const source_type = analyzer.module.types.get(source);
+                break :blk switch (source_type.*) {
+                    .pointer => .success,
+                    else => |t| @panic(@tagName(t)),
+                };
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+    }
 
     fn typeCheck(analyzer: *Analyzer, expect_type: ExpectType, source: Type.Index) !TypeCheckResult {
         return switch (expect_type) {
