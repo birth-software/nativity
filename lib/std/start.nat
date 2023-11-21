@@ -5,5 +5,5 @@ comptime {
 
 const _start = fn () noreturn {
     const result = #import("main").main();
-    std.os.exit(result);
+    std.os.exit(exit_code = result);
 }

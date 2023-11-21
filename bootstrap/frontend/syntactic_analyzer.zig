@@ -163,6 +163,7 @@ pub const Node = packed struct(u128) {
         shift_left = 69,
         shift_right = 70,
         bool_type = 71,
+        named_argument = 72,
     };
 };
 
@@ -1082,20 +1083,27 @@ const Analyzer = struct {
 
                     var expression_list = ArrayList(Node.Index){};
                     while (analyzer.tokens[analyzer.token_i].id != .right_parenthesis) {
-                        const current_token = analyzer.tokens[analyzer.token_i];
-                        logln(.parser, .suffix, "Current token: {s}\n", .{@tagName(current_token.id)});
-                        const parameter = try analyzer.expression();
-                        try expression_list.append(analyzer.allocator, parameter);
+                        const current_token = analyzer.token_i;
+                        var parameter = try analyzer.expression();
                         const parameter_node = analyzer.nodes.items[parameter.unwrap()];
                         logln(.parser, .suffix, "Paremeter node: {s}\n", .{@tagName(parameter_node.id)});
-                        const next_token = analyzer.tokens[analyzer.token_i];
-                        logln(.parser, .suffix, "next token: {s}\n", .{@tagName(next_token.id)});
-                        analyzer.token_i += @intFromBool(switch (next_token.id) {
-                            .comma => true,
+                        if (analyzer.tokens[analyzer.token_i].id == .equal) {
+                            analyzer.token_i += 1;
+
+                            parameter = try analyzer.addNode(.{
+                                .id = .named_argument,
+                                .token = current_token,
+                                .left = parameter,
+                                .right = try analyzer.expression(),
+                            });
+                        }
+                        try expression_list.append(analyzer.allocator, parameter);
+                        switch (analyzer.tokens[analyzer.token_i].id) {
+                            .comma => analyzer.token_i += 1,
+                            .right_parenthesis => {},
                             .colon, .right_brace, .right_bracket => unreachable,
-                            .right_parenthesis => false,
                             else => |t| @panic(@tagName(t)),
-                        });
+                        }
                     }
 
                     _ = try analyzer.expectToken(.right_parenthesis);
