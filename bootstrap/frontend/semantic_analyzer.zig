@@ -302,14 +302,66 @@ const Analyzer = struct {
                             const argument_declarations = function_prototype.arguments.?;
                             logln(.sema, .call, "Argument declaration count: {}. Argument node list count: {}\n", .{ argument_declarations.len, call_argument_node_list.len });
                             var argument_array = ArrayList(Value.Index){};
+
                             if (argument_declarations.len == call_argument_node_list.len) {
-                                for (argument_declarations, call_argument_node_list) |argument_declaration_index, argument_node_index| {
+                                for (argument_declarations, call_argument_node_list, 0..) |argument_declaration_index, argument_node_index, index| {
                                     const argument_declaration = analyzer.module.declarations.get(argument_declaration_index);
-                                    // const argument_declaration_type = analyzer.module.types.get(argument_declaration.type);
-                                    // assert(argument_declaration.type.valid);
+                                    const argument_node = analyzer.getScopeNode(scope_index, argument_node_index);
+                                    const value_node_index = switch (argument_node.id) {
+                                        .identifier => blk: {
+                                            const identifier = analyzer.tokenIdentifier(scope_index, argument_node.token);
+                                            const identifier_hash = try analyzer.processIdentifier(identifier);
+
+                                            if (identifier_hash == argument_declaration.name) {
+                                                break :blk argument_node_index;
+                                            } else {
+                                                const call_site_name = analyzer.module.getName(identifier_hash).?;
+                                                const definition_site_name = analyzer.module.getName(argument_declaration.name).?;
+                                                const function_name = analyzer.module.getName(analyzer.module.function_name_map.get(function_index).?).?;
+                                                std.debug.panic("At function '{s}' call, argument #{} must be named the same way. Call site was name '{s}' while function definition has it named as '{s}'", .{ function_name, index, call_site_name, definition_site_name });
+                                            }
+                                        },
+                                        .named_argument => blk: {
+                                            const identifier_node = analyzer.getScopeNode(scope_index, argument_node.left);
+                                            if (identifier_node.id != .identifier) {
+                                                @panic("expected identifier");
+                                            }
+                                            const identifier = analyzer.tokenIdentifier(scope_index, identifier_node.token);
+                                            const identifier_hash = try analyzer.processIdentifier(identifier);
+
+                                            if (identifier_hash == argument_declaration.name) {
+                                                break :blk argument_node.right;
+                                            } else {
+                                                const call_site_name = analyzer.module.getName(identifier_hash).?;
+                                                const definition_site_name = analyzer.module.getName(argument_declaration.name).?;
+                                                const function_name = analyzer.module.getName(analyzer.module.function_name_map.get(function_index).?).?;
+                                                std.debug.panic("At function '{s}' call, argument #{} must be named the same way. Call site was name '{s}' while function definition has it named as '{s}'", .{ function_name, index, call_site_name, definition_site_name });
+                                            }
+                                        },
+                                        else => |node_id| {
+                                            const definition_site_name = analyzer.module.getName(argument_declaration.name).?;
+                                            const function_name = analyzer.module.getName(analyzer.module.function_name_map.get(function_index).?).?;
+
+                                            std.debug.panic("Argument #{} of call to function '{s}' of type {s} must be named as '{s}'", .{ index, function_name, @tagName(node_id), definition_site_name });
+                                        },
+                                    };
                                     const call_argument_allocation = try analyzer.unresolvedAllocate(scope_index, ExpectType{
                                         .type_index = argument_declaration.type,
-                                    }, argument_node_index);
+                                    }, value_node_index);
+                                    // switch (call_argument_allocation.ptr.*) {
+                                    //     .integer,
+                                    //     .string_literal,
+                                    //     => {},
+                                    //     .declaration_reference => |declaration_reference| {
+                                    //         if (call_argument_declaration.name != argument_declaration.name) {
+                                    //             const call_site_name = analyzer.module.getName(call_argument_declaration.name).?;
+                                    //             const definition_site_name = analyzer.module.getName(argument_declaration.name).?;
+                                    //             const function_name = analyzer.module.getName(analyzer.module.function_name_map.get(function_index).?).?;
+                                    //             std.debug.panic("At function '{s}' call, argument #{} must be named the same way. Call site was name '{s}' while function definition has it named as '{s}'", .{ function_name, index, call_site_name, definition_site_name });
+                                    //         }
+                                    //     },
+                                    //     else => |t| @panic(@tagName(t)),
+                                    // }
                                     try call_argument_allocation.ptr.typeCheck(analyzer.module, argument_declaration.type);
                                     // const call_argument_type_index = call_argument_allocation.ptr.getType(analyzer.module);
                                     // const call_argument_type = analyzer.module.types.get(call_argument_type_index);

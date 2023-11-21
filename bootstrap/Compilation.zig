@@ -887,12 +887,6 @@ pub const Module = struct {
 
     fn addString(map: *StringKeyMap([]const u8), allocator: Allocator, string: []const u8) !u32 {
         const lookup_result = try map.getOrPut(allocator, string, string);
-
-        {
-            const lookup_name = map.getValue(lookup_result.key) orelse unreachable;
-            assert(equal(u8, lookup_name, string));
-        }
-
         return lookup_result.key;
     }
 
