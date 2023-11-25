@@ -5,13 +5,13 @@ const system = switch (current) {
     .windows => windows,
 };
 
-const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [@]const u8, bytes_len: usize) ssize {
+const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [&]const u8, bytes_len: usize) ssize {
     switch (current) {
         .linux => return #syscall(1, file_descriptor, #cast(bytes_ptr), bytes_len),
         .macos => return macos.write(file_descriptor, #cast(bytes_ptr), bytes_len),
         .windows => {
             var written_bytes: u32 = 0;
-            if (windows.WriteFile(file_descriptor, bytes_ptr, bytes_len, @written_bytes, false) != 0) {
+            if (windows.WriteFile(file_descriptor, bytes_ptr, bytes_len, written_bytes.&, false) != 0) {
                 return written_bytes;
             } else {
                 unreachable;
@@ -22,7 +22,7 @@ const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [@]const u8, bytes
 
 const FileDescriptor = system.FileDescriptor;
 
-const print = fn(bytes_ptr: [@]const u8, bytes_len: usize) void {
+const print = fn(bytes_ptr: [&]const u8, bytes_len: usize) void {
     const file_descriptor = switch (current) {
         .linux, .macos => 2,
         .windows => windows.GetStdHandle(windows.STD_OUTPUT_HANDLE),
@@ -39,6 +39,38 @@ const exit = fn(exit_code: s32) noreturn {
     }
     
     unreachable;
+}
+
+const ProtectionFlags = struct(u32){
+    read: bool,
+    write: bool,
+    execute: bool,
+};
+
+const MapFlags = struct(u32){
+    reserve: bool,
+    commit: bool,
+};
+
+const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_protection_flags: ProtectionFlags, general_map_flags: MapFlags) ?[&]u8 {
+    const protection_flags = system.get_protection_flags(flags = general_protection_flags);
+    const map_flags = system.get_map_flags(flags = general_map_flags);
+
+    const result = switch (#import("builtin").os) {
+        .linux => linux.mmap(address, length, protection_flags, map_flags, fd = -1, offset = 0),
+        else => #error("OS not supported"),
+    };
+
+    return result;
+}
+
+const free_virtual_memory = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
+    const result = switch (#import("builtin").os) {
+        .linux => linux.munmap(bytes_ptr, bytes_len),
+        else => #error("OS not supported"),
+    };
+
+    return result;
 }
 
 const linux = #import("os/linux.nat");

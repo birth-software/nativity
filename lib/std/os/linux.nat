@@ -1,1 +1,44 @@
+const std = #import("std");
+
 const FileDescriptor = s32;
+
+const ProtectionFlags = struct(u32) {
+    read: bool,
+    write: bool,
+    execute: bool,
+};
+
+const MapFlags = struct(u32){
+    shared: bool,
+    private: bool,
+    reserved: u2 = 0,
+    fixed: bool,
+    anonymous: bool,
+};
+
+const get_protection_flags = fn(flags: std.os.ProtectionFlags) ProtectionFlags {
+    return ProtectionFlags{
+        .read = flags.read,
+        .write = flags.write,
+        .execute = flags.execute,
+    };
+}
+
+const get_map_flags = fn(flags: std.os.MapFlags) MapFlags{
+    return MapFlags{
+        .shared = false,
+        .private = true,
+        .fixed = false,
+        .anonymous = true,
+    };
+}
+
+const mmap = fn(address: ?[&]u8, length: usize, protection_flags: ProtectionFlags, map_flags: MapFlags, fd: s32, offset: u64) ?[&]u8 {
+    const result = #syscall(9, #cast(address), length, #cast(protection_flags), #cast(map_flags), fd, offset);
+    return #cast(result);
+}
+
+const munmap = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
+    const result: ssize = #syscall(11, #cast(bytes_ptr), bytes_len);
+    return result == 0;
+}

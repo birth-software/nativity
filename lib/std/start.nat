@@ -3,7 +3,15 @@ comptime {
     _ = _start;
 }
 
-const _start = fn () noreturn {
+const _start = fn () noreturn export cc(.naked) {
+    #asm({
+        xor ebp, ebp;
+        and rsp, 0xfffffffffffffff0;
+        call {start};
+    });
+}
+
+const start = fn() noreturn export {
     const result = #import("main").main();
     std.os.exit(exit_code = result);
 }
