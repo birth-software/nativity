@@ -50,6 +50,7 @@ pub const Token = packed struct(u64) {
         fixed_keyword_align = 0x1b,
         fixed_keyword_export = 0x1c,
         fixed_keyword_cc = 0x1d,
+        fixed_keyword_for = 0x1e,
         keyword_unsigned_integer = 0x1f,
         keyword_signed_integer = 0x20,
         bang = '!', // 0x21
@@ -114,6 +115,7 @@ pub const FixedKeyword = enum {
     @"align",
     @"export",
     cc,
+    @"for",
 };
 
 pub const Result = struct {

@@ -512,9 +512,11 @@ pub const Block = struct {
 };
 
 pub const Loop = struct {
+    pre: Value.Index,
     condition: Value.Index,
     body: Value.Index,
-    breaks: bool,
+    post: Value.Index,
+    reaches_end: bool,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -528,6 +530,12 @@ const Unresolved = struct {
 pub const Assignment = struct {
     destination: Value.Index,
     source: Value.Index,
+    operation: Operation,
+
+    const Operation = enum {
+        none,
+        add,
+    };
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -651,10 +659,14 @@ pub const FieldAccess = struct {
     pub const Allocation = List.Allocation;
 };
 
-pub const Slice = struct {
-    sliceable: Value.Index,
+pub const Range = struct {
     start: Value.Index,
     end: Value.Index,
+};
+
+pub const Slice = struct {
+    sliceable: Value.Index,
+    range: Range,
     type: Type.Index,
 
     pub const Access = struct {

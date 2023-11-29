@@ -18,6 +18,7 @@ const Field = Compilation.Field;
 const Function = Compilation.Function;
 const Intrinsic = Compilation.Intrinsic;
 const Loop = Compilation.Loop;
+const Range = Compilation.Range;
 const Scope = Compilation.Scope;
 const ScopeType = Compilation.ScopeType;
 const Slice = Compilation.Slice;
@@ -106,7 +107,9 @@ const Analyzer = struct {
     current_file: File.Index,
     current_declaration: Declaration.Index = Declaration.Index.invalid,
     payloads: ArrayList(Payload) = .{},
+    current_block: Block.Index = Block.Index.invalid,
     maybe_count: usize = 0,
+    for_count: usize = 0,
 
     fn getScopeSourceFile(analyzer: *Analyzer, scope_index: Scope.Index) []const u8 {
         const scope = analyzer.module.scopes.get(scope_index);
@@ -188,14 +191,20 @@ const Analyzer = struct {
         });
         const scope_index = new_scope.index;
 
-        var statements = ArrayList(Value.Index){};
+        const block_allocation = try analyzer.module.blocks.append(analyzer.allocator, .{
+            .statements = ArrayList(Value.Index){},
+            .reaches_end = true,
+        });
+        const block_index = block_allocation.index;
+        const previous_block = analyzer.current_block;
+        analyzer.current_block = block_index;
 
         for (analyzer.payloads.items) |payload| {
             const declaration_index = try analyzer.declarationCommon(scope_index, .local, payload.mutability, payload.name, payload.type, payload.value, null);
             const statement_value_allocation = try analyzer.module.values.append(analyzer.allocator, .{
                 .declaration = declaration_index,
             });
-            try statements.append(analyzer.allocator, statement_value_allocation.index);
+            try analyzer.module.blocks.get(block_index).statements.append(analyzer.allocator, statement_value_allocation.index);
         }
 
         analyzer.payloads.clearRetainingCapacity();
@@ -215,25 +224,9 @@ const Analyzer = struct {
 
             const statement_node = analyzer.getScopeNode(scope_index, statement_node_index);
             logln(.sema, .node, "Trying to resolve statement of id {s}", .{@tagName(statement_node.id)});
+
             const statement_value_index = switch (statement_node.id) {
-                .assign => (try analyzer.module.values.append(analyzer.allocator, try analyzer.processAssignment(scope_index, statement_node_index))).index,
-                .simple_while => blk: {
-                    const loop_allocation = try analyzer.module.loops.append(analyzer.allocator, .{
-                        .condition = Value.Index.invalid,
-                        .body = Value.Index.invalid,
-                        .breaks = false,
-                    });
-                    loop_allocation.ptr.condition = (try analyzer.unresolvedAllocate(scope_index, ExpectType.boolean, statement_node.left)).index;
-                    loop_allocation.ptr.body = (try analyzer.unresolvedAllocate(scope_index, ExpectType.none, statement_node.right)).index;
-
-                    // TODO: bool true
-                    reaches_end = loop_allocation.ptr.breaks or unreachable;
-
-                    const value_allocation = try analyzer.module.values.append(analyzer.allocator, .{
-                        .loop = loop_allocation.index,
-                    });
-                    break :blk value_allocation.index;
-                },
+                .assign, .add_assign => (try analyzer.module.values.append(analyzer.allocator, try analyzer.processAssignment(scope_index, statement_node_index))).index,
                 .@"unreachable" => blk: {
                     reaches_end = false;
                     break :blk unreachable_index;
@@ -300,7 +293,7 @@ const Analyzer = struct {
                     const if_else_value = try analyzer.processIfElse(scope_index, expect_type, if_else_node_index, payload_node_index);
 
                     if (if_else_value.maybe_payload_declaration_index) |maybe_payload_declaration| {
-                        try statements.append(analyzer.allocator, maybe_payload_declaration);
+                        try analyzer.module.blocks.get(block_index).statements.append(analyzer.allocator, maybe_payload_declaration);
                     }
 
                     const branch = analyzer.module.branches.get(if_else_value.branch);
@@ -328,7 +321,7 @@ const Analyzer = struct {
                     const if_expression = try analyzer.processIf(scope_index, expect_type, if_statement_node_index, payload_node_index);
 
                     if (if_expression.maybe_payload_declaration_value) |maybe_payload_declaration| {
-                        try statements.append(analyzer.allocator, maybe_payload_declaration);
+                        try analyzer.module.blocks.get(block_index).statements.append(analyzer.allocator, maybe_payload_declaration);
                     }
 
                     const branch = try analyzer.module.branches.append(analyzer.allocator, .{
@@ -352,18 +345,24 @@ const Analyzer = struct {
                     const value = try analyzer.module.values.append(analyzer.allocator, assembly_value);
                     break :blk value.index;
                 },
+                .for_loop => blk: {
+                    const loop_index = try analyzer.forLoop(scope_index, expect_type, statement_node_index);
+                    const value = try analyzer.module.values.append(analyzer.allocator, .{
+                        .loop = loop_index,
+                    });
+                    break :blk value.index;
+                },
                 else => |t| @panic(@tagName(t)),
             };
 
-            try statements.append(analyzer.allocator, statement_value_index);
+            try analyzer.module.blocks.get(block_index).statements.append(analyzer.allocator, statement_value_index);
         }
 
-        const block_allocation = try analyzer.module.blocks.append(analyzer.allocator, .{
-            .statements = statements,
-            .reaches_end = reaches_end,
-        });
+        analyzer.module.blocks.get(block_index).reaches_end = reaches_end;
 
-        return block_allocation.index;
+        analyzer.current_block = previous_block;
+
+        return block_index;
     }
 
     fn processAssemblyStatements(analyzer: *Analyzer, comptime architecture: type, scope_index: Scope.Index, assembly_statement_nodes: []const Node.Index) ![]Compilation.Assembly.Instruction.Index {
@@ -796,6 +795,126 @@ const Analyzer = struct {
         unreachable;
     }
 
+    fn range(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Range {
+        const range_node = analyzer.getScopeNode(scope_index, node_index);
+        assert(range_node.id == .range);
+
+        const expect_type = ExpectType{
+            .type_index = Type.usize,
+        };
+
+        const range_start = try analyzer.unresolvedAllocate(scope_index, expect_type, range_node.left);
+        const range_end = try analyzer.unresolvedAllocate(scope_index, expect_type, range_node.right);
+
+        return Range{
+            .start = range_start.index,
+            .end = range_end.index,
+        };
+    }
+
+    fn forLoop(analyzer: *Analyzer, parent_scope_index: Scope.Index, expect_type: ExpectType, for_node_index: Node.Index) !Loop.Index {
+        const for_loop_node = analyzer.getScopeNode(parent_scope_index, for_node_index);
+        assert(for_loop_node.id == .for_loop);
+
+        const scope_allocation = try analyzer.allocateScope(.{
+            .token = for_loop_node.token,
+            .file = analyzer.module.scopes.get(parent_scope_index).file,
+            .parent = parent_scope_index,
+        });
+        const scope_index = scope_allocation.index;
+        const for_condition_node = analyzer.getScopeNode(scope_index, for_loop_node.left);
+        assert(for_condition_node.id == .for_condition);
+
+        const for_loop_element_node = analyzer.getScopeNode(scope_index, for_condition_node.left);
+        var pre = Value.Index.invalid;
+        const for_condition = switch (for_loop_element_node.id) {
+            .range => blk: {
+                const for_range = try analyzer.range(scope_index, for_condition_node.left);
+
+                const for_loop_payload_node = analyzer.getScopeNode(scope_index, for_condition_node.right);
+                const payload_name = switch (for_loop_payload_node.id) {
+                    .node_list => b: {
+                        const nodes = analyzer.getScopeNodeList(scope_index, for_loop_payload_node);
+                        assert(nodes.items.len == 1);
+                        const payload_node = analyzer.getScopeNode(scope_index, nodes.items[0]);
+                        const result = analyzer.tokenIdentifier(scope_index, payload_node.token);
+                        break :b result;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+                const declaration_index = try analyzer.declarationCommon(scope_index, .local, .@"var", payload_name, Type.usize, for_range.start, null);
+                const declaration_value = try analyzer.module.values.append(analyzer.allocator, .{
+                    .declaration = declaration_index,
+                });
+                pre = declaration_value.index;
+
+                const binary_condition = try analyzer.module.binary_operations.append(analyzer.allocator, .{
+                    .id = .compare_less_than,
+                    .type = Type.boolean,
+                    .left = try analyzer.doIdentifierString(scope_index, ExpectType{
+                        .type_index = Type.usize,
+                    }, payload_name),
+                    .right = for_range.end,
+                });
+
+                const condition = try analyzer.module.values.append(analyzer.allocator, .{
+                    .binary_operation = binary_condition.index,
+                });
+                break :blk condition.index;
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+
+        const for_loop_body = try analyzer.unresolvedAllocate(scope_index, expect_type, for_loop_node.right);
+        var post = Value.Index.invalid;
+        switch (for_loop_element_node.id) {
+            .range => {
+                const for_condition_value = analyzer.module.values.get(for_condition);
+                switch (for_condition_value.*) {
+                    .binary_operation => |binary_operation_index| {
+                        const binary_operation = analyzer.module.binary_operations.get(binary_operation_index);
+                        const left = binary_operation.left;
+                        const right = try analyzer.module.values.append(analyzer.allocator, .{
+                            .integer = .{
+                                .value = 1,
+                                .type = Type.usize,
+                                .signedness = .unsigned,
+                            },
+                        });
+
+                        const assignment = try analyzer.module.assignments.append(analyzer.allocator, .{
+                            .operation = .add,
+                            .destination = left,
+                            .source = right.index,
+                        });
+
+                        const assignment_value = try analyzer.module.values.append(analyzer.allocator, .{
+                            .assign = assignment.index,
+                        });
+                        post = assignment_value.index;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+
+        const reaches_end = switch (for_loop_body.ptr.*) {
+            .block => |block_index| analyzer.module.blocks.get(block_index).reaches_end,
+            else => |t| @panic(@tagName(t)),
+        };
+
+        const loop = try analyzer.module.loops.append(analyzer.allocator, .{
+            .pre = pre,
+            .condition = for_condition,
+            .body = for_loop_body.index,
+            .reaches_end = reaches_end,
+            .post = post,
+        });
+
+        return loop.index;
+    }
+
     const If = struct {
         maybe_payload_declaration_value: ?Value.Index,
         expression: Value.Index,
@@ -935,11 +1054,11 @@ const Analyzer = struct {
 
     fn processAssignment(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Value {
         const node = analyzer.getScopeNode(scope_index, node_index);
-        assert(node.id == .assign);
         assert(!node.left.invalid);
         const left_node = analyzer.getScopeNode(scope_index, node.left);
         switch (left_node.id) {
             .discard => {
+                assert(node.id == .assign);
                 var result = Value{
                     .unresolved = .{
                         .node_index = node.right,
@@ -964,6 +1083,11 @@ const Analyzer = struct {
                     const assignment = try analyzer.module.assignments.append(analyzer.allocator, .{
                         .destination = left.index,
                         .source = right.index,
+                        .operation = switch (node.id) {
+                            .assign => .none,
+                            .add_assign => .add,
+                            else => unreachable,
+                        },
                     });
 
                     return Value{
@@ -1734,15 +1858,10 @@ const Analyzer = struct {
                     .pointer => |pointer| pointer.element_type,
                     else => |t| @panic(@tagName(t)),
                 };
-                const slice_range_node = analyzer.getScopeNode(scope_index, node.right);
-                assert(slice_range_node.id == .slice_range);
-                const slice_range_start = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, slice_range_node.left);
-                const slice_range_end = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, slice_range_node.right);
 
                 const slice = try analyzer.module.slices.append(analyzer.allocator, .{
                     .sliceable = expression_to_slice.index,
-                    .start = slice_range_start.index,
-                    .end = slice_range_end.index,
+                    .range = try analyzer.range(scope_index, node.right),
                     .type = try analyzer.getSliceType(.{
                         .element_type = element_type,
                         .@"const" = true,

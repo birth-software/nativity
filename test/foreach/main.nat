@@ -1,0 +1,10 @@
+const main = fn () s32 {
+    var counter: s32 = 0;
+    const loop = 10;
+
+    for (0..loop) |_| {
+        counter += 1;
+    }
+
+    return loop - counter;
+}
