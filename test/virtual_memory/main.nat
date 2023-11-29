@@ -1,0 +1,19 @@
+const std = #import("std");
+
+const main = fn() s32 {
+    const size = 0x1000;
+    if (std.page_allocator.allocate(size, alignment = 12)) |result| {
+        result[0] = 0;
+        std.print(bytes_ptr = "Allocation succeeded. Freeing...\n", bytes_len = 33);
+        if (std.page_allocator.free(bytes_ptr = result.ptr, bytes_len = result.len)) {
+            std.print(bytes_ptr = "Memory freed successfully\n", bytes_len = 26);
+            return 0;
+        } else {
+            std.print(bytes_ptr = "Memory freed with errors\n", bytes_len = 25);
+            return 1;
+        }
+    } else {
+        std.print(bytes_ptr = "Allocation failed!\n", bytes_len = 19);
+        return 1;
+    }
+}
