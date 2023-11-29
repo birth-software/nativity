@@ -17,6 +17,7 @@ const StringHashMap = data_structures.StringHashMap;
 const StringArrayHashMap = data_structures.StringArrayHashMap;
 
 const lexical_analyzer = @import("frontend/lexical_analyzer.zig");
+const Token = lexical_analyzer.Token;
 const syntactic_analyzer = @import("frontend/syntactic_analyzer.zig");
 const Node = syntactic_analyzer.Node;
 const semantic_analyzer = @import("frontend/semantic_analyzer.zig");
@@ -177,7 +178,28 @@ pub fn init(allocator: Allocator) !void {
 
 pub const Struct = struct {
     scope: Scope.Index,
-    fields: ArrayList(Field.Index) = .{},
+    fields: ArrayList(ContainerField.Index) = .{},
+    backing_type: Type.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const ContainerField = struct {
+    name: u32,
+    type: Type.Index,
+    default_value: Value.Index,
+    parent: Type.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const ContainerInitialization = struct {
+    field_initializations: ArrayList(Value.Index),
+    type: Type.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -214,27 +236,36 @@ pub const Array = struct {
 };
 
 pub const Type = union(enum) {
+    any,
     void,
     noreturn,
     bool,
     type,
     comptime_int,
     integer: Type.Integer,
-    slice: Slice,
+    slice: Type.Slice,
     pointer: Pointer,
     @"struct": Struct.Index,
     @"enum": Enum.Index,
     function: Function.Prototype.Index,
     array: Array,
+    optional: Optional,
 
-    const Slice = struct {
+    const Optional = struct {
         element_type: Type.Index,
     };
-    const Pointer = struct {
+
+    pub const Slice = struct {
+        element_type: Type.Index,
+        @"const": bool,
+    };
+
+    pub const Pointer = struct {
         element_type: Type.Index,
         many: bool,
         @"const": bool,
     };
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
@@ -282,6 +313,16 @@ pub const Type = union(enum) {
         };
     }
 
+    pub fn getBitSize(type_info: Type) u64 {
+        return switch (type_info) {
+            .integer => |integer| integer.bit_count,
+            .pointer => 8,
+            .bool => 1,
+            .comptime_int => @panic("This call should never happen"),
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
     pub fn getAlignment(type_info: Type) u64 {
         return switch (type_info) {
             .integer => |integer| @min(16, integer.getSize()),
@@ -290,6 +331,7 @@ pub const Type = union(enum) {
         };
     }
 
+    pub const any = FixedTypeKeyword.any.toType();
     pub const @"void" = FixedTypeKeyword.void.toType();
     pub const boolean = FixedTypeKeyword.bool.toType();
     pub const ssize = FixedTypeKeyword.ssize.toType();
@@ -318,6 +360,7 @@ pub const Type = union(enum) {
 
 // Each time an enum is added here, a corresponding insertion in the initialization must be made
 pub const Intrinsic = enum {
+    //@"asm", this is processed separately as it need special parsing
     @"error",
     import,
     syscall,
@@ -332,6 +375,7 @@ pub const FixedTypeKeyword = enum {
     ssize,
     type,
     comptime_int,
+    any,
 
     const offset = 0;
 
@@ -382,9 +426,10 @@ pub const extra_common_type_data = blk: {
 
 /// A scope contains a bunch of declarations
 pub const Scope = struct {
-    declarations: AutoHashMap(u32, Declaration.Index) = .{},
+    declarations: data_structures.AutoArrayHashMap(u32, Declaration.Index) = .{},
     parent: Scope.Index,
     file: File.Index,
+    token: Token.Index,
     type: Type.Index = Type.Index.invalid,
 
     pub const List = BlockList(@This());
@@ -409,6 +454,7 @@ pub const Declaration = struct {
     name: u32,
     argument_index: ?u32,
     type: Type.Index,
+    scope: Scope.Index,
 
     pub const Reference = struct {
         value: Declaration.Index,
@@ -465,15 +511,6 @@ pub const Block = struct {
     pub const Allocation = List.Allocation;
 };
 
-pub const Field = struct {
-    name: u32,
-    type: Type.Index,
-
-    pub const List = BlockList(@This());
-    pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
-};
-
 pub const Loop = struct {
     condition: Value.Index,
     body: Value.Index,
@@ -482,10 +519,6 @@ pub const Loop = struct {
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
-};
-
-const Runtime = struct {
-    foo: u32 = 0,
 };
 
 const Unresolved = struct {
@@ -519,6 +552,7 @@ pub const Call = struct {
     value: Value.Index,
     arguments: ArgumentList.Index,
     type: Type.Index,
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
     pub const Allocation = List.Allocation;
@@ -560,25 +594,47 @@ pub const BinaryOperation = struct {
     pub const Id = enum {
         add,
         sub,
-        logical_and,
-        logical_xor,
-        logical_or,
+        bit_and,
+        bit_xor,
+        bit_or,
         multiply,
         divide,
         shift_left,
         shift_right,
         compare_equal,
+        compare_greater_than,
+        compare_greater_or_equal,
+        compare_less_than,
+        compare_less_or_equal,
+    };
+};
+
+pub const UnaryOperation = struct {
+    value: Value.Index,
+    type: Type.Index,
+    id: Id,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+
+    pub const Id = enum {
+        boolean_not,
+        negation,
+        address_of,
+        pointer_dereference,
     };
 };
 
 pub const CallingConvention = enum {
     system_v,
+    naked,
 };
 
 pub const Branch = struct {
-    condition: Value.Index,
-    true_expression: Value.Index,
-    false_expression: Value.Index,
+    expression: Value.Index,
+    taken_expression: Value.Index,
+    not_taken_expression: Value.Index,
     reaches_end: bool,
 
     pub const List = BlockList(@This());
@@ -586,19 +642,118 @@ pub const Branch = struct {
     pub const Allocation = List.Allocation;
 };
 
+pub const FieldAccess = struct {
+    declaration_reference: Value.Index,
+    field: ContainerField.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const Slice = struct {
+    sliceable: Value.Index,
+    start: Value.Index,
+    end: Value.Index,
+    type: Type.Index,
+
+    pub const Access = struct {
+        value: Value.Index,
+        field: Field,
+        type: Type.Index,
+
+        pub const List = BlockList(@This());
+        pub const Index = Slice.Access.List.Index;
+        pub const Allocation = Slice.Access.List.Allocation;
+    };
+
+    pub const Field = enum {
+        ptr,
+        len,
+    };
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const IndexedAccess = struct {
+    indexed_expression: Value.Index,
+    index_expression: Value.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const OptionalCheck = struct {
+    value: Value.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const OptionalUnwrap = struct {
+    value: Value.Index,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+    pub const Allocation = List.Allocation;
+};
+
+pub const Assembly = struct {
+    pub const Instruction = struct {
+        id: u32,
+        operands: []const Operand,
+
+        pub const List = BlockList(@This());
+        pub const Index = List.Index;
+        pub const Allocation = List.Allocation;
+    };
+
+    pub const Operand = union(enum) {
+        register: u32,
+        number_literal: u64,
+        value_index: Value.Index,
+    };
+
+    pub const Block = struct {
+        instructions: []const Assembly.Instruction.Index,
+
+        pub const List = BlockList(@This());
+        pub const Index = List.Index;
+        pub const Allocation = List.Allocation;
+    };
+
+    pub const x86_64 = struct {
+        pub const Instruction = enum {
+            @"and",
+            call,
+            xor,
+        };
+
+        pub const Register = enum {
+            ebp,
+            rsp,
+        };
+    };
+};
+
 pub const Value = union(enum) {
-    unresolved: Unresolved,
-    declaration: Declaration.Index,
-    declaration_reference: Declaration.Reference,
     void,
     bool: bool,
     undefined,
     @"unreachable",
+    pointer_null_literal,
+    optional_null_literal,
+    unresolved: Unresolved,
+    declaration: Declaration.Index,
+    declaration_reference: Declaration.Reference,
     loop: Loop.Index,
     function_definition: Function.Index,
     function_declaration: Function.Index,
     block: Block.Index,
-    runtime: Runtime,
     assign: Assignment.Index,
     type: Type.Index,
     integer: Integer,
@@ -613,8 +768,17 @@ pub const Value = union(enum) {
     sign_extend: Cast.Index,
     zero_extend: Cast.Index,
     binary_operation: BinaryOperation.Index,
+    unary_operation: UnaryOperation.Index,
     branch: Branch.Index,
     cast: Cast.Index,
+    container_initialization: ContainerInitialization.Index,
+    field_access: FieldAccess.Index,
+    slice_access: Slice.Access.Index,
+    indexed_access: IndexedAccess.Index,
+    optional_check: OptionalCheck.Index,
+    optional_unwrap: OptionalUnwrap.Index,
+    slice: Slice.Index,
+    assembly_block: Assembly.Block.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -632,11 +796,20 @@ pub const Value = union(enum) {
 
     pub fn isComptime(value: *Value, module: *Module) bool {
         return switch (value.*) {
-            .bool, .void, .undefined, .function_definition, .type, .enum_field => true,
             .integer => |integer| integer.type.eq(Type.comptime_int),
-            .call => false,
-            .binary_operation => false,
             .declaration_reference => |declaration_reference| module.declarations.get(declaration_reference.value).mutability == .@"const" and isComptime(module.values.get(module.declarations.get(declaration_reference.value).init_value), module),
+            .bool, .void, .undefined, .function_definition, .type, .enum_field => true,
+            // TODO:
+            .call,
+            .syscall,
+            .binary_operation,
+            .container_initialization,
+            .cast,
+            .optional_unwrap,
+            .pointer_null_literal,
+            .indexed_access,
+            => false,
+            // TODO:
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -654,73 +827,36 @@ pub const Value = union(enum) {
             .binary_operation => |binary_operation| module.binary_operations.get(binary_operation).type,
             .bool => Type.boolean,
             .declaration => Type.void,
+            .container_initialization => |container_initialization| module.container_initializations.get(container_initialization).type,
+            .syscall => Type.usize,
+            .unary_operation => |unary_operation_index| module.unary_operations.get(unary_operation_index).type,
+            .pointer_null_literal => semantic_analyzer.optional_pointer_to_any_type,
+            .optional_null_literal => semantic_analyzer.optional_any,
+            .field_access => |field_access_index| module.container_fields.get(module.field_accesses.get(field_access_index).field).type,
+            .cast => |cast_index| module.casts.get(cast_index).type,
+            .slice => |slice_index| module.slices.get(slice_index).type,
+            .slice_access => |slice_access_index| module.slice_accesses.get(slice_access_index).type,
+            .optional_check => Type.boolean,
+            .indexed_access => |indexed_access_index| blk: {
+                const indexed_expression = module.values.get(module.indexed_accesses.get(indexed_access_index).indexed_expression);
+                const indexed_expression_type_index = indexed_expression.getType(module);
+                const indexed_expression_type = module.types.get(indexed_expression_type_index);
+                break :blk switch (indexed_expression_type.*) {
+                    .slice => |slice| slice.element_type,
+                    else => |t| @panic(@tagName(t)),
+                };
+            },
             else => |t| @panic(@tagName(t)),
         };
 
         return result;
     }
 
-    // pub fn setType(value: *Value, new_type: Type.Index) void {
-    //     switch (value.*) {
-    //         .integer => value.integer.type = new_type,
-    //         else => |t| @panic(@tagName(t)),
-    //     }
-    // }
     const TypeCheckError = error{
         integer_size,
         pointer_many_differ,
         pointer_element_type_differ,
     };
-
-    pub fn typeCheck(value: *Value, module: *Module, type_to_check_index: Type.Index) TypeCheckError!void {
-        const value_type_index = value.getType(module);
-
-        if (!value_type_index.eq(type_to_check_index)) {
-            const value_type = module.types.get(value_type_index);
-            const check_type = module.types.get(type_to_check_index);
-            if (std.meta.activeTag(value_type.*) == std.meta.activeTag(check_type.*)) {
-                switch (value_type.*) {
-                    .integer => |coercee_int| {
-                        if (check_type.integer.getSize() < coercee_int.getSize()) {
-                            return error.integer_size;
-                        }
-                    },
-                    .pointer => |coercee_pointer| {
-                        if (coercee_pointer.many != check_type.pointer.many) {
-                            return error.pointer_many_differ;
-                        }
-
-                        if (!coercee_pointer.element_type.eq(check_type.pointer.element_type)) {
-                            if (check_type.pointer.many) {
-                                const coercee_element_type = module.types.get(coercee_pointer.element_type);
-                                switch (coercee_element_type.*) {
-                                    .array => |array| if (!array.element_type.eq(check_type.pointer.element_type)) {
-                                        return error.pointer_element_type_differ;
-                                    },
-                                    else => |t| @panic(@tagName(t)),
-                                }
-                            }
-                        }
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-            } else {
-                switch (check_type.*) {
-                    .integer => {
-                        switch (value_type.*) {
-                            .comptime_int => switch (value.*) {
-                                .integer => value.integer.type = type_to_check_index,
-                                .declaration_reference => value.declaration_reference.type = type_to_check_index,
-                                else => |t| @panic(@tagName(t)),
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        }
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-            }
-        }
-    }
 };
 
 pub const Module = struct {
@@ -735,7 +871,6 @@ pub const Module = struct {
     function_definitions: BlockList(Function) = .{},
     function_declarations: BlockList(Function) = .{},
     function_prototypes: BlockList(Function.Prototype) = .{},
-    fields: BlockList(Field) = .{},
     types: BlockList(Type) = .{},
     blocks: BlockList(Block) = .{},
     loops: BlockList(Loop) = .{},
@@ -747,12 +882,28 @@ pub const Module = struct {
     string_literals: StringKeyMap([]const u8) = .{},
     enums: BlockList(Enum) = .{},
     enum_fields: BlockList(Enum.Field) = .{},
-    function_name_map: data_structures.AutoArrayHashMap(Function.Index, u32) = .{},
+    container_fields: BlockList(ContainerField) = .{},
+    container_initializations: BlockList(ContainerInitialization) = .{},
+    function_map: data_structures.AutoArrayHashMap(Function.Index, Declaration.Index) = .{},
+    type_map: data_structures.AutoArrayHashMap(Type.Index, Declaration.Index) = .{},
     arrays: BlockList(Array) = .{},
     casts: BlockList(Cast) = .{},
     binary_operations: BlockList(BinaryOperation) = .{},
+    unary_operations: BlockList(UnaryOperation) = .{},
     branches: BlockList(Branch) = .{},
+    field_accesses: BlockList(FieldAccess) = .{},
+    slices: BlockList(Slice) = .{},
+    slice_accesses: BlockList(Slice.Access) = .{},
+    indexed_accesses: BlockList(IndexedAccess) = .{},
+    optional_checks: BlockList(OptionalCheck) = .{},
+    optional_unwraps: BlockList(OptionalUnwrap) = .{},
+    assembly_blocks: BlockList(Assembly.Block) = .{},
+    assembly_instructions: BlockList(Assembly.Instruction) = .{},
+    non_primitive_integer_types: data_structures.AutoArrayHashMap(Type.Integer, Type.Index) = .{},
     string_literal_types: data_structures.AutoArrayHashMap(u32, Type.Index) = .{},
+    slice_types: data_structures.AutoArrayHashMap(Type.Slice, Type.Index) = .{},
+    pointer_types: data_structures.AutoArrayHashMap(Type.Pointer, Type.Index) = .{},
+    optional_types: data_structures.AutoArrayHashMap(Type.Index, Type.Index) = .{},
     array_types: data_structures.AutoArrayHashMap(Array, Type.Index) = .{},
     entry_point: Function.Index = Function.Index.invalid,
     descriptor: Descriptor,
@@ -1074,8 +1225,27 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     for (extra_common_type_data) |type_data| {
         _ = try module.types.append(compilation.base_allocator, type_data);
     }
+    semantic_analyzer.pointer_to_any_type = (try module.types.append(compilation.base_allocator, .{
+        .pointer = .{
+            .element_type = Type.any,
+            .many = false,
+            .@"const" = true,
+        },
+    })).index;
+    semantic_analyzer.optional_pointer_to_any_type = (try module.types.append(compilation.base_allocator, .{
+        .optional = .{
+            .element_type = semantic_analyzer.pointer_to_any_type,
+        },
+    })).index;
+    semantic_analyzer.optional_any = (try module.types.append(compilation.base_allocator, .{
+        .optional = .{
+            .element_type = Type.any,
+        },
+    })).index;
 
     semantic_analyzer.unreachable_index = (try module.values.append(compilation.base_allocator, .@"unreachable")).index;
+    semantic_analyzer.pointer_null_index = (try module.values.append(compilation.base_allocator, .pointer_null_literal)).index;
+    semantic_analyzer.optional_null_index = (try module.values.append(compilation.base_allocator, .optional_null_literal)).index;
 
     const value_allocation = try module.values.append(compilation.base_allocator, .{
         .unresolved = .{

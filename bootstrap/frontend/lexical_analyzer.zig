@@ -46,6 +46,10 @@ pub const Token = packed struct(u64) {
         fixed_keyword_enum = 0x17,
         fixed_keyword_union = 0x18,
         fixed_keyword_extern = 0x19,
+        fixed_keyword_null = 0x1a,
+        fixed_keyword_align = 0x1b,
+        fixed_keyword_export = 0x1c,
+        fixed_keyword_cc = 0x1d,
         keyword_unsigned_integer = 0x1f,
         keyword_signed_integer = 0x20,
         bang = '!', // 0x21
@@ -106,6 +110,10 @@ pub const FixedKeyword = enum {
     @"enum",
     @"union",
     @"extern",
+    null,
+    @"align",
+    @"export",
+    cc,
 };
 
 pub const Result = struct {
@@ -169,10 +177,6 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else .identifier;
             },
-            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/', '&', '|', '^' => |operator| blk: {
-                index += 1;
-                break :blk @enumFromInt(operator);
-            },
             '0'...'9' => blk: {
                 // Detect other non-decimal literals
                 if (text[index] == '0' and index + 1 < text.len) {
@@ -216,6 +220,10 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
             ' ', '\n', '\r', '\t' => {
                 index += 1;
                 continue;
+            },
+            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/', '&', '|', '^', '?', '$' => |operator| blk: {
+                index += 1;
+                break :blk @enumFromInt(operator);
             },
             else => |ch| {
                 std.debug.panic("NI: '{c}'", .{ch});

@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) !void {
     const debug_command = switch (@import("builtin").os.tag) {
         .linux => blk: {
             const result = b.addSystemCommand(&.{"gf2"});
+            result.addArgs(&.{ "-ex", "set disassembly-flavor intel" });
             result.addArg("-ex=r");
             result.addArgs(&.{ "-ex", "up" });
             result.addArg("--args");

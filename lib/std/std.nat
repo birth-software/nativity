@@ -6,3 +6,83 @@ const builtin = #import("builtin.nat");
 const os = #import("os.nat");
 const print = os.print;
 const start = #import("start.nat");
+
+const assert = fn(ok: bool) void {
+    if (!ok) {
+        unreachable;
+    }
+}
+
+const Allocator = struct {
+    handler: &const fn(allocator: &Allocator, old_ptr: ?[&]const u8, old_size: usize, new_size: usize, alignment: u16) ?[&]u8,
+
+    const allocate = fn (allocator: &Allocator, size: usize, alignment: u16) ?[]u8 {
+        if (allocator.handler(allocator, old_ptr = null, old_size = 0, new_size = size, alignment)) |result| {
+            return result[0..size];
+        } else {
+            return null;
+        }
+    }
+
+    const free = fn (allocator: &Allocator, bytes_ptr: [&]const u8, bytes_len: usize) bool {
+        if (allocator.handler(allocator, old_ptr = bytes_ptr, old_size = bytes_len, new_size = 0, alignment = 0)) |_| {
+            return true;
+        } else {
+            return false;
+        }
+    }
+};
+
+const PageAllocator = struct{
+    allocator: Allocator = .{
+        .handler = handler.&,
+    },
+
+    const allocate = fn (a: &PageAllocator, size: usize, alignment: u16) ?[]u8 {
+        const result = a.allocator.allocate(size, alignment);
+        return result;
+    }
+
+    const free = fn (a: &PageAllocator, bytes_ptr: [&]const u8, bytes_len: usize) bool {
+        const result = a.allocator.free(bytes_ptr, bytes_len);
+        return result;
+    }
+
+    const handler = fn (allocator: &Allocator, maybe_old_ptr: ?[&]const u8, old_size: usize, new_size: usize, alignment: u16) ?[&]u8{
+        var maybe_new_ptr: ?[&]u8 = null;
+        if (new_size > 0) {
+            const general_protection_flags = os.ProtectionFlags{
+                .read = true,
+                    .write = true,
+                    .execute = false,
+            };
+            const general_map_flags = os.MapFlags{
+                .reserve = true,
+                    .commit = true,
+            };
+
+            maybe_new_ptr = os.allocate_virtual_memory(address = null, length = new_size, general_protection_flags, general_map_flags);
+        }
+
+        if (maybe_old_ptr) |old_ptr| {
+            if (maybe_new_ptr) |new_ptr| {
+                unreachable;
+            }
+
+            const result = os.free_virtual_memory(bytes_ptr = old_ptr, bytes_len = old_size);
+            if (result) {
+                return #cast(old_ptr);
+            } else {
+                return null;
+            }
+        } else {
+            return maybe_new_ptr;
+        }
+    }
+
+    const getAllocator = fn(page_allocator: &PageAllocator) &Allocator {
+        return page_allocator.allocator.&;
+    }
+};
+
+var page_allocator = PageAllocator{};

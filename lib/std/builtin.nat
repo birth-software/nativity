@@ -14,3 +14,8 @@ const Abi = enum{
     gnu,
     msvc,
 };
+
+const CallingConvention = enum{
+    system_v,
+    naked,
+};
