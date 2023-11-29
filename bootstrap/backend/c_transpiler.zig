@@ -130,7 +130,25 @@ pub const TranslationUnit = struct {
             .value_index = declaration.init_value,
             .type_index = declaration.type,
         });
-        try list.append(allocator, ';');
+    }
+
+    fn writeAssignment(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, assignment_index: Compilation.Assignment.Index, function_return_type: Compilation.Type.Index, indentation: usize) !void {
+        const assignment = module.assignments.get(assignment_index);
+        const left_type = module.values.get(assignment.source).getType(module);
+        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+            .value_index = assignment.destination,
+            .type_index = left_type,
+        });
+        try list.append(allocator, ' ');
+        switch (assignment.operation) {
+            .none => {},
+            .add => try list.append(allocator, '+'),
+        }
+        try list.appendSlice(allocator, "= ");
+        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+            .value_index = assignment.source,
+            .type_index = Compilation.Type.Index.invalid,
+        });
     }
 
     fn writeBlock(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, block_index: Compilation.Block.Index, function_return_type: Compilation.Type.Index, old_indentation: usize) !void {
@@ -146,19 +164,10 @@ pub const TranslationUnit = struct {
             switch (statement.*) {
                 .declaration => |declaration_index| {
                     try unit.writeDeclaration(module, list, allocator, declaration_index, indentation);
+                    try list.append(allocator, ';');
                 },
                 .assign => |assignment_index| {
-                    const assignment = module.assignments.get(assignment_index);
-                    const left_type = module.values.get(assignment.source).getType(module);
-                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                        .value_index = assignment.destination,
-                        .type_index = left_type,
-                    });
-                    try list.appendSlice(allocator, " = ");
-                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                        .value_index = assignment.source,
-                        .type_index = Compilation.Type.Index.invalid,
-                    });
+                    try unit.writeAssignment(module, list, allocator, assignment_index, function_return_type, indentation);
                     try list.append(allocator, ';');
                 },
                 .@"return" => |return_index| {
@@ -245,6 +254,38 @@ pub const TranslationUnit = struct {
                     try unit.writeAssembly(module, list, allocator, assembly_block_index, indentation);
                     try list.append(allocator, ';');
                 },
+                .loop => |loop_index| {
+                    const loop = module.loops.get(loop_index);
+                    try list.appendSlice(allocator, "for (");
+                    if (!loop.pre.invalid) {
+                        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                            .value_index = loop.pre,
+                            .type_index = Compilation.Type.Index.invalid,
+                        });
+                    }
+                    try list.appendSlice(allocator, "; ");
+
+                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                        .value_index = loop.condition,
+                        .type_index = Compilation.Type.boolean,
+                    });
+
+                    try list.appendSlice(allocator, "; ");
+
+                    if (!loop.post.invalid) {
+                        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                            .value_index = loop.post,
+                            .type_index = Compilation.Type.Index.invalid,
+                        });
+                    }
+
+                    try list.appendSlice(allocator, ") ");
+
+                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                        .value_index = loop.body,
+                        .type_index = Compilation.Type.Index.invalid,
+                    });
+                },
                 else => |t| @panic(@tagName(t)),
             }
 
@@ -326,6 +367,7 @@ pub const TranslationUnit = struct {
                     => {},
                     .@"struct" => {
                         try unit.writeDeclaration(module, &unit.global_variable_declarations, allocator, declaration_index, 0);
+                        try unit.global_variable_declarations.append(allocator, ';');
                         try unit.global_variable_declarations.appendNTimes(allocator, '\n', 2);
                     },
                     else => |t| @panic(@tagName(t)),
@@ -798,6 +840,12 @@ pub const TranslationUnit = struct {
         _ = type_index;
         const value = module.values.get(value_index);
         switch (value.*) {
+            .declaration => |declaration_index| {
+                try unit.writeDeclaration(module, list, allocator, declaration_index, indentation);
+            },
+            .assign => |assignment_index| {
+                try unit.writeAssignment(module, list, allocator, assignment_index, function_return_type, indentation);
+            },
             .integer => |integer| {
                 try list.writer(allocator).print("{}", .{integer.value});
             },
@@ -996,7 +1044,7 @@ pub const TranslationUnit = struct {
                         });
                         try list.appendSlice(allocator, ") + (");
                         try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
-                            .value_index = slice.start,
+                            .value_index = slice.range.start,
                             .type_index = Compilation.Type.Index.invalid,
                         });
                         try list.appendSlice(allocator, "),\n");
@@ -1009,16 +1057,16 @@ pub const TranslationUnit = struct {
 
                 switch (sliceable_type.*) {
                     .pointer => {
-                        switch (slice.end.invalid) {
+                        switch (slice.range.end.invalid) {
                             false => {
                                 try list.append(allocator, '(');
                                 try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
-                                    .value_index = slice.end,
+                                    .value_index = slice.range.end,
                                     .type_index = Compilation.Type.Index.invalid,
                                 });
                                 try list.appendSlice(allocator, ") - (");
                                 try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
-                                    .value_index = slice.start,
+                                    .value_index = slice.range.start,
                                     .type_index = Compilation.Type.Index.invalid,
                                 });
                                 try list.appendSlice(allocator, ")\n");

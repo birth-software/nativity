@@ -165,7 +165,7 @@ pub const Node = struct {
         if_payload,
         discard,
         slice,
-        slice_range,
+        range,
         negation,
         anonymous_container_literal,
         const_single_pointer_type,
@@ -175,6 +175,9 @@ pub const Node = struct {
         assembly_register,
         assembly_statement,
         assembly_block,
+        for_condition,
+        for_loop,
+        add_assign,
     };
 };
 
@@ -429,7 +432,7 @@ const Analyzer = struct {
         return result;
     }
 
-    fn block(analyzer: *Analyzer, options: Options) !Node.Index {
+    fn block(analyzer: *Analyzer, options: Options) anyerror!Node.Index {
         const left_brace = try analyzer.expectToken(.left_brace);
         var list = ArrayList(Node.Index){};
 
@@ -448,6 +451,7 @@ const Analyzer = struct {
                 .fixed_keyword_while => try analyzer.whileExpression(options),
                 .fixed_keyword_switch => try analyzer.switchExpression(),
                 .fixed_keyword_if => try analyzer.ifExpression(),
+                .fixed_keyword_for => try analyzer.forExpression(),
                 .fixed_keyword_const, .fixed_keyword_var => try analyzer.symbolDeclaration(),
                 .hash => blk: {
                     const intrinsic = try analyzer.compilerIntrinsic();
@@ -620,23 +624,117 @@ const Analyzer = struct {
         }
     }
 
-    fn assignExpression(analyzer: *Analyzer) !Node.Index {
-        const expr = try analyzer.expression();
-        const expression_id: Node.Id = switch (analyzer.tokens[analyzer.token_i].id) {
-            .semicolon, .comma => return expr,
-            .equal => .assign,
+    fn forExpression(analyzer: *Analyzer) !Node.Index {
+        const token = try analyzer.expectToken(.fixed_keyword_for);
+        _ = try analyzer.expectToken(.left_parenthesis);
+        const expression_token = analyzer.token_i;
+        const first = try analyzer.expression();
+        const ForExpression = struct {
+            node_index: Node.Index,
+            expected_payload_count: usize,
+        };
+        const for_expression = switch (analyzer.tokens[analyzer.token_i].id) {
+            .period => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                .period => blk: {
+                    analyzer.token_i += 2;
+                    const second = try analyzer.expression();
+
+                    break :blk ForExpression{
+                        .node_index = try analyzer.addNode(.{
+                            .id = .range,
+                            .token = expression_token,
+                            .left = first,
+                            .right = second,
+                        }),
+                        .expected_payload_count = 1,
+                    };
+                },
+                else => |t| @panic(@tagName(t)),
+            },
             else => |t| @panic(@tagName(t)),
         };
 
+        _ = try analyzer.expectToken(.right_parenthesis);
+
+        _ = try analyzer.expectToken(.vertical_bar);
+
+        var payload_nodes = ArrayList(Node.Index){};
+        while (analyzer.tokens[analyzer.token_i].id != .vertical_bar) {
+            const payload_identifier = try analyzer.expectToken(.identifier);
+
+            switch (analyzer.tokens[analyzer.token_i].id) {
+                .vertical_bar => {},
+                .comma => analyzer.token_i += 1,
+                else => |t| @panic(@tagName(t)),
+            }
+
+            try payload_nodes.append(analyzer.allocator, try analyzer.addNode(.{
+                .id = .identifier,
+                .token = payload_identifier,
+                .left = Node.Index.invalid,
+                .right = Node.Index.invalid,
+            }));
+        }
+
+        _ = try analyzer.expectToken(.vertical_bar);
+
+        if (payload_nodes.items.len != for_expression.expected_payload_count) {
+            unreachable;
+        }
+
+        const for_condition_node = try analyzer.addNode(.{
+            .id = .for_condition,
+            .token = token,
+            .left = for_expression.node_index,
+            .right = try analyzer.nodeList(payload_nodes),
+        });
+
+        const for_content_node = switch (analyzer.tokens[analyzer.token_i].id) {
+            .left_brace => try analyzer.block(.{
+                .is_comptime = false,
+            }),
+            else => blk: {
+                const for_content_expression = try analyzer.expression();
+                _ = try analyzer.expectToken(.semicolon);
+                break :blk for_content_expression;
+            },
+        };
+
+        const for_node = try analyzer.addNode(.{
+            .id = .for_loop,
+            .token = token,
+            .left = for_condition_node,
+            .right = for_content_node,
+        });
+
+        return for_node;
+    }
+
+    fn assignExpression(analyzer: *Analyzer) !Node.Index {
+        const left = try analyzer.expression();
+        const expression_token = analyzer.token_i;
+        const expression_id: Node.Id = switch (analyzer.tokens[expression_token].id) {
+            .semicolon, .comma => return left,
+            .equal => .assign,
+            .plus => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                .equal => blk: {
+                    analyzer.token_i += 1;
+                    break :blk .add_assign;
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+
+        analyzer.token_i += 1;
+
+        const right = try analyzer.expression();
+
         const node = Node{
             .id = expression_id,
-            .token = blk: {
-                const token_i = analyzer.token_i;
-                analyzer.token_i += 1;
-                break :blk token_i;
-            },
-            .left = expr,
-            .right = try analyzer.expression(),
+            .token = expression_token,
+            .left = left,
+            .right = right,
         };
 
         logln(.parser, .assign, "assign:\nleft: {}.\nright: {}", .{ node.left, node.right });
@@ -837,6 +935,7 @@ const Analyzer = struct {
                 .comma,
                 .fixed_keyword_const,
                 .fixed_keyword_var,
+                .fixed_keyword_return,
                 .identifier,
                 => break,
                 else => blk: {
@@ -854,7 +953,7 @@ const Analyzer = struct {
                             },
                             .plus => switch (next_token_id) {
                                 .plus => unreachable,
-                                .equal => unreachable,
+                                .equal => break,
                                 else => .add,
                             },
                             .minus => switch (next_token_id) {
@@ -1470,7 +1569,7 @@ const Analyzer = struct {
                         .token = token,
                         .left = left,
                         .right = try analyzer.addNode(.{
-                            .id = .slice_range,
+                            .id = .range,
                             .token = token,
                             .left = index_expression,
                             .right = range_end_expression,
