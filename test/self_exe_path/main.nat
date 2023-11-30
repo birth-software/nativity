@@ -1,0 +1,13 @@
+const std = #import("std");
+const print = std.print;
+
+const main = fn () s32 {
+    if (std.os.currentExecutablePath(allocator = std.page_allocator.allocator.&)) |result| {
+        print(bytes_ptr = result.ptr, bytes_len = result.len);
+        print(bytes_ptr = "\n", bytes_len = 1);
+        return 0;
+    } else {
+        print(bytes_ptr = "Failed\n", bytes_len = 7);
+        return 1;
+    }
+}

@@ -33,12 +33,26 @@ const get_map_flags = fn(flags: std.os.MapFlags) MapFlags{
     };
 }
 
-const mmap = fn(address: ?[&]u8, length: usize, protection_flags: ProtectionFlags, map_flags: MapFlags, fd: s32, offset: u64) ?[&]u8 {
+const mmap = fn(address: ?[&]u8, length: usize, protection_flags: ProtectionFlags, map_flags: MapFlags, fd: s32, offset: u64) usize {
     const result = #syscall(9, #cast(address), length, #cast(protection_flags), #cast(map_flags), fd, offset);
-    return #cast(result);
+    return result;
 }
 
-const munmap = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
-    const result: ssize = #syscall(11, #cast(bytes_ptr), bytes_len);
-    return result == 0;
+const munmap = fn(bytes_ptr: [&]const u8, bytes_len: usize) usize {
+    const result = #syscall(11, #cast(bytes_ptr), bytes_len);
+    return result;
+}
+
+const readlink = fn(file_path: [&:0]const u8, bytes_ptr: [&]u8, bytes_len: usize) usize {
+    const result = #syscall(89, #cast(file_path), #cast(bytes_ptr), bytes_len);
+    return result;
+}
+
+const unwrapSyscall = fn(syscall_result: usize) ?usize {
+    const signed_syscall_result: ssize = #cast(syscall_result);
+    if (signed_syscall_result >= 0) {
+        return syscall_result;
+    } else {
+        return null;
+    }
 }

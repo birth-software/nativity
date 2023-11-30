@@ -1,3 +1,5 @@
+const std = #import("std");
+const Allocator = std.Allocator;
 const current = #import("builtin").os;
 const system = switch (current) {
     .linux => linux,
@@ -56,21 +58,70 @@ const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_prote
     const protection_flags = system.get_protection_flags(flags = general_protection_flags);
     const map_flags = system.get_map_flags(flags = general_map_flags);
 
-    const result = switch (#import("builtin").os) {
-        .linux => linux.mmap(address, length, protection_flags, map_flags, fd = -1, offset = 0),
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.mmap(address, length, protection_flags, map_flags, fd = -1, offset = 0))) |result_address| {
+                const pointer: [&]u8 = #cast(result_address);
+                return pointer;
+            } else {
+                return null;
+            }
+        },
         else => #error("OS not supported"),
-    };
+    }
 
-    return result;
 }
 
 const free_virtual_memory = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
-    const result = switch (#import("builtin").os) {
-        .linux => linux.munmap(bytes_ptr, bytes_len),
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.munmap(bytes_ptr, bytes_len))) |result| {
+                return result == 0;
+            } else {
+                return false;
+            }
+        },
         else => #error("OS not supported"),
-    };
+    }
+}
 
-    return result;
+const readlink = fn(file_path: [&:0]const u8, buffer: []u8) ?[]u8 {
+    switch (current) {
+        .linux => {
+            const raw_result = linux.readlink(file_path, bytes_ptr = buffer.ptr, bytes_len = buffer.len);
+
+            if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
+                const bytes = buffer[0..byte_count];
+                return bytes;
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const max_path_byte_count = switch (current) {
+    .linux => 0x1000,
+    else => #error("OS not supported"),
+};
+
+const currentExecutablePath = fn(allocator: &Allocator) ?[]u8 {
+    switch (current) {
+        .linux => {
+            var buffer: [max_path_byte_count]u8 = undefined;
+            if (readlink(file_path = "/proc/self/exe", buffer = buffer.&)) |bytes| {
+                if (allocator.duplicateBytes(bytes)) |result| {
+                    return result;
+                } else {
+                    return null;
+                }
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
 }
 
 const linux = #import("os/linux.nat");

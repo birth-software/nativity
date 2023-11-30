@@ -31,6 +31,15 @@ const Allocator = struct {
             return false;
         }
     }
+
+    const duplicateBytes = fn (allocator: &Allocator, bytes: []const u8) ?[]u8 {
+        if (allocator.allocate(size = bytes.len, alignment = 0)) |result| {
+            copyBytes(destination = result, source = bytes);
+            return result;
+        } else {
+            return null;
+        }
+    }
 };
 
 const PageAllocator = struct{
@@ -84,5 +93,12 @@ const PageAllocator = struct{
         return page_allocator.allocator.&;
     }
 };
+
+const copyBytes = fn(destination: []u8, source: []const u8) void {
+    assert(ok = destination.len == source.len);
+    for (0..destination.len) |i| {
+        destination[i] = source[i];
+    }
+}
 
 var page_allocator = PageAllocator{};

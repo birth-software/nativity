@@ -115,6 +115,7 @@ pub const Node = struct {
         unsigned_integer_type,
         signed_integer_type,
         slice_type,
+        array_type,
         argument_declaration,
         compiler_intrinsic,
         ssize_type,
@@ -123,6 +124,8 @@ pub const Node = struct {
         call,
         const_many_pointer_type,
         many_pointer_type,
+        zero_terminated_const_many_pointer_type,
+        zero_terminated_many_pointer_type,
         enum_literal,
         address_of,
         pointer_dereference,
@@ -178,6 +181,7 @@ pub const Node = struct {
         for_condition,
         for_loop,
         add_assign,
+        undefined,
     };
 };
 
@@ -446,13 +450,18 @@ const Analyzer = struct {
                     },
                     else => try analyzer.assignExpressionStatement(),
                 },
-                .fixed_keyword_unreachable, .fixed_keyword_return => try analyzer.assignExpressionStatement(),
+                .fixed_keyword_unreachable,
+                .fixed_keyword_return,
+                .discard,
+                => try analyzer.assignExpressionStatement(),
 
                 .fixed_keyword_while => try analyzer.whileExpression(options),
                 .fixed_keyword_switch => try analyzer.switchExpression(),
                 .fixed_keyword_if => try analyzer.ifExpression(),
                 .fixed_keyword_for => try analyzer.forExpression(),
-                .fixed_keyword_const, .fixed_keyword_var => try analyzer.symbolDeclaration(),
+                .fixed_keyword_const,
+                .fixed_keyword_var,
+                => try analyzer.symbolDeclaration(),
                 .hash => blk: {
                     const intrinsic = try analyzer.compilerIntrinsic();
                     _ = try analyzer.expectToken(.semicolon);
@@ -581,9 +590,13 @@ const Analyzer = struct {
 
         const payload = if (analyzer.tokens[analyzer.token_i].id == .vertical_bar) blk: {
             analyzer.token_i += 1;
-            const payload_identifier_node = try analyzer.identifierNode();
+            const payload_node = switch (analyzer.tokens[analyzer.token_i].id) {
+                .identifier => try analyzer.identifierNode(),
+                .discard => try analyzer.discardNode(),
+                else => unreachable,
+            };
             _ = try analyzer.expectToken(.vertical_bar);
-            break :blk payload_identifier_node;
+            break :blk payload_node;
         } else Node.Index.invalid;
 
         const if_block = try analyzer.block(.{ .is_comptime = false });
@@ -660,7 +673,14 @@ const Analyzer = struct {
 
         var payload_nodes = ArrayList(Node.Index){};
         while (analyzer.tokens[analyzer.token_i].id != .vertical_bar) {
-            const payload_identifier = try analyzer.expectToken(.identifier);
+            const payload_token = analyzer.token_i;
+            const id: Node.Id = switch (analyzer.tokens[payload_token].id) {
+                .identifier => .identifier,
+                .discard => .discard,
+                else => |t| @panic(@tagName(t)),
+            };
+
+            analyzer.token_i += 1;
 
             switch (analyzer.tokens[analyzer.token_i].id) {
                 .vertical_bar => {},
@@ -669,8 +689,8 @@ const Analyzer = struct {
             }
 
             try payload_nodes.append(analyzer.allocator, try analyzer.addNode(.{
-                .id = .identifier,
-                .token = payload_identifier,
+                .id = id,
+                .token = payload_token,
                 .left = Node.Index.invalid,
                 .right = Node.Index.invalid,
             }));
@@ -1105,6 +1125,8 @@ const Analyzer = struct {
             .keyword_unsigned_integer,
             .fixed_keyword_enum,
             .fixed_keyword_struct,
+            .discard,
+            .fixed_keyword_undefined,
             => try analyzer.curlySuffixExpression(),
             .fixed_keyword_fn => try analyzer.function(),
             .fixed_keyword_return => try analyzer.addNode(.{
@@ -1168,6 +1190,7 @@ const Analyzer = struct {
 
     fn pointerTypeExpression(analyzer: *Analyzer, arguments: struct {
         many: bool,
+        zero_terminated: bool = false,
         start_token: Token.Index,
     }) !Node.Index {
         const is_const = analyzer.tokens[analyzer.token_i].id == .fixed_keyword_const;
@@ -1181,12 +1204,21 @@ const Analyzer = struct {
         }
 
         const pointer_element_type = try analyzer.typeExpression();
+        if (!arguments.many) {
+            assert(!arguments.zero_terminated);
+        }
 
         return try analyzer.addNode(.{
             .id = switch (arguments.many) {
-                true => switch (is_const) {
-                    true => .const_many_pointer_type,
-                    false => .many_pointer_type,
+                true => switch (arguments.zero_terminated) {
+                    true => switch (is_const) {
+                        true => .const_many_pointer_type,
+                        false => .many_pointer_type,
+                    },
+                    false => switch (is_const) {
+                        true => .zero_terminated_const_many_pointer_type,
+                        false => .zero_terminated_many_pointer_type,
+                    },
                 },
                 false => switch (is_const) {
                     true => .const_single_pointer_type,
@@ -1224,11 +1256,19 @@ const Analyzer = struct {
                 .ampersand => blk: {
                     // many item pointer
                     analyzer.token_i += 2;
+                    var zero_terminated: bool = false;
+                    if (analyzer.tokens[analyzer.token_i].id == .colon) {
+                        // TODO: parse properly
+                        analyzer.token_i += 1;
+                        zero_terminated = true;
+                        analyzer.token_i += 1;
+                    }
                     _ = try analyzer.expectToken(.right_bracket);
 
                     break :blk try analyzer.pointerTypeExpression(.{
                         .many = true,
                         .start_token = first,
+                        .zero_terminated = zero_terminated,
                     });
                 },
                 .asterisk => @panic("Meant to use ampersand?"),
@@ -1236,25 +1276,38 @@ const Analyzer = struct {
                     const left_bracket = analyzer.token_i;
                     analyzer.token_i += 1;
                     // TODO: compute length
-                    const length_expression = false;
+                    const length_expression = switch (analyzer.tokens[analyzer.token_i].id) {
+                        .identifier => try analyzer.expression(),
+                        .right_bracket => Node.Index.invalid,
+                        else => |t| @panic(@tagName(t)),
+                    };
+
                     _ = try analyzer.expectToken(.right_bracket);
 
-                    // Slice
-                    if (!length_expression) {
-                        // TODO: modifiers
-                        const is_const = analyzer.tokens[analyzer.token_i].id == .fixed_keyword_const;
-                        analyzer.token_i += @intFromBool(is_const);
+                    switch (length_expression.invalid) {
+                        true => analyzer.token_i += @intFromBool(analyzer.tokens[analyzer.token_i].id == .fixed_keyword_const),
+                        false => {},
+                    }
 
-                        const slice_type = try analyzer.typeExpression();
-                        return try analyzer.addNode(.{
+                    const type_expression = try analyzer.typeExpression();
+                    const node = switch (length_expression.invalid) {
+                        false => Node{
+                            .id = .array_type,
+                            .token = left_bracket,
+                            .left = length_expression,
+                            .right = type_expression,
+                        },
+                        true => Node{ // TODO: modifiers
                             .id = .slice_type,
                             .token = left_bracket,
                             .left = Node.Index.invalid,
-                            .right = slice_type,
-                        });
-                    } else {
-                        unreachable;
-                    }
+                            .right = type_expression,
+                        },
+                    };
+
+                    const node_index = try analyzer.addNode(node);
+
+                    return node_index;
                 },
             },
         };
@@ -1359,6 +1412,18 @@ const Analyzer = struct {
         return try analyzer.nodeList(list);
     }
 
+    fn discardNode(analyzer: *Analyzer) !Node.Index {
+        const token = analyzer.token_i;
+        assert(analyzer.tokens[token].id == .discard);
+        analyzer.token_i += 1;
+        return try analyzer.addNode(.{
+            .id = .discard,
+            .token = token,
+            .left = Node.Index.invalid,
+            .right = Node.Index.invalid,
+        });
+    }
+
     fn primaryTypeExpression(analyzer: *Analyzer) anyerror!Node.Index {
         const token_i = analyzer.token_i;
         const token = analyzer.tokens[token_i];
@@ -1387,8 +1452,18 @@ const Analyzer = struct {
                 });
             },
             .identifier => analyzer.identifierNode(),
+            .discard => try analyzer.discardNode(),
             .fixed_keyword_noreturn => analyzer.noReturn(),
             .fixed_keyword_true, .fixed_keyword_false => analyzer.boolLiteral(),
+            .fixed_keyword_undefined => analyzer.addNode(.{
+                .id = .undefined,
+                .token = blk: {
+                    analyzer.token_i += 1;
+                    break :blk token_i;
+                },
+                .left = Node.Index.invalid,
+                .right = Node.Index.invalid,
+            }),
             .fixed_keyword_null => analyzer.addNode(.{
                 .id = .null_literal,
                 .token = blk: {
@@ -1653,10 +1728,8 @@ const Analyzer = struct {
         const identifier_token = analyzer.token_i;
         assert(analyzer.tokens[identifier_token].id == .identifier);
         analyzer.token_i += 1;
-        const identifier = analyzer.bytes(identifier_token);
-        // logln("identifier: {s}", .{identifier});
         return try analyzer.addNode(.{
-            .id = if (equal(u8, identifier, "_")) .discard else .identifier,
+            .id = .identifier,
             .token = identifier_token,
             .left = Node.Index.invalid,
             .right = Node.Index.invalid,
