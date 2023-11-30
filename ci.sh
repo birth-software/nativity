@@ -19,51 +19,65 @@ failed_tests=()
 for dir in $test_directory
 do
     MY_TESTNAME=${dir##*/}
-    zig build run -Duse_llvm=$nativity_use_llvm -- $dir/main.nat -log ir
+    zig build run -Duse_llvm=$nativity_use_llvm -- $dir/main.nat
+
     if [[ "$?" == "0" ]]; then
         passed_compilation_count=$(($passed_compilation_count + 1))
         if [[ "$OSTYPE" == "linux-gnu"* ]]; then
             nat/$MY_TESTNAME
+
             if [[ "$?" == "0" ]]; then
                 passed_test_count=$(($passed_test_count + 1))
-                result="PASSED"
+                result="\e[32mPASSED\e[0m"
             else
                 failed_test_count=$(($failed_test_count + 1))
-                result="FAILED"
+                result="\e[31mFAILED\e[0m"
                 failed_tests+=("$test_i. $MY_TESTNAME")
             fi
-            echo "[$test_i/$total_test_count] [$result] $MY_TESTNAME"
+
             ran_test_count=$(($ran_test_count + 1))
+        else
+            result="\e[31mOS NOT SUPPORTED\e[0m"
         fi
     else
         failed_compilation_count=$(($failed_compilation_count + 1))
-        echo "$MY_TESTNAME failed to compile"
+        result="\e[31mCOMPILATION FAILURE\e[0m"
         failed_compilations+=("$test_i. $MY_TESTNAME")
     fi
+
+    echo -e "[$test_i/$total_test_count] [$result] $MY_TESTNAME"
+
     test_i=$(($test_i + 1))
 done
 
-echo "Ran $total_test_count compilations ($passed_compilation_count succeeded, $failed_compilation_count failed)."
-echo "Ran $ran_test_count tests ($passed_test_count passed, $failed_test_count failed)."
+printf "\n"
+echo "[SUMMARY]"
+echo "========="
+echo -e "Ran $total_test_count compilations (\e[32m$passed_compilation_count\e[0m succeeded, \e[31m$failed_compilation_count\e[0m failed)."
+echo -e "Ran $ran_test_count tests (\e[32m $passed_test_count\e[0m passed, \e[31m$failed_test_count\e[0m failed)."
 
 if [[ "$failed_compilation_count" != "0" ]]; then
-    echo "Failed compilations:"
+    printf $"\nFailed compilations:\n"
     for failed_compilation in "${failed_compilations[@]}"
     do
-        echo "$failed_compilation"
+        echo -e "\e[31m$failed_compilation\e[0m"
     done
 fi
 
+
 if [[ "$failed_test_count" != "0" ]]; then
+    echo $'\n'
     echo "Failed tests:"
     for failed_test in "${failed_tests[@]}"
     do
-        echo "$failed_test"
+        echo -e "\e[31m$failed_test\e[0m"
     done
 fi
 
 if [[ "$failed_test_count" == "0" && "$failed_compilation_count" == "0" ]]; then
+    echo -e "\e[32mSUCCESS!\e[0m"
     true
 else
+    echo -e "\e[31mFAILURE!\e[0m"
     false
 fi

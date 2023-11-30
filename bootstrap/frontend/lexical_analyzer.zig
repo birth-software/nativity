@@ -21,38 +21,12 @@ pub const Token = packed struct(u64) {
 
     pub const Id = enum(u8) {
         eof = 0x00,
-        identifier = 0x01,
-        number_literal = 0x02,
-        string_literal = 0x03,
-        fixed_keyword_function = 0x04,
-        fixed_keyword_const = 0x05,
-        fixed_keyword_var = 0x06,
-        fixed_keyword_void = 0x07,
-        fixed_keyword_noreturn = 0x08,
-        fixed_keyword_comptime = 0x09,
-        fixed_keyword_while = 0x0a,
-        fixed_keyword_bool = 0x0b,
-        fixed_keyword_true = 0x0c,
-        fixed_keyword_false = 0x0d,
-        fixed_keyword_fn = 0x0e,
-        fixed_keyword_unreachable = 0x0f,
-        fixed_keyword_return = 0x10,
-        fixed_keyword_ssize = 0x11,
-        fixed_keyword_usize = 0x12,
-        fixed_keyword_switch = 0x13,
-        fixed_keyword_if = 0x14,
-        fixed_keyword_else = 0x15,
-        fixed_keyword_struct = 0x16,
-        fixed_keyword_enum = 0x17,
-        fixed_keyword_union = 0x18,
-        fixed_keyword_extern = 0x19,
-        fixed_keyword_null = 0x1a,
-        fixed_keyword_align = 0x1b,
-        fixed_keyword_export = 0x1c,
-        fixed_keyword_cc = 0x1d,
-        fixed_keyword_for = 0x1e,
-        keyword_unsigned_integer = 0x1f,
-        keyword_signed_integer = 0x20,
+        keyword_unsigned_integer = 0x01,
+        keyword_signed_integer = 0x02,
+        identifier = 0x03,
+        number_literal = 0x04,
+        string_literal = 0x05,
+        discard = 0x06,
         bang = '!', // 0x21
         hash = '#', // 0x23
         dollar_sign = '$', // 0x24
@@ -83,6 +57,34 @@ pub const Token = packed struct(u64) {
         vertical_bar = '|', // 0x7c
         right_brace = '}', // 0x7d
         tilde = '~', // 0x7e
+        fixed_keyword_function = 0x7f,
+        fixed_keyword_const = 0x80,
+        fixed_keyword_var = 0x81,
+        fixed_keyword_void = 0x82,
+        fixed_keyword_noreturn = 0x83,
+        fixed_keyword_comptime = 0x84,
+        fixed_keyword_while = 0x85,
+        fixed_keyword_bool = 0x86,
+        fixed_keyword_true = 0x87,
+        fixed_keyword_false = 0x88,
+        fixed_keyword_fn = 0x89,
+        fixed_keyword_unreachable = 0x8a,
+        fixed_keyword_return = 0x8b,
+        fixed_keyword_ssize = 0x8c,
+        fixed_keyword_usize = 0x8d,
+        fixed_keyword_switch = 0x8e,
+        fixed_keyword_if = 0x8f,
+        fixed_keyword_else = 0x90,
+        fixed_keyword_struct = 0x91,
+        fixed_keyword_enum = 0x92,
+        fixed_keyword_union = 0x93,
+        fixed_keyword_extern = 0x94,
+        fixed_keyword_null = 0x95,
+        fixed_keyword_align = 0x96,
+        fixed_keyword_export = 0x97,
+        fixed_keyword_cc = 0x98,
+        fixed_keyword_for = 0x99,
+        fixed_keyword_undefined = 0x9a,
     };
 
     pub const Index = u32;
@@ -116,6 +118,7 @@ pub const FixedKeyword = enum {
     @"export",
     cc,
     @"for",
+    undefined,
 };
 
 pub const Result = struct {
@@ -175,9 +178,10 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                     }
                 }
 
-                break :blk if (enumFromString(FixedKeyword, text[start_index..][0 .. index - start_index])) |fixed_keyword| switch (fixed_keyword) {
+                const string = text[start_index..][0 .. index - start_index];
+                break :blk if (enumFromString(FixedKeyword, string)) |fixed_keyword| switch (fixed_keyword) {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
-                } else .identifier;
+                } else if (equal(u8, string, "_")) .discard else .identifier;
             },
             '0'...'9' => blk: {
                 // Detect other non-decimal literals

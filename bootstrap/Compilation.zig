@@ -21,9 +21,7 @@ const Token = lexical_analyzer.Token;
 const syntactic_analyzer = @import("frontend/syntactic_analyzer.zig");
 const Node = syntactic_analyzer.Node;
 const semantic_analyzer = @import("frontend/semantic_analyzer.zig");
-const intermediate_representation = @import("backend/intermediate_representation.zig");
 const c_transpiler = @import("backend/c_transpiler.zig");
-const emit = @import("backend/emit.zig");
 
 test {
     _ = lexical_analyzer;
@@ -55,7 +53,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
     var target_triplet: []const u8 = "x86_64-linux-gnu";
-    var transpile_to_c: ?bool = null;
+    var should_transpile_to_c: ?bool = null;
 
     var i: usize = 0;
     while (i < arguments.len) : (i += 1) {
@@ -121,9 +119,9 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
 
                 const arg = arguments[i];
                 if (std.mem.eql(u8, arg, "true")) {
-                    transpile_to_c = true;
+                    should_transpile_to_c = true;
                 } else if (std.mem.eql(u8, arg, "false")) {
-                    transpile_to_c = false;
+                    should_transpile_to_c = false;
                 } else {
                     unreachable;
                 }
@@ -135,23 +133,33 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
         }
     }
 
-    const main_package_path = maybe_main_package_path orelse return error.main_package_path_not_specified;
+    const cross_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = target_triplet });
+    const target = cross_target.toTarget();
+    const transpile_to_c = should_transpile_to_c orelse true;
+
+    var is_build = false;
+    const main_package_path = if (maybe_main_package_path) |path| path else blk: {
+        const build_file = "build.nat";
+        const file = std.fs.cwd().openFile(build_file, .{}) catch return error.main_package_path_not_specified;
+        file.close();
+        is_build = true;
+
+        break :blk build_file;
+    };
 
     const executable_path = maybe_executable_path orelse blk: {
-        const executable_name = std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
+        const executable_name = if (is_build) "build" else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
         assert(executable_name.len > 0);
         const result = try std.mem.concat(allocator, u8, &.{ "nat/", executable_name });
         break :blk result;
     };
 
-    const cross_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = target_triplet });
-    const target = cross_target.toTarget();
-
     return .{
         .main_package_path = main_package_path,
         .executable_path = executable_path,
         .target = target,
-        .transpile_to_c = transpile_to_c orelse true,
+        .transpile_to_c = transpile_to_c,
+        .is_build = is_build,
     };
 }
 
@@ -183,7 +191,6 @@ pub const Struct = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const ContainerField = struct {
@@ -194,7 +201,6 @@ pub const ContainerField = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const ContainerInitialization = struct {
@@ -203,7 +209,6 @@ pub const ContainerInitialization = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Enum = struct {
@@ -218,21 +223,10 @@ pub const Enum = struct {
 
         pub const List = BlockList(@This());
         pub const Index = Enum.Field.List.Index;
-        pub const Allocation = Enum.Field.List.Allocation;
     };
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
-};
-
-pub const Array = struct {
-    element_type: Type.Index,
-    element_count: u32,
-
-    pub const List = BlockList(@This());
-    pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Type = union(enum) {
@@ -255,6 +249,11 @@ pub const Type = union(enum) {
         element_type: Type.Index,
     };
 
+    pub const Array = struct {
+        element_type: Type.Index,
+        element_count: u32,
+    };
+
     pub const Slice = struct {
         element_type: Type.Index,
         @"const": bool,
@@ -268,7 +267,6 @@ pub const Type = union(enum) {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 
     pub const Integer = struct {
         bit_count: u16,
@@ -434,7 +432,6 @@ pub const Scope = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const ScopeType = enum(u1) {
@@ -463,7 +460,6 @@ pub const Declaration = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Function = struct {
@@ -500,7 +496,6 @@ pub const Function = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Block = struct {
@@ -508,7 +503,6 @@ pub const Block = struct {
     reaches_end: bool,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Loop = struct {
@@ -520,7 +514,6 @@ pub const Loop = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 const Unresolved = struct {
@@ -539,7 +532,6 @@ pub const Assignment = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Syscall = struct {
@@ -553,7 +545,6 @@ pub const Syscall = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Call = struct {
@@ -563,21 +554,18 @@ pub const Call = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const ArgumentList = struct {
     array: ArrayList(Value.Index),
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Return = struct {
     value: Value.Index,
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Cast = struct {
@@ -586,7 +574,6 @@ pub const Cast = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const BinaryOperation = struct {
@@ -597,7 +584,6 @@ pub const BinaryOperation = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 
     pub const Id = enum {
         add,
@@ -624,7 +610,6 @@ pub const UnaryOperation = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 
     pub const Id = enum {
         boolean_not,
@@ -647,7 +632,6 @@ pub const Branch = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const FieldAccess = struct {
@@ -656,7 +640,6 @@ pub const FieldAccess = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Range = struct {
@@ -676,7 +659,6 @@ pub const Slice = struct {
 
         pub const List = BlockList(@This());
         pub const Index = Slice.Access.List.Index;
-        pub const Allocation = Slice.Access.List.Allocation;
     };
 
     pub const Field = enum {
@@ -686,7 +668,6 @@ pub const Slice = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const IndexedAccess = struct {
@@ -695,7 +676,6 @@ pub const IndexedAccess = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const OptionalCheck = struct {
@@ -703,7 +683,6 @@ pub const OptionalCheck = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const OptionalUnwrap = struct {
@@ -711,7 +690,6 @@ pub const OptionalUnwrap = struct {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 };
 
 pub const Assembly = struct {
@@ -721,7 +699,6 @@ pub const Assembly = struct {
 
         pub const List = BlockList(@This());
         pub const Index = List.Index;
-        pub const Allocation = List.Allocation;
     };
 
     pub const Operand = union(enum) {
@@ -735,7 +712,6 @@ pub const Assembly = struct {
 
         pub const List = BlockList(@This());
         pub const Index = List.Index;
-        pub const Allocation = List.Allocation;
     };
 
     pub const x86_64 = struct {
@@ -750,6 +726,11 @@ pub const Assembly = struct {
             rsp,
         };
     };
+};
+
+pub const StringLiteral = struct {
+    hash: u32,
+    type: Type.Index,
 };
 
 pub const Value = union(enum) {
@@ -774,7 +755,7 @@ pub const Value = union(enum) {
     argument_list: ArgumentList,
     @"return": Return.Index,
     argument: Declaration.Index,
-    string_literal: u32,
+    string_literal: StringLiteral,
     enum_field: Enum.Field.Index,
     extern_function: Function.Prototype.Index,
     sign_extend: Cast.Index,
@@ -789,12 +770,13 @@ pub const Value = union(enum) {
     indexed_access: IndexedAccess.Index,
     optional_check: OptionalCheck.Index,
     optional_unwrap: OptionalUnwrap.Index,
+    optional_cast: Cast.Index,
+    array_coerce_to_slice: Cast.Index,
     slice: Slice.Index,
     assembly_block: Assembly.Block.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
-    pub const Allocation = List.Allocation;
 
     pub const Integer = struct {
         value: u64,
@@ -809,7 +791,7 @@ pub const Value = union(enum) {
     pub fn isComptime(value: *Value, module: *Module) bool {
         return switch (value.*) {
             .integer => |integer| integer.type.eq(Type.comptime_int),
-            .declaration_reference => |declaration_reference| module.declarations.get(declaration_reference.value).mutability == .@"const" and isComptime(module.values.get(module.declarations.get(declaration_reference.value).init_value), module),
+            .declaration_reference => |declaration_reference| module.values.declarations.get(declaration_reference.value).mutability == .@"const" and isComptime(module.values.array.get(module.values.declarations.get(declaration_reference.value).init_value), module),
             .bool, .void, .undefined, .function_definition, .type, .enum_field => true,
             // TODO:
             .call,
@@ -820,6 +802,7 @@ pub const Value = union(enum) {
             .optional_unwrap,
             .pointer_null_literal,
             .indexed_access,
+            .slice,
             => false,
             // TODO:
             else => |t| @panic(@tagName(t)),
@@ -828,31 +811,34 @@ pub const Value = union(enum) {
 
     pub fn getType(value: Value, module: *Module) Type.Index {
         const result = switch (value) {
-            .call => |call_index| module.calls.get(call_index).type,
+            .call => |call_index| module.values.calls.get(call_index).type,
             .integer => |integer| integer.type,
             .declaration_reference => |declaration_reference| declaration_reference.type,
-            .string_literal => |string_literal_hash| module.string_literal_types.get(@intCast(module.getStringLiteral(string_literal_hash).?.len)).?,
+            .string_literal => |string_literal| string_literal.type,
             .type => Type.type,
-            .enum_field => |enum_field_index| module.enums.get(module.enum_fields.get(enum_field_index).parent).type,
-            .function_definition => |function_index| module.function_definitions.get(function_index).prototype,
-            .function_declaration => |function_index| module.function_declarations.get(function_index).prototype,
-            .binary_operation => |binary_operation| module.binary_operations.get(binary_operation).type,
+            .enum_field => |enum_field_index| module.types.enums.get(module.types.enum_fields.get(enum_field_index).parent).type,
+            .function_definition => |function_index| module.types.function_definitions.get(function_index).prototype,
+            .function_declaration => |function_index| module.types.function_declarations.get(function_index).prototype,
+            .binary_operation => |binary_operation| module.values.binary_operations.get(binary_operation).type,
             .bool => Type.boolean,
             .declaration => Type.void,
-            .container_initialization => |container_initialization| module.container_initializations.get(container_initialization).type,
+            .container_initialization => |container_initialization| module.values.container_initializations.get(container_initialization).type,
             .syscall => Type.usize,
-            .unary_operation => |unary_operation_index| module.unary_operations.get(unary_operation_index).type,
+            .unary_operation => |unary_operation_index| module.values.unary_operations.get(unary_operation_index).type,
             .pointer_null_literal => semantic_analyzer.optional_pointer_to_any_type,
             .optional_null_literal => semantic_analyzer.optional_any,
-            .field_access => |field_access_index| module.container_fields.get(module.field_accesses.get(field_access_index).field).type,
-            .cast => |cast_index| module.casts.get(cast_index).type,
-            .slice => |slice_index| module.slices.get(slice_index).type,
-            .slice_access => |slice_access_index| module.slice_accesses.get(slice_access_index).type,
+            .field_access => |field_access_index| module.types.container_fields.get(module.values.field_accesses.get(field_access_index).field).type,
+            .cast,
+            .optional_cast,
+            .array_coerce_to_slice,
+            => |cast_index| module.values.casts.get(cast_index).type,
+            .slice => |slice_index| module.values.slices.get(slice_index).type,
+            .slice_access => |slice_access_index| module.values.slice_accesses.get(slice_access_index).type,
             .optional_check => Type.boolean,
             .indexed_access => |indexed_access_index| blk: {
-                const indexed_expression = module.values.get(module.indexed_accesses.get(indexed_access_index).indexed_expression);
+                const indexed_expression = module.values.array.get(module.values.indexed_accesses.get(indexed_access_index).indexed_expression);
                 const indexed_expression_type_index = indexed_expression.getType(module);
-                const indexed_expression_type = module.types.get(indexed_expression_type_index);
+                const indexed_expression_type = module.types.array.get(indexed_expression_type_index);
                 break :blk switch (indexed_expression_type.*) {
                     .slice => |slice| slice.element_type,
                     else => |t| @panic(@tagName(t)),
@@ -872,51 +858,55 @@ pub const Value = union(enum) {
 };
 
 pub const Module = struct {
+    values: struct {
+        field_accesses: BlockList(FieldAccess) = .{},
+        array: BlockList(Value) = .{},
+        declarations: BlockList(Declaration) = .{},
+        scopes: BlockList(Scope) = .{},
+        files: BlockList(File) = .{},
+        blocks: BlockList(Block) = .{},
+        loops: BlockList(Loop) = .{},
+        assignments: BlockList(Assignment) = .{},
+        syscalls: BlockList(Syscall) = .{},
+        calls: BlockList(Call) = .{},
+        argument_lists: BlockList(ArgumentList) = .{},
+        returns: BlockList(Return) = .{},
+        container_initializations: BlockList(ContainerInitialization) = .{},
+        casts: BlockList(Cast) = .{},
+        branches: BlockList(Branch) = .{},
+        binary_operations: BlockList(BinaryOperation) = .{},
+        unary_operations: BlockList(UnaryOperation) = .{},
+        slices: BlockList(Slice) = .{},
+        slice_accesses: BlockList(Slice.Access) = .{},
+        indexed_accesses: BlockList(IndexedAccess) = .{},
+        optional_checks: BlockList(OptionalCheck) = .{},
+        optional_unwraps: BlockList(OptionalUnwrap) = .{},
+        assembly_blocks: BlockList(Assembly.Block) = .{},
+        assembly_instructions: BlockList(Assembly.Instruction) = .{},
+    } = .{},
+    types: struct {
+        array: BlockList(Type) = .{},
+        enums: BlockList(Enum) = .{},
+        arrays: BlockList(Type.Array) = .{},
+        structs: BlockList(Struct) = .{},
+        container_fields: BlockList(ContainerField) = .{},
+        enum_fields: BlockList(Enum.Field) = .{},
+        function_definitions: BlockList(Function) = .{},
+        function_declarations: BlockList(Function) = .{},
+        function_prototypes: BlockList(Function.Prototype) = .{},
+    } = .{},
+    map: struct {
+        functions: data_structures.AutoArrayHashMap(Function.Index, Declaration.Index) = .{},
+        strings: StringKeyMap([]const u8) = .{},
+        imports: StringArrayHashMap(File.Index) = .{},
+        types: data_structures.AutoArrayHashMap(Type.Index, Declaration.Index) = .{},
+        non_primitive_integer: data_structures.AutoArrayHashMap(Type.Integer, Type.Index) = .{},
+        slices: data_structures.AutoArrayHashMap(Type.Slice, Type.Index) = .{},
+        pointers: data_structures.AutoArrayHashMap(Type.Pointer, Type.Index) = .{},
+        optionals: data_structures.AutoArrayHashMap(Type.Index, Type.Index) = .{},
+        arrays: data_structures.AutoArrayHashMap(Type.Array, Type.Index) = .{},
+    } = .{},
     main_package: *Package,
-    import_table: StringArrayHashMap(*File) = .{},
-    string_table: StringKeyMap([]const u8) = .{},
-    declarations: BlockList(Declaration) = .{},
-    structs: BlockList(Struct) = .{},
-    scopes: BlockList(Scope) = .{},
-    files: BlockList(File) = .{},
-    values: BlockList(Value) = .{},
-    function_definitions: BlockList(Function) = .{},
-    function_declarations: BlockList(Function) = .{},
-    function_prototypes: BlockList(Function.Prototype) = .{},
-    types: BlockList(Type) = .{},
-    blocks: BlockList(Block) = .{},
-    loops: BlockList(Loop) = .{},
-    assignments: BlockList(Assignment) = .{},
-    syscalls: BlockList(Syscall) = .{},
-    calls: BlockList(Call) = .{},
-    argument_lists: BlockList(ArgumentList) = .{},
-    returns: BlockList(Return) = .{},
-    string_literals: StringKeyMap([]const u8) = .{},
-    enums: BlockList(Enum) = .{},
-    enum_fields: BlockList(Enum.Field) = .{},
-    container_fields: BlockList(ContainerField) = .{},
-    container_initializations: BlockList(ContainerInitialization) = .{},
-    function_map: data_structures.AutoArrayHashMap(Function.Index, Declaration.Index) = .{},
-    type_map: data_structures.AutoArrayHashMap(Type.Index, Declaration.Index) = .{},
-    arrays: BlockList(Array) = .{},
-    casts: BlockList(Cast) = .{},
-    binary_operations: BlockList(BinaryOperation) = .{},
-    unary_operations: BlockList(UnaryOperation) = .{},
-    branches: BlockList(Branch) = .{},
-    field_accesses: BlockList(FieldAccess) = .{},
-    slices: BlockList(Slice) = .{},
-    slice_accesses: BlockList(Slice.Access) = .{},
-    indexed_accesses: BlockList(IndexedAccess) = .{},
-    optional_checks: BlockList(OptionalCheck) = .{},
-    optional_unwraps: BlockList(OptionalUnwrap) = .{},
-    assembly_blocks: BlockList(Assembly.Block) = .{},
-    assembly_instructions: BlockList(Assembly.Instruction) = .{},
-    non_primitive_integer_types: data_structures.AutoArrayHashMap(Type.Integer, Type.Index) = .{},
-    string_literal_types: data_structures.AutoArrayHashMap(u32, Type.Index) = .{},
-    slice_types: data_structures.AutoArrayHashMap(Type.Slice, Type.Index) = .{},
-    pointer_types: data_structures.AutoArrayHashMap(Type.Pointer, Type.Index) = .{},
-    optional_types: data_structures.AutoArrayHashMap(Type.Index, Type.Index) = .{},
-    array_types: data_structures.AutoArrayHashMap(Array, Type.Index) = .{},
     entry_point: Function.Index = Function.Index.invalid,
     descriptor: Descriptor,
 
@@ -925,10 +915,10 @@ pub const Module = struct {
         executable_path: []const u8,
         target: std.Target,
         transpile_to_c: bool,
+        is_build: bool,
     };
 
     const ImportFileResult = struct {
-        ptr: *File,
         index: File.Index,
         is_new: bool,
     };
@@ -952,7 +942,7 @@ pub const Module = struct {
             return module.importPackage(allocator, module.main_package);
         }
 
-        const current_file = module.files.get(current_file_index);
+        const current_file = module.values.files.get(current_file_index);
         if (current_file.package.dependencies.get(import_name)) |package| {
             return module.importPackage(allocator, package);
         }
@@ -968,7 +958,7 @@ pub const Module = struct {
         const package = current_file.package;
         const import_file = try module.getFile(allocator, full_path, file_relative_path, package);
 
-        try import_file.ptr.addFileReference(allocator, current_file);
+        try module.values.files.get(import_file.index).file_references.append(allocator, current_file);
 
         const result = ImportPackageResult{
             .file = import_file,
@@ -979,33 +969,22 @@ pub const Module = struct {
     }
 
     fn getFile(module: *Module, allocator: Allocator, full_path: []const u8, relative_path: []const u8, package: *Package) !ImportFileResult {
-        const path_lookup = try module.import_table.getOrPut(allocator, full_path);
-        const file, const index = switch (path_lookup.found_existing) {
-            true => blk: {
-                const result = path_lookup.value_ptr.*;
-                const index = module.files.indexOf(result);
-                break :blk .{
-                    result,
-                    index,
-                };
-            },
+        const path_lookup = try module.map.imports.getOrPut(allocator, full_path);
+        const index = switch (path_lookup.found_existing) {
+            true => path_lookup.value_ptr.*,
             false => blk: {
-                const file_allocation = try module.files.append(allocator, File{
+                const file_index = try module.values.files.append(allocator, File{
                     .relative_path = relative_path,
                     .package = package,
                 });
-                logln(.compilation, .new_file, "Adding file #{}: {s}\n", .{ file_allocation.index.uniqueInteger(), full_path });
-                path_lookup.value_ptr.* = file_allocation.ptr;
+                logln(.compilation, .new_file, "Adding file #{}: {s}\n", .{ file_index.uniqueInteger(), full_path });
+                path_lookup.value_ptr.* = file_index;
                 // break :blk file;
-                break :blk .{
-                    file_allocation.ptr,
-                    file_allocation.index,
-                };
+                break :blk file_index;
             },
         };
 
         return .{
-            .ptr = file,
             .index = index,
             .is_new = !path_lookup.found_existing,
         };
@@ -1015,7 +994,8 @@ pub const Module = struct {
         const full_path = try std.fs.path.resolve(allocator, &.{ package.directory.path, package.source_path });
         logln(.compilation, .import, "Import full path: {s}\n", .{full_path});
         const import_file = try module.getFile(allocator, full_path, package.source_path, package);
-        try import_file.ptr.addPackageReference(allocator, package);
+        const file = module.values.files.get(import_file.index);
+        try file.addPackageReference(allocator, package);
 
         return .{
             .file = import_file,
@@ -1024,7 +1004,7 @@ pub const Module = struct {
     }
 
     pub fn generateAbstractSyntaxTreeForFile(module: *Module, allocator: Allocator, file_index: File.Index) !void {
-        const file = module.files.get(file_index);
+        const file = module.values.files.get(file_index);
         const source_file = file.package.directory.handle.openFile(file.relative_path, .{}) catch |err| {
             std.debug.panic("Can't find file {s} in directory {s} for error {s}", .{ file.relative_path, file.package.directory.path, @errorName(err) });
         };
@@ -1048,54 +1028,17 @@ pub const Module = struct {
         return map.getValue(key);
     }
 
-    fn addString(map: *StringKeyMap([]const u8), allocator: Allocator, string: []const u8) !u32 {
+    pub fn addString(map: *StringKeyMap([]const u8), allocator: Allocator, string: []const u8) !u32 {
         const lookup_result = try map.getOrPut(allocator, string, string);
         return lookup_result.key;
     }
 
     pub fn getName(module: *Module, key: u32) ?[]const u8 {
-        return getString(&module.string_table, key);
+        return getString(&module.map.strings, key);
     }
 
     pub fn addName(module: *Module, allocator: Allocator, name: []const u8) !u32 {
-        return addString(&module.string_table, allocator, name);
-    }
-
-    pub fn getStringLiteral(module: *Module, key: u32) ?[]const u8 {
-        return getString(&module.string_literals, key);
-    }
-
-    pub fn addStringLiteral(module: *Module, allocator: Allocator, string_literal: []const u8) !u32 {
-        const result = addString(&module.string_literals, allocator, string_literal);
-
-        const len: u32 = @intCast(string_literal.len);
-        // try analyzer.module.
-        const string_literal_type_gop = try module.string_literal_types.getOrPut(allocator, len);
-        if (!string_literal_type_gop.found_existing) {
-            const array = Array{
-                .element_type = Type.u8,
-                .element_count = len,
-            };
-            const array_type_gop = try module.array_types.getOrPut(allocator, array);
-            if (!array_type_gop.found_existing) {
-                const array_type_allocation = try module.types.append(allocator, .{
-                    .array = array,
-                });
-                array_type_gop.value_ptr.* = array_type_allocation.index;
-            }
-
-            const array_type_index = array_type_gop.value_ptr.*;
-            const pointer_type_allocation = try module.types.append(allocator, .{
-                .pointer = .{
-                    .@"const" = true,
-                    .many = true,
-                    .element_type = array_type_index,
-                },
-            });
-            string_literal_type_gop.value_ptr.* = pointer_type_allocation.index;
-        }
-
-        return result;
+        return addString(&module.map.strings, allocator, name);
     }
 };
 
@@ -1135,7 +1078,10 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     module.* = Module{
         .main_package = blk: {
             const result = try compilation.base_allocator.create(Package);
-            const main_package_absolute_directory_path = try compilation.pathFromCwd(std.fs.path.dirname(descriptor.main_package_path).?);
+            const main_package_absolute_directory_path = b: {
+                const relative_path = if (std.fs.path.dirname(descriptor.main_package_path)) |dirname| dirname else ".";
+                break :b try compilation.pathFromCwd(relative_path);
+            };
             result.* = .{
                 .directory = .{
                     .handle = try std.fs.openDirAbsolute(main_package_absolute_directory_path, .{}),
@@ -1188,12 +1134,12 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     _ = try module.importPackage(compilation.base_allocator, module.main_package.dependencies.get("std").?);
 
-    for (module.import_table.values()) |import| {
-        try module.generateAbstractSyntaxTreeForFile(compilation.base_allocator, module.files.indexOf(import));
+    for (module.map.imports.values()) |import| {
+        try module.generateAbstractSyntaxTreeForFile(compilation.base_allocator, import);
     }
 
     inline for (@typeInfo(FixedTypeKeyword).Enum.fields) |enum_field| {
-        _ = try module.types.append(compilation.base_allocator, switch (@field(FixedTypeKeyword, enum_field.name)) {
+        _ = try module.types.array.append(compilation.base_allocator, switch (@field(FixedTypeKeyword, enum_field.name)) {
             .usize => @unionInit(Type, "integer", .{
                 .bit_count = 64,
                 .signedness = .unsigned,
@@ -1207,7 +1153,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     }
 
     inline for (@typeInfo(HardwareUnsignedIntegerType).Enum.fields) |enum_field| {
-        _ = try module.types.append(compilation.base_allocator, .{
+        _ = try module.types.array.append(compilation.base_allocator, .{
             .integer = .{
                 .signedness = .unsigned,
                 .bit_count = switch (@field(HardwareUnsignedIntegerType, enum_field.name)) {
@@ -1221,7 +1167,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     }
 
     inline for (@typeInfo(HardwareSignedIntegerType).Enum.fields) |enum_field| {
-        _ = try module.types.append(compilation.base_allocator, .{
+        _ = try module.types.array.append(compilation.base_allocator, .{
             .integer = .{
                 .signedness = .signed,
                 .bit_count = switch (@field(HardwareSignedIntegerType, enum_field.name)) {
@@ -1235,37 +1181,38 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     }
 
     for (extra_common_type_data) |type_data| {
-        _ = try module.types.append(compilation.base_allocator, type_data);
+        _ = try module.types.array.append(compilation.base_allocator, type_data);
     }
-    semantic_analyzer.pointer_to_any_type = (try module.types.append(compilation.base_allocator, .{
+    semantic_analyzer.pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
         .pointer = .{
             .element_type = Type.any,
             .many = false,
             .@"const" = true,
         },
-    })).index;
-    semantic_analyzer.optional_pointer_to_any_type = (try module.types.append(compilation.base_allocator, .{
+    });
+    semantic_analyzer.optional_pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
         .optional = .{
             .element_type = semantic_analyzer.pointer_to_any_type,
         },
-    })).index;
-    semantic_analyzer.optional_any = (try module.types.append(compilation.base_allocator, .{
+    });
+    semantic_analyzer.optional_any = try module.types.array.append(compilation.base_allocator, .{
         .optional = .{
             .element_type = Type.any,
         },
-    })).index;
+    });
 
-    semantic_analyzer.unreachable_index = (try module.values.append(compilation.base_allocator, .@"unreachable")).index;
-    semantic_analyzer.pointer_null_index = (try module.values.append(compilation.base_allocator, .pointer_null_literal)).index;
-    semantic_analyzer.optional_null_index = (try module.values.append(compilation.base_allocator, .optional_null_literal)).index;
+    semantic_analyzer.unreachable_index = try module.values.array.append(compilation.base_allocator, .@"unreachable");
+    semantic_analyzer.pointer_null_index = try module.values.array.append(compilation.base_allocator, .pointer_null_literal);
+    semantic_analyzer.optional_null_index = try module.values.array.append(compilation.base_allocator, .optional_null_literal);
+    semantic_analyzer.undefined_index = try module.values.array.append(compilation.base_allocator, .undefined);
 
-    const value_allocation = try module.values.append(compilation.base_allocator, .{
+    const value_index = try module.values.array.append(compilation.base_allocator, .{
         .unresolved = .{
             .node_index = .{ .value = 0 },
         },
     });
 
-    try semantic_analyzer.initialize(compilation, module, packages[0], value_allocation.ptr);
+    try semantic_analyzer.initialize(compilation, module, packages[0], value_index);
 
     if (descriptor.transpile_to_c) {
         try c_transpiler.initialize(compilation, module, descriptor);
@@ -1355,8 +1302,6 @@ const LoggerScope = enum {
     lexer,
     parser,
     sema,
-    ir,
-    codegen,
     c,
 };
 
@@ -1374,8 +1319,6 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
             .lexer => lexical_analyzer,
             .parser => syntactic_analyzer,
             .sema => semantic_analyzer,
-            .ir => intermediate_representation,
-            .codegen => emit,
             .c => c_transpiler,
         };
     }

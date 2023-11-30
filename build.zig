@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const optimization = b.standardOptimizeOption(.{});
     const use_llvm = b.option(bool, "use_llvm", "Use LLVM as the backend for generate the compiler binary") orelse true;
     const exe = b.addExecutable(.{
-        .name = "nativity",
+        .name = "nat",
         .root_source_file = .{ .path = "bootstrap/main.zig" },
         .target = target,
         .optimize = optimization,
@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const run_command = b.addRunArtifact(exe);
+    run_command.step.dependOn(b.getInstallStep());
 
     const debug_command = switch (@import("builtin").os.tag) {
         .linux => blk: {

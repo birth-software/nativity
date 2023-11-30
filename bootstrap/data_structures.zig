@@ -110,11 +110,6 @@ pub fn BlockList(comptime T: type) type {
             }
         };
 
-        pub const Allocation = struct {
-            ptr: *T,
-            index: Index,
-        };
-
         pub fn iterator(list: *List) Iterator {
             return .{
                 .index = Index{
@@ -130,26 +125,22 @@ pub fn BlockList(comptime T: type) type {
             return &list.blocks.items[index.block].items[index.element];
         }
 
-        pub fn append(list: *List, allocator: Allocator, element: T) !Allocation {
+        pub fn append(list: *List, allocator: Allocator, element: T) !Index {
             const result = try list.addOne(allocator);
-            result.ptr.* = element;
+            list.get(result).* = element;
             return result;
         }
 
-        pub fn addOne(list: *List, allocator: Allocator) !Allocation {
+        pub fn addOne(list: *List, allocator: Allocator) !Index {
             try list.ensureCapacity(allocator, list.len + 1);
             const max_allocation = list.blocks.items.len * item_count;
             const result = switch (list.len < max_allocation) {
                 true => blk: {
                     const block = &list.blocks.items[list.first_block];
                     if (block.allocateIndex()) |element_index| {
-                        const ptr = &block.items[element_index];
-                        break :blk Allocation{
-                            .ptr = ptr,
-                            .index = .{
-                                .element = element_index,
-                                .block = @intCast(list.first_block),
-                            },
+                        break :blk Index{
+                            .element = element_index,
+                            .block = @intCast(list.first_block),
                         };
                     } else |_| {
                         @panic("TODO");
@@ -161,13 +152,12 @@ pub fn BlockList(comptime T: type) type {
                     new_block.* = .{};
                     const element_index = new_block.allocateIndex() catch unreachable;
                     const ptr = &new_block.items[element_index];
+                    _ = ptr;
                     list.first_block += @intFromBool(block_index != 0);
-                    break :blk Allocation{
-                        .ptr = ptr,
-                        .index = .{
-                            .element = element_index,
-                            .block = @intCast(block_index),
-                        },
+
+                    break :blk Index{
+                        .element = element_index,
+                        .block = @intCast(block_index),
                     };
                 },
             };
