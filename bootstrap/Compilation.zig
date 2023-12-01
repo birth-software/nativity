@@ -1102,7 +1102,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     }{
         .{
             .name = "std",
-            .directory_path = try compilation.pathFromCwd(std_package_dir),
+            .directory_path = try compilation.pathFromCompiler(std_package_dir),
         },
         .{
             .name = "builtin",
@@ -1216,6 +1216,17 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     if (descriptor.transpile_to_c) {
         try c_transpiler.initialize(compilation, module, descriptor);
+        if (descriptor.is_build) {
+            var process = std.ChildProcess.init(&.{descriptor.executable_path}, compilation.base_allocator);
+            switch (try process.spawnAndWait()) {
+                .Exited => |exit_code| {
+                    if (exit_code != 0) {
+                        @panic("Exited with errors");
+                    }
+                },
+                else => @panic("Unexpected program state"),
+            }
+        }
     } else {
         unreachable;
         // const ir = try intermediate_representation.initialize(compilation, module);
