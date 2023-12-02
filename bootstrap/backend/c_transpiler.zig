@@ -35,6 +35,7 @@ pub const TranslationUnit = struct {
     function_set: AutoArrayHashMap(Compilation.Function.Index, []const u8) = .{},
     slice_type_set: AutoArrayHashMap(Compilation.Type.Index, []const u8) = .{},
     array_type_set: AutoArrayHashMap(Compilation.Type.Index, []const u8) = .{},
+    enum_type_set: AutoArrayHashMap(Compilation.Type.Index, []const u8) = .{},
     declaration_set: AutoArrayHashMap(Compilation.Declaration.Index, []const u8) = .{},
 
     const SyscallBitset = std.StaticBitSet(6);
@@ -76,15 +77,15 @@ pub const TranslationUnit = struct {
     }
 
     fn writeFunctionDefinition(unit: *TranslationUnit, module: *Module, allocator: Allocator, function_definition_index: Compilation.Function.Index) ![]const u8 {
-        const gop = try unit.function_set.getOrPut(allocator, function_definition_index);
-
-        if (!gop.found_existing) {
+        if (unit.function_set.getIndex(function_definition_index)) |index| {
+            return unit.function_set.values()[index];
+        } else {
             const function_definition = module.types.function_definitions.get(function_definition_index);
             const function_prototype_type = function_definition.prototype;
             const function_prototype = module.types.function_prototypes.get(module.types.array.get(function_prototype_type).function);
 
             const function_name = try unit.writeFunctionHeader(module, &unit.function_declarations, allocator, function_definition_index);
-            gop.value_ptr.* = function_name;
+            try unit.function_set.putNoClobber(allocator, function_definition_index, function_name);
 
             _ = try unit.writeFunctionHeader(module, &unit.function_definitions, allocator, function_definition_index);
             try unit.function_declarations.appendSlice(allocator, ";\n\n");
@@ -92,9 +93,9 @@ pub const TranslationUnit = struct {
             try unit.function_definitions.append(allocator, ' ');
             try unit.writeBlock(module, &unit.function_definitions, allocator, function_definition.body, function_prototype.return_type, 0);
             try unit.function_definitions.append(allocator, '\n');
-        }
 
-        return gop.value_ptr.*;
+            return function_name;
+        }
     }
 
     fn writeDeclaration(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, declaration_index: Compilation.Declaration.Index, indentation: usize) !void {
@@ -324,9 +325,9 @@ pub const TranslationUnit = struct {
     }
 
     fn renderDeclarationName(unit: *TranslationUnit, module: *Module, allocator: Allocator, declaration_index: Compilation.Declaration.Index, mangle: bool) anyerror![]const u8 {
-        const gop = try unit.declaration_set.getOrPut(allocator, declaration_index);
-
-        if (!gop.found_existing) {
+        if (unit.declaration_set.getIndex(declaration_index)) |index| {
+            return unit.declaration_set.values()[index];
+        } else {
             const declaration = module.values.declarations.get(declaration_index);
             const base_declaration_name = module.getName(declaration.name).?;
             var list = ArrayList(u8){};
@@ -362,7 +363,7 @@ pub const TranslationUnit = struct {
 
             // TODO: enhance declaration name rendering with file scope name
             // const scope =  declaration.scope;
-            gop.value_ptr.* = list.items;
+            try unit.declaration_set.putNoClobber(allocator, declaration_index, list.items);
 
             switch (declaration.scope_type) {
                 .global => switch (module.types.array.get(declaration.type).*) {
@@ -378,12 +379,9 @@ pub const TranslationUnit = struct {
                 },
                 .local => {},
             }
+
+            return list.items;
         }
-
-        assert(@intFromPtr(gop.value_ptr.*.ptr) != 0xaaaa_aaaa_aaaa_aaaa);
-        logln(.c, .g, "Rendering name: {s}", .{gop.value_ptr.*});
-
-        return gop.value_ptr.*;
     }
 
     fn writeFunctionPrototype(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, function_prototype_index: Compilation.Function.Prototype.Index, name: []const u8) !void {
@@ -472,6 +470,10 @@ pub const TranslationUnit = struct {
                 try list.appendSlice(allocator, name);
             },
             .any => @panic("Internal compiler error: 'any' made it to the backend"),
+            .@"enum" => {
+                const name = try unit.cacheEnumType(module, allocator, type_index);
+                try list.appendSlice(allocator, name);
+            },
             else => |t| @panic(@tagName(t)),
         }
     }
@@ -557,56 +559,110 @@ pub const TranslationUnit = struct {
     fn cacheStructType(unit: *TranslationUnit, module: *Module, allocator: Allocator, type_index: Compilation.Type.Index) ![]const u8 {
         const t = module.types.array.get(type_index);
         assert(t.* == .@"struct");
-        const gop = try unit.struct_type_set.getOrPut(allocator, type_index);
-
-        if (!gop.found_existing) {
-            const struct_type = module.types.structs.get(t.@"struct");
+        if (unit.struct_type_set.getIndex(type_index)) |index| {
+            return unit.struct_type_set.values()[index];
+        } else {
             const type_name = try unit.renderTypeName(module, allocator, type_index);
-            gop.value_ptr.* = type_name;
-            // Forward declare the struct
-            {
-                try unit.type_forward_declarations.appendSlice(allocator, "typedef struct ");
-                try unit.type_forward_declarations.appendSlice(allocator, type_name);
-                try unit.type_forward_declarations.append(allocator, ' ');
-                try unit.type_forward_declarations.appendSlice(allocator, type_name);
-                try unit.type_forward_declarations.appendSlice(allocator, ";\n");
-            }
+            logln(.c, .g, "Registering struct {s}: #{}", .{ type_name, type_index.uniqueInteger() });
+            try unit.struct_type_set.putNoClobber(allocator, type_index, type_name);
 
+            try unit.forwardDeclareContainerType(allocator, .@"struct", type_name);
+
+            const struct_type = module.types.structs.get(t.@"struct");
             // Actually declare the struct
             {
-                try unit.type_declarations.appendSlice(allocator, "typedef struct ");
-                try unit.type_declarations.appendSlice(allocator, type_name);
-                try unit.type_declarations.appendSlice(allocator, " {\n");
+                var list = ArrayList(u8){};
+                try list.appendSlice(allocator, "typedef struct ");
+                try list.appendSlice(allocator, type_name);
+                try list.appendSlice(allocator, " {\n");
 
                 for (struct_type.fields.items) |struct_field_index| {
-                    try unit.type_declarations.appendNTimes(allocator, ' ', margin_width);
+                    try list.appendNTimes(allocator, ' ', margin_width);
 
                     const struct_field = module.types.container_fields.get(struct_field_index);
                     const struct_field_name = module.getName(struct_field.name).?;
 
                     switch (struct_type.backing_type.invalid) {
                         false => {
-                            try unit.writeType(module, &unit.type_declarations, allocator, struct_type.backing_type);
-                            try unit.type_declarations.append(allocator, ' ');
-                            try unit.type_declarations.appendSlice(allocator, struct_field_name);
-                            try unit.type_declarations.appendSlice(allocator, " : ");
-                            try unit.type_declarations.writer(allocator).print("{}", .{module.types.array.get(struct_field.type).getBitSize()});
+                            try unit.writeType(module, &list, allocator, struct_type.backing_type);
+                            try list.append(allocator, ' ');
+                            try list.appendSlice(allocator, struct_field_name);
+                            try list.appendSlice(allocator, " : ");
+                            try list.writer(allocator).print("{}", .{module.types.array.get(struct_field.type).getBitSize()});
                         },
-                        true => try unit.writeCDeclaration(module, &unit.type_declarations, allocator, struct_field_name, struct_field.type),
+                        true => try unit.writeCDeclaration(module, &list, allocator, struct_field_name, struct_field.type),
                     }
 
-                    try unit.type_declarations.appendSlice(allocator, ";\n");
+                    try list.appendSlice(allocator, ";\n");
                 }
 
-                try unit.type_declarations.appendSlice(allocator, "} ");
-                try unit.type_declarations.appendSlice(allocator, type_name);
-                try unit.type_declarations.appendSlice(allocator, ";\n\n");
+                try list.appendSlice(allocator, "} ");
+                try list.appendSlice(allocator, type_name);
+                try list.appendSlice(allocator, ";\n\n");
+
+                try unit.type_declarations.appendSlice(allocator, list.items);
             }
+
+            return type_name;
         }
+    }
 
-        assert(@intFromPtr(gop.value_ptr.*.ptr) != 0xaaaa_aaaa_aaaa_aaaa);
+    fn forwardDeclareContainerType(unit: *TranslationUnit, allocator: Allocator, container_type: Compilation.ContainerType, type_name: []const u8) !void {
+        try unit.type_forward_declarations.appendSlice(allocator, "typedef ");
+        try unit.type_forward_declarations.appendSlice(allocator, @tagName(container_type));
+        try unit.type_forward_declarations.append(allocator, ' ');
+        try unit.type_forward_declarations.appendSlice(allocator, type_name);
+        try unit.type_forward_declarations.append(allocator, ' ');
+        try unit.type_forward_declarations.appendSlice(allocator, type_name);
+        try unit.type_forward_declarations.appendSlice(allocator, ";\n");
+    }
 
-        return gop.value_ptr.*;
+    fn cacheEnumType(unit: *TranslationUnit, module: *Module, allocator: Allocator, type_index: Compilation.Type.Index) ![]const u8 {
+        if (unit.array_type_set.getIndex(type_index)) |index| {
+            return unit.array_type_set.values()[index];
+        } else {
+            const type_name = try unit.renderTypeName(module, allocator, type_index);
+            logln(.c, .g, "Registering enum {s}: #{}", .{ type_name, type_index.uniqueInteger() });
+            try unit.array_type_set.putNoClobber(allocator, type_index, type_name);
+
+            try unit.forwardDeclareContainerType(allocator, .@"enum", type_name);
+
+            const t = module.types.array.get(type_index);
+            const enum_type = module.types.enums.get(t.@"enum");
+
+            var list = ArrayList(u8){};
+
+            try list.appendSlice(allocator, "typedef enum ");
+            try list.appendSlice(allocator, type_name);
+            try list.appendSlice(allocator, " {\n");
+
+            for (enum_type.fields.items) |enum_field_index| {
+                try list.appendNTimes(allocator, ' ', margin_width);
+
+                const enum_field = module.types.enum_fields.get(enum_field_index);
+                const enum_field_name = module.getName(enum_field.name).?;
+                try list.appendSlice(allocator, type_name);
+                try list.append(allocator, '_');
+                try list.appendSlice(allocator, enum_field_name);
+
+                try list.appendSlice(allocator, " = ");
+
+                try unit.writeValue(module, &list, allocator, Compilation.Type.Index.invalid, 0, .{
+                    .value_index = enum_field.value,
+                    .type_index = Compilation.Type.usize,
+                });
+
+                try list.appendSlice(allocator, ",\n");
+            }
+
+            try list.appendSlice(allocator, "} ");
+            try list.appendSlice(allocator, type_name);
+            try list.appendSlice(allocator, ";\n\n");
+
+            try unit.type_declarations.appendSlice(allocator, list.items);
+
+            return type_name;
+        }
     }
 
     fn cacheOptionalType(unit: *TranslationUnit, module: *Module, allocator: Allocator, type_index: Compilation.Type.Index) ![]const u8 {
@@ -614,121 +670,125 @@ pub const TranslationUnit = struct {
         assert(optional_type.* == .optional);
         const optional = optional_type.optional;
 
-        const gop = try unit.optional_type_set.getOrPut(allocator, optional.element_type);
-
-        if (!gop.found_existing) {
-            var type_name = ArrayList(u8){};
+        if (unit.optional_type_set.getIndex(optional.element_type)) |index| {
+            return unit.optional_type_set.values()[index];
+        } else {
             const optional_element_type = module.types.array.get(optional.element_type);
 
             switch (optional_element_type.*) {
                 .pointer => {
+                    var type_name = ArrayList(u8){};
                     try unit.writeType(module, &type_name, allocator, optional.element_type);
+                    try unit.optional_type_set.putNoClobber(allocator, optional.element_type, type_name.items);
+                    return type_name.items;
                 },
                 else => {
+                    var type_name = ArrayList(u8){};
                     try type_name.appendSlice(allocator, "Optional_");
                     try unit.writeType(module, &type_name, allocator, optional.element_type);
+                    logln(.c, .g, "Registering optional {s}: #{}", .{ type_name.items, type_index.uniqueInteger() });
+                    try unit.optional_type_set.putNoClobber(allocator, optional.element_type, type_name.items);
 
-                    if (!gop.found_existing) {
-                        try unit.type_forward_declarations.appendSlice(allocator, "typedef struct ");
-                        try unit.type_forward_declarations.appendSlice(allocator, type_name.items);
-                        try unit.type_forward_declarations.append(allocator, ' ');
-                        try unit.type_forward_declarations.appendSlice(allocator, type_name.items);
-                        try unit.type_forward_declarations.appendSlice(allocator, ";\n");
+                    try unit.forwardDeclareContainerType(allocator, .@"struct", type_name.items);
 
-                        try unit.type_declarations.appendSlice(allocator, "typedef struct ");
-                        try unit.type_declarations.appendSlice(allocator, type_name.items);
-                        try unit.type_declarations.appendSlice(allocator, " {\n");
+                    var list = ArrayList(u8){};
 
-                        try unit.type_declarations.appendNTimes(allocator, ' ', margin_width);
-                        try unit.writeCDeclaration(module, &unit.type_declarations, allocator, "value", optional.element_type);
-                        try unit.type_declarations.appendSlice(allocator, ";\n");
+                    try list.appendSlice(allocator, "typedef struct ");
+                    try list.appendSlice(allocator, type_name.items);
+                    try list.appendSlice(allocator, " {\n");
 
-                        try unit.type_declarations.appendNTimes(allocator, ' ', margin_width);
-                        try unit.writeCDeclaration(module, &unit.type_declarations, allocator, "is_null", Compilation.Type.boolean);
-                        try unit.type_declarations.appendSlice(allocator, ";\n");
+                    try list.appendNTimes(allocator, ' ', margin_width);
+                    try unit.writeCDeclaration(module, &list, allocator, "value", optional.element_type);
+                    try list.appendSlice(allocator, ";\n");
 
-                        try unit.type_declarations.appendSlice(allocator, "} ");
-                        try unit.type_declarations.appendSlice(allocator, type_name.items);
-                        try unit.type_declarations.appendSlice(allocator, ";\n\n");
-                    }
+                    try list.appendNTimes(allocator, ' ', margin_width);
+                    try unit.writeCDeclaration(module, &list, allocator, "is_null", Compilation.Type.boolean);
+                    try list.appendSlice(allocator, ";\n");
+
+                    try list.appendSlice(allocator, "} ");
+                    try list.appendSlice(allocator, type_name.items);
+                    try list.appendSlice(allocator, ";\n\n");
+
+                    try unit.type_declarations.appendSlice(allocator, list.items);
+
+                    return type_name.items;
                 },
             }
-            gop.value_ptr.* = type_name.items;
         }
-
-        return gop.value_ptr.*;
     }
 
     fn cacheSliceType(unit: *TranslationUnit, module: *Module, allocator: Allocator, type_index: Compilation.Type.Index) ![]const u8 {
         const slice = module.types.array.get(type_index).slice;
 
-        const gop = try unit.slice_type_set.getOrPut(allocator, slice.element_type);
-
-        if (!gop.found_existing) {
+        if (unit.slice_type_set.getIndex(slice.element_type)) |index| {
+            return unit.slice_type_set.values()[index];
+        } else {
             var type_name = ArrayList(u8){};
             try type_name.appendSlice(allocator, "Slice_");
             try unit.writeType(module, &type_name, allocator, slice.element_type);
-            gop.value_ptr.* = type_name.items;
+            logln(.c, .g, "Registering slice {s}: #{}", .{ type_name.items, type_index.uniqueInteger() });
+            try unit.slice_type_set.putNoClobber(allocator, slice.element_type, type_name.items);
 
-            try unit.type_forward_declarations.appendSlice(allocator, "typedef struct ");
-            try unit.type_forward_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_forward_declarations.append(allocator, ' ');
-            try unit.type_forward_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_forward_declarations.appendSlice(allocator, ";\n");
+            try unit.forwardDeclareContainerType(allocator, .@"struct", type_name.items);
 
-            try unit.type_declarations.appendSlice(allocator, "typedef struct ");
-            try unit.type_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_declarations.appendSlice(allocator, " {\n");
+            var list = ArrayList(u8){};
 
-            try unit.type_declarations.appendNTimes(allocator, ' ', margin_width);
-            try unit.writeType(module, &unit.type_declarations, allocator, slice.element_type);
-            try unit.type_declarations.appendSlice(allocator, "* ptr;\n");
+            try list.appendSlice(allocator, "typedef struct ");
+            try list.appendSlice(allocator, type_name.items);
+            try list.appendSlice(allocator, " {\n");
 
-            try unit.type_declarations.appendNTimes(allocator, ' ', margin_width);
-            try unit.type_declarations.appendSlice(allocator, "usize len;\n");
+            try list.appendNTimes(allocator, ' ', margin_width);
+            try unit.writeType(module, &list, allocator, slice.element_type);
+            try list.appendSlice(allocator, "* ptr;\n");
 
-            try unit.type_declarations.appendSlice(allocator, "} ");
-            try unit.type_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_declarations.appendSlice(allocator, ";\n\n");
+            try list.appendNTimes(allocator, ' ', margin_width);
+            try list.appendSlice(allocator, "usize len;\n");
+
+            try list.appendSlice(allocator, "} ");
+            try list.appendSlice(allocator, type_name.items);
+            try list.appendSlice(allocator, ";\n\n");
+
+            try unit.type_declarations.appendSlice(allocator, list.items);
+
+            return type_name.items;
         }
-
-        return gop.value_ptr.*;
     }
 
     fn cacheArrayType(unit: *TranslationUnit, module: *Module, allocator: Allocator, type_index: Compilation.Type.Index) ![]const u8 {
         const array = module.types.array.get(type_index).array;
 
-        const gop = try unit.array_type_set.getOrPut(allocator, array.element_type);
-
-        if (!gop.found_existing) {
+        if (unit.array_type_set.getIndex(array.element_type)) |index| {
+            return unit.array_type_set.values()[index];
+        } else {
             var type_name = ArrayList(u8){};
             try type_name.appendSlice(allocator, "Array_");
             try unit.writeType(module, &type_name, allocator, array.element_type);
             try type_name.writer(allocator).print("_{}", .{array.element_count});
-            gop.value_ptr.* = type_name.items;
+            logln(.c, .g, "Registering array {s}: #{}", .{ type_name.items, type_index.uniqueInteger() });
+            try unit.array_type_set.putNoClobber(allocator, array.element_type, type_name.items);
 
-            try unit.type_forward_declarations.appendSlice(allocator, "typedef struct ");
-            try unit.type_forward_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_forward_declarations.append(allocator, ' ');
-            try unit.type_forward_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_forward_declarations.appendSlice(allocator, ";\n");
+            try unit.forwardDeclareContainerType(allocator, .@"struct", type_name.items);
 
-            try unit.type_declarations.appendSlice(allocator, "typedef struct ");
-            try unit.type_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_declarations.appendSlice(allocator, " {\n");
+            var list = ArrayList(u8){};
 
-            try unit.type_declarations.appendNTimes(allocator, ' ', margin_width);
-            try unit.writeType(module, &unit.type_declarations, allocator, array.element_type);
-            try unit.type_declarations.appendSlice(allocator, " value\n");
+            try list.appendSlice(allocator, "typedef struct ");
+            try list.appendSlice(allocator, type_name.items);
+            try list.appendSlice(allocator, " {\n");
 
-            try unit.type_declarations.writer(allocator).print("[{}];\n", .{array.element_count});
+            try list.appendNTimes(allocator, ' ', margin_width);
+            try unit.writeType(module, &list, allocator, array.element_type);
+            try list.appendSlice(allocator, " value\n");
 
-            try unit.type_declarations.appendSlice(allocator, "} ");
-            try unit.type_declarations.appendSlice(allocator, type_name.items);
-            try unit.type_declarations.appendSlice(allocator, ";\n\n");
+            try list.writer(allocator).print("[{}];\n", .{array.element_count});
+
+            try list.appendSlice(allocator, "} ");
+            try list.appendSlice(allocator, type_name.items);
+            try list.appendSlice(allocator, ";\n\n");
+
+            try unit.type_declarations.appendSlice(allocator, list.items);
+
+            return type_name.items;
         }
-
-        return gop.value_ptr.*;
     }
 
     fn writeSyscall(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, syscall_index: Compilation.Syscall.Index, function_return_type: Compilation.Type.Index, indentation: usize) !void {
@@ -883,6 +943,7 @@ pub const TranslationUnit = struct {
         const type_index = arguments.type_index;
         _ = type_index;
         const value = module.values.array.get(value_index);
+        logln(.c, .g, "Generating C code for {s}", .{@tagName(value.*)});
         switch (value.*) {
             .declaration => |declaration_index| {
                 try unit.writeDeclaration(module, list, allocator, declaration_index, indentation);
@@ -1135,24 +1196,35 @@ pub const TranslationUnit = struct {
                         }
                     },
                     .slice => {
+                        try list.append(allocator, '(');
                         switch (slice.range.end.invalid) {
                             false => {
-                                try list.append(allocator, '(');
                                 try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
                                     .value_index = slice.range.end,
                                     .type_index = Compilation.Type.Index.invalid,
                                 });
-                                try list.appendSlice(allocator, ") - (");
-                                try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
-                                    .value_index = slice.range.start,
-                                    .type_index = Compilation.Type.Index.invalid,
-                                });
-                                try list.appendSlice(allocator, ")\n");
                             },
                             true => {
-                                unreachable;
+                                switch (sliceable_type.*) {
+                                    .slice => {
+                                        try list.append(allocator, '(');
+                                        try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
+                                            .value_index = slice.sliceable,
+                                            .type_index = Compilation.Type.Index.invalid,
+                                        });
+                                        try list.appendSlice(allocator, ").len");
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
                             },
                         }
+
+                        try list.appendSlice(allocator, ") - (");
+                        try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
+                            .value_index = slice.range.start,
+                            .type_index = Compilation.Type.Index.invalid,
+                        });
+                        try list.appendSlice(allocator, ")\n");
                     },
                     else => |t| @panic(@tagName(t)),
                 }
@@ -1288,17 +1360,32 @@ pub const TranslationUnit = struct {
                     .value_index = array_coerce_to_slice.value,
                     .type_index = Compilation.Type.Index.invalid,
                 });
-                try list.appendSlice(allocator, ".value,\n");
+                switch (module.values.array.get(array_coerce_to_slice.value).*) {
+                    .string_literal => {},
+                    else => try list.appendSlice(allocator, ".value"),
+                }
+                try list.appendSlice(allocator, ",\n");
                 try list.appendNTimes(allocator, ' ', indentation * margin_width);
                 const array_value = module.values.array.get(array_coerce_to_slice.value);
                 const array_type = module.types.array.get(array_value.getType(module));
                 const array_length = switch (array_type.*) {
                     .array => |array| array.element_count,
+                    .pointer => |pointer| switch (module.types.array.get(pointer.element_type).*) {
+                        .array => |array| array.element_count,
+                        else => |t| @panic(@tagName(t)),
+                    },
                     else => |t| @panic(@tagName(t)),
                 };
                 try list.writer(allocator).print(".len = {},\n", .{array_length});
                 try list.appendNTimes(allocator, ' ', indentation * margin_width);
                 try list.append(allocator, '}');
+            },
+            .enum_field => |enum_field_index| {
+                const enum_field = module.types.enum_fields.get(enum_field_index);
+                try unit.writeType(module, list, allocator, enum_field.parent);
+                try list.append(allocator, '_');
+                const enum_field_name = module.getName(enum_field.name).?;
+                try list.appendSlice(allocator, enum_field_name);
             },
             else => |t| @panic(@tagName(t)),
         }

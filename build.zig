@@ -17,14 +17,16 @@ pub fn build(b: *std.Build) !void {
     exe.unwind_tables = false;
     exe.omit_frame_pointer = false;
 
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install_exe.step);
     b.installDirectory(.{
         .source_dir = std.Build.LazyPath.relative("lib"),
         .install_dir = .bin,
         .install_subdir = "lib",
     });
 
-    const run_command = b.addRunArtifact(exe);
+    const compiler_exe_path = b.fmt("zig-out/bin/{s}", .{install_exe.dest_sub_path});
+    const run_command = b.addSystemCommand(&.{compiler_exe_path});
     run_command.step.dependOn(b.getInstallStep());
 
     const debug_command = switch (@import("builtin").os.tag) {
@@ -34,13 +36,12 @@ pub fn build(b: *std.Build) !void {
             result.addArg("-ex=r");
             result.addArgs(&.{ "-ex", "up" });
             result.addArg("--args");
-            result.addArtifactArg(exe);
             break :blk result;
         },
         .windows => blk: {
             const result = b.addSystemCommand(&.{"remedybg"});
             result.addArg("-g");
-            result.addArtifactArg(exe);
+            result.addArg(compiler_exe_path);
 
             break :blk result;
         },
@@ -48,11 +49,13 @@ pub fn build(b: *std.Build) !void {
             // not tested
             const result = b.addSystemCommand(&.{"lldb"});
             result.addArg("--");
-            result.addArtifactArg(exe);
+            result.addArg(compiler_exe_path);
             break :blk result;
         },
         else => @compileError("OS not supported"),
     };
+    debug_command.step.dependOn(b.getInstallStep());
+    debug_command.addArg(compiler_exe_path);
 
     if (b.args) |args| {
         run_command.addArgs(args);

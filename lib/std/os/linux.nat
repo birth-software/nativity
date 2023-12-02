@@ -1,5 +1,9 @@
 const std = #import("std");
 
+const stdin: FileDescriptor = 0;
+const stdout: FileDescriptor = 1;
+const stderr: FileDescriptor = 2;
+
 const FileDescriptor = s32;
 
 const ProtectionFlags = struct(u32) {

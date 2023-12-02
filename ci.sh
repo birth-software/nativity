@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-echo "Testing Nativity with Zig"
-echo "Compiling Nativity with Zig"
+echo -e "\e[90mCompiling Nativity with Zig...\e[0m"
 nativity_use_llvm=true
 zig build -Duse_llvm=$nativity_use_llvm
 failed_test_count=0
@@ -51,10 +50,11 @@ do
 done
 
 printf "\n"
-echo "[SUMMARY]"
-echo "========="
+echo -e "\e[35m[SUMMARY]\e[0m"
+echo -e "\e[35m=========\e[0m"
 echo -e "Ran $total_test_count compilations (\e[32m$passed_compilation_count\e[0m succeeded, \e[31m$failed_compilation_count\e[0m failed)."
 echo -e "Ran $ran_test_count tests (\e[32m $passed_test_count\e[0m passed, \e[31m$failed_test_count\e[0m failed)."
+echo -e "\e[35m=========\e[0m"
 
 if [[ "$failed_compilation_count" != "0" ]]; then
     printf $"\nFailed compilations:\n"

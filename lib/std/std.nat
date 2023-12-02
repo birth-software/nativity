@@ -4,13 +4,20 @@ comptime {
 
 const builtin = #import("builtin.nat");
 const os = #import("os.nat");
-const print = os.print;
 const start = #import("start.nat");
 
 const assert = fn(ok: bool) void {
     if (!ok) {
         unreachable;
     }
+}
+
+const print = fn(bytes: []const u8) void {
+    const file_descriptor = os.StdFileDescriptor.get(descriptor = .stdout);
+    const file_writer = FileWriter{
+        .descriptor = file_descriptor,
+    };
+    _ = file_writer.writeAll(bytes);
 }
 
 const Allocator = struct {
@@ -32,9 +39,9 @@ const Allocator = struct {
         }
     }
 
-    const duplicateBytes = fn (allocator: &Allocator, bytes: []const u8) ?[]u8 {
+    const duplicate_bytes = fn (allocator: &Allocator, bytes: []const u8) ?[]u8 {
         if (allocator.allocate(size = bytes.len, alignment = 0)) |result| {
-            copyBytes(destination = result, source = bytes);
+            copy_bytes(destination = result, source = bytes);
             return result;
         } else {
             return null;
@@ -89,12 +96,38 @@ const PageAllocator = struct{
         }
     }
 
-    const getAllocator = fn(page_allocator: &PageAllocator) &Allocator {
+    const get_allocator = fn(page_allocator: &PageAllocator) &Allocator {
         return page_allocator.allocator.&;
     }
 };
 
-const copyBytes = fn(destination: []u8, source: []const u8) void {
+const Writer = struct{
+    callback: &const fn(writer: &Writer, bytes: []const u8) ?usize,
+};
+
+const FileWriter = struct{
+    descriptor: os.FileDescriptor,
+
+    const write = fn(file_writer: FileWriter, bytes: []const u8) ?usize {
+        return file_writer.descriptor.write(bytes);
+    }
+
+    const writeAll = fn(file_writer: FileWriter, bytes: []const u8) bool {
+        var bytes_written: usize = 0;
+
+        while (bytes_written < bytes.len) {
+            if (file_writer.write(bytes = bytes[bytes_written..])) |iteration_written_byte_count| {
+                bytes_written += iteration_written_byte_count;
+            } else {
+                return false;
+            }
+        }
+
+        return bytes_written == bytes.len;
+    }
+};
+
+const copy_bytes = fn(destination: []u8, source: []const u8) void {
     assert(ok = destination.len == source.len);
     for (0..destination.len) |i| {
         destination[i] = source[i];
