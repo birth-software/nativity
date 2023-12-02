@@ -115,6 +115,7 @@ pub const Node = struct {
         unsigned_integer_type,
         signed_integer_type,
         slice_type,
+        const_slice_type,
         array_type,
         argument_declaration,
         compiler_intrinsic,
@@ -962,6 +963,7 @@ const Analyzer = struct {
                     const next_token_index = analyzer.token_i + 1;
                     if (next_token_index < analyzer.tokens.len) {
                         const next_token_id = analyzer.tokens[next_token_index].id;
+                        const next_to_next_token_id = analyzer.tokens[next_token_index + 1].id;
                         break :blk switch (token.id) {
                             .equal => switch (next_token_id) {
                                 .equal => .compare_equal,
@@ -1002,8 +1004,12 @@ const Analyzer = struct {
                                 else => .divide,
                             },
                             .less => switch (next_token_id) {
-                                .less => .shift_left,
-                                else => unreachable,
+                                .less => switch (next_to_next_token_id) {
+                                    .equal => unreachable,
+                                    else => .shift_left,
+                                },
+                                .equal => .compare_less_or_equal,
+                                else => .compare_less_than,
                             },
                             .greater => switch (next_token_id) {
                                 .greater => .shift_right,
@@ -1284,10 +1290,14 @@ const Analyzer = struct {
 
                     _ = try analyzer.expectToken(.right_bracket);
 
-                    switch (length_expression.invalid) {
-                        true => analyzer.token_i += @intFromBool(analyzer.tokens[analyzer.token_i].id == .fixed_keyword_const),
-                        false => {},
-                    }
+                    const is_const = switch (length_expression.invalid) {
+                        true => blk: {
+                            const is_constant = analyzer.tokens[analyzer.token_i].id == .fixed_keyword_const;
+                            analyzer.token_i += @intFromBool(is_constant);
+                            break :blk is_constant;
+                        },
+                        false => false,
+                    };
 
                     const type_expression = try analyzer.typeExpression();
                     const node = switch (length_expression.invalid) {
@@ -1298,7 +1308,10 @@ const Analyzer = struct {
                             .right = type_expression,
                         },
                         true => Node{ // TODO: modifiers
-                            .id = .slice_type,
+                            .id = switch (is_const) {
+                                true => .const_slice_type,
+                                false => .slice_type,
+                            },
                             .token = left_bracket,
                             .left = Node.Index.invalid,
                             .right = type_expression,
@@ -1551,35 +1564,15 @@ const Analyzer = struct {
             },
             .fixed_keyword_enum => blk: {
                 analyzer.token_i += 1;
+
                 _ = try analyzer.expectToken(.left_brace);
-
-                var enum_field_list = Node.List{};
-                while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
-                    const enum_name_token = try analyzer.expectToken(.identifier);
-                    const value_associated = switch (analyzer.tokens[analyzer.token_i].id) {
-                        .comma => comma: {
-                            analyzer.token_i += 1;
-                            break :comma Node.Index.invalid;
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    };
-
-                    const enum_field_node = try analyzer.addNode(.{
-                        .id = .enum_field,
-                        .token = enum_name_token,
-                        .left = value_associated,
-                        .right = Node.Index.invalid,
-                    });
-
-                    try enum_field_list.append(analyzer.allocator, enum_field_node);
-                }
-
-                analyzer.token_i += 1;
+                const node_list = try analyzer.containerMembers(.@"enum");
+                _ = try analyzer.expectToken(.right_brace);
 
                 break :blk try analyzer.addNode(.{
                     .id = .enum_type,
                     .token = token_i,
-                    .left = try analyzer.nodeList(enum_field_list),
+                    .left = try analyzer.nodeList(node_list),
                     .right = Node.Index.invalid,
                 });
             },
@@ -1594,7 +1587,7 @@ const Analyzer = struct {
                 }
 
                 _ = try analyzer.expectToken(.left_brace);
-                const node_list = try analyzer.containerMembers();
+                const node_list = try analyzer.containerMembers(.@"struct");
                 _ = try analyzer.expectToken(.right_brace);
 
                 break :blk try analyzer.addNode(.{
@@ -1633,7 +1626,7 @@ const Analyzer = struct {
                 if (analyzer.tokens[analyzer.token_i].id == .period and analyzer.token_i + 1 < analyzer.tokens.len and analyzer.tokens[analyzer.token_i + 1].id == .period) {
                     analyzer.token_i += 2;
                     const range_end_expression = switch (analyzer.tokens[analyzer.token_i].id) {
-                        .right_bracket => unreachable,
+                        .right_bracket => Node.Index.invalid,
                         else => try analyzer.expression(),
                     };
 
@@ -1736,11 +1729,12 @@ const Analyzer = struct {
         });
     }
 
-    fn containerMembers(analyzer: *Analyzer) !ArrayList(Node.Index) {
+    fn containerMembers(analyzer: *Analyzer, comptime container_type: Compilation.ContainerType) !ArrayList(Node.Index) {
         var list = ArrayList(Node.Index){};
         while (analyzer.token_i < analyzer.tokens.len and analyzer.tokens[analyzer.token_i].id != .right_brace) {
             const first = analyzer.token_i;
             logln(.parser, .container_members, "First token for container member: {s}", .{@tagName(analyzer.tokens[first].id)});
+
             const member_node_index: Node.Index = switch (analyzer.tokens[first].id) {
                 .fixed_keyword_comptime => switch (analyzer.tokens[analyzer.token_i + 1].id) {
                     .left_brace => blk: {
@@ -1758,25 +1752,53 @@ const Analyzer = struct {
                 },
                 .identifier => blk: {
                     analyzer.token_i += 1;
-                    _ = try analyzer.expectToken(.colon);
+                    switch (container_type) {
+                        .@"struct" => {
+                            _ = try analyzer.expectToken(.colon);
 
-                    const field_type = try analyzer.typeExpression();
+                            const field_type = try analyzer.typeExpression();
 
-                    const field_default_node = if (analyzer.tokens[analyzer.token_i].id == .equal) b: {
-                        analyzer.token_i += 1;
-                        break :b try analyzer.expression();
-                    } else Node.Index.invalid;
+                            const field_default_node = if (analyzer.tokens[analyzer.token_i].id == .equal) b: {
+                                analyzer.token_i += 1;
+                                const default_index = try analyzer.expression();
+                                const default_node = analyzer.nodes.items[default_index.unwrap()];
+                                _ = default_node;
+                                assert(.id != .node_list);
+                                break :b default_index;
+                            } else Node.Index.invalid;
 
-                    _ = try analyzer.expectToken(.comma);
+                            _ = try analyzer.expectToken(.comma);
 
-                    const field_node = try analyzer.addNode(.{
-                        .id = .container_field,
-                        .token = first,
-                        .left = field_type,
-                        .right = field_default_node,
-                    });
+                            const field_node = try analyzer.addNode(.{
+                                .id = .container_field,
+                                .token = first,
+                                .left = field_type,
+                                .right = field_default_node,
+                            });
 
-                    break :blk field_node;
+                            break :blk field_node;
+                        },
+                        .@"enum" => {
+                            const value_associated = switch (analyzer.tokens[analyzer.token_i].id) {
+                                .comma => Node.Index.invalid,
+                                else => value: {
+                                    analyzer.token_i += 1;
+                                    break :value try analyzer.expression();
+                                },
+                            };
+
+                            _ = try analyzer.expectToken(.comma);
+
+                            const enum_field_node = try analyzer.addNode(.{
+                                .id = .enum_field,
+                                .token = first,
+                                .left = value_associated,
+                                .right = Node.Index.invalid,
+                            });
+
+                            break :blk enum_field_node;
+                        },
+                    }
                 },
                 .fixed_keyword_const, .fixed_keyword_var => try analyzer.symbolDeclaration(),
                 else => |t| @panic(@tagName(t)),
@@ -1808,7 +1830,7 @@ pub fn analyze(allocator: Allocator, tokens: []const Token, source_file: []const
         .allocator = allocator,
     };
     const node_index = try analyzer.addNode(.{
-        .id = .main,
+        .id = .struct_type,
         .token = 0,
         .left = Node.Index.invalid,
         .right = Node.Index.invalid,
@@ -1817,12 +1839,11 @@ pub fn analyze(allocator: Allocator, tokens: []const Token, source_file: []const
     assert(node_index.value == 0);
     assert(!node_index.invalid);
 
-    const members = try analyzer.containerMembers();
+    const members = try analyzer.containerMembers(.@"struct");
     assert(analyzer.token_i == analyzer.tokens.len);
 
     const node_list = try analyzer.nodeList(members);
 
-    analyzer.nodes.items[0].id = .main;
     analyzer.nodes.items[0].left = node_list;
 
     const end = std.time.Instant.now() catch unreachable;

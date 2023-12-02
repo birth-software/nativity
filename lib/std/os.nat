@@ -7,31 +7,6 @@ const system = switch (current) {
     .windows => windows,
 };
 
-const write = fn (file_descriptor: FileDescriptor, bytes_ptr: [&]const u8, bytes_len: usize) ssize {
-    switch (current) {
-        .linux => return #syscall(1, file_descriptor, #cast(bytes_ptr), bytes_len),
-        .macos => return macos.write(file_descriptor, #cast(bytes_ptr), bytes_len),
-        .windows => {
-            var written_bytes: u32 = 0;
-            if (windows.WriteFile(file_descriptor, bytes_ptr, bytes_len, written_bytes.&, false) != 0) {
-                return written_bytes;
-            } else {
-                unreachable;
-            }
-        },
-    }
-}
-
-const FileDescriptor = system.FileDescriptor;
-
-const print = fn(bytes_ptr: [&]const u8, bytes_len: usize) void {
-    const file_descriptor = switch (current) {
-        .linux, .macos => 2,
-        .windows => windows.GetStdHandle(windows.STD_OUTPUT_HANDLE),
-    };
-
-    _ = write(file_descriptor, bytes_ptr, bytes_len);
-}
 
 const exit = fn(exit_code: s32) noreturn {
     switch (current) {
@@ -106,12 +81,12 @@ const max_path_byte_count = switch (current) {
     else => #error("OS not supported"),
 };
 
-const currentExecutablePath = fn(allocator: &Allocator) ?[]u8 {
+const current_executable_path = fn(allocator: &Allocator) ?[]u8 {
     switch (current) {
         .linux => {
             var buffer: [max_path_byte_count]u8 = undefined;
             if (readlink(file_path = "/proc/self/exe", buffer = buffer.&)) |bytes| {
-                if (allocator.duplicateBytes(bytes)) |result| {
+                if (allocator.duplicate_bytes(bytes)) |result| {
                     return result;
                 } else {
                     return null;
@@ -123,6 +98,42 @@ const currentExecutablePath = fn(allocator: &Allocator) ?[]u8 {
         else => #error("OS not supported"),
     }
 }
+
+const FileDescriptor = struct{
+    handle: system.FileDescriptor,
+
+    const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) ?usize {
+        switch (current) {
+            .linux => {
+                const raw_result = #syscall(1, file_descriptor.handle, #cast(bytes.ptr), bytes.len);
+                if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
+                    return byte_count;
+                } else {
+                    return null;
+                }
+            },
+            else => #error("OS not supported"),
+        }
+    }
+};
+
+const StdFileDescriptor = enum {
+    stdin = 0,
+    stdout = 1,
+    stderr = 2,
+
+    const get = fn(descriptor: StdFileDescriptor) FileDescriptor{
+        switch (current) {
+            .linux, .macos => {
+                return FileDescriptor{
+                    .handle = #cast(descriptor),
+                };
+            },
+            else => #error("OS not supported"),
+        }
+    }
+};
+
 
 const linux = #import("os/linux.nat");
 const macos = #import("os/macos.nat");

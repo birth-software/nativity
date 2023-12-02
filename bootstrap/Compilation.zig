@@ -214,12 +214,12 @@ pub const ContainerInitialization = struct {
 pub const Enum = struct {
     scope: Scope.Index,
     fields: ArrayList(Enum.Field.Index) = .{},
-    type: Type.Index,
+    backing_type: Type.Index,
 
     pub const Field = struct {
         name: u32,
         value: Value.Index,
-        parent: Enum.Index,
+        parent: Type.Index,
 
         pub const List = BlockList(@This());
         pub const Index = Enum.Field.List.Index;
@@ -816,7 +816,7 @@ pub const Value = union(enum) {
             .declaration_reference => |declaration_reference| declaration_reference.type,
             .string_literal => |string_literal| string_literal.type,
             .type => Type.type,
-            .enum_field => |enum_field_index| module.types.enums.get(module.types.enum_fields.get(enum_field_index).parent).type,
+            .enum_field => |enum_field_index| module.types.enum_fields.get(enum_field_index).parent,
             .function_definition => |function_index| module.types.function_definitions.get(function_index).prototype,
             .function_declaration => |function_index| module.types.function_declarations.get(function_index).prototype,
             .binary_operation => |binary_operation| module.values.binary_operations.get(binary_operation).type,
@@ -1237,7 +1237,10 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
     }
 }
 
-fn generateAST() !void {}
+pub const ContainerType = enum {
+    @"struct",
+    @"enum",
+};
 
 pub const Directory = struct {
     handle: std.fs.Dir,
