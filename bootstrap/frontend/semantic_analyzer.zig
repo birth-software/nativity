@@ -2631,6 +2631,7 @@ const Analyzer = struct {
 
                     break :blk switch (backing_type_token.id) {
                         .keyword_unsigned_integer => if (equal(u8, token_bytes, "u8")) Type.u8 else if (equal(u8, token_bytes, "u16")) Type.u16 else if (equal(u8, token_bytes, "u32")) Type.u32 else if (equal(u8, token_bytes, "u64")) Type.u64 else if (equal(u8, token_bytes, "usize")) Type.usize else unreachable,
+                        .fixed_keyword_usize => Type.usize,
                         else => |t| @panic(@tagName(t)),
                     };
                 }
@@ -2988,10 +2989,25 @@ const Analyzer = struct {
                             const backing_integer_type = analyzer.module.types.array.get(struct_type.backing_type);
                             if (backing_integer_type.integer.bit_count >> 3 <= flexible_integer.byte_count) {
                                 return .success;
+                            } else {
+                                unreachable;
                             }
                         }
 
                         unreachable;
+                    },
+                    .@"enum" => |enum_index| {
+                        const enum_type = analyzer.module.types.enums.get(enum_index);
+                        if (!enum_type.backing_type.invalid) {
+                            const backing_integer_type = analyzer.module.types.array.get(enum_type.backing_type);
+                            if (backing_integer_type.integer.bit_count >> 3 <= flexible_integer.byte_count) {
+                                return .success;
+                            } else {
+                                unreachable;
+                            }
+                        } else {
+                            unreachable;
+                        }
                     },
                     else => |t| @panic(@tagName(t)),
                 };
@@ -3007,6 +3023,7 @@ const Analyzer = struct {
                         .integer => |integer| switch (destination_type.*) {
                             .optional => |optional| switch (analyzer.module.types.array.get(optional.element_type).*) {
                                 .pointer => if (integer.bit_count == 64) .success else unreachable,
+                                .integer => .cast_to_optional,
                                 else => |t| @panic(@tagName(t)),
                             },
                             .integer => .success,
@@ -3478,30 +3495,33 @@ const Analyzer = struct {
                 assert(expect_type != .none);
                 const cast_result = try analyzer.canCast(expect_type, value_type);
 
-                if (cast_result == .success) {
-                    const cast_index = try analyzer.module.values.casts.append(analyzer.allocator, .{
-                        .value = value_to_cast_index,
-                        .type = switch (expect_type) {
-                            .none => unreachable,
-                            .flexible_integer => |flexible_integer| if (flexible_integer.sign) |sign| switch (sign) {
-                                else => unreachable,
-                            } else switch (flexible_integer.byte_count) {
-                                1 => Type.u8,
-                                2 => Type.u16,
-                                4 => Type.u32,
-                                8 => Type.u64,
+                switch (cast_result) {
+                    inline .success, .cast_to_optional => |cast_type| {
+                        const cast_index = try analyzer.module.values.casts.append(analyzer.allocator, .{
+                            .value = value_to_cast_index,
+                            .type = switch (expect_type) {
+                                .none => unreachable,
+                                .flexible_integer => |flexible_integer| if (flexible_integer.sign) |sign| switch (sign) {
+                                    else => unreachable,
+                                } else switch (flexible_integer.byte_count) {
+                                    1 => Type.u8,
+                                    2 => Type.u16,
+                                    4 => Type.u32,
+                                    8 => Type.u64,
+                                    else => unreachable,
+                                },
+                                .type_index => |type_index| type_index,
                                 else => unreachable,
                             },
-                            .type_index => |type_index| type_index,
-                            else => unreachable,
-                        },
-                    });
+                        });
 
-                    break :blk Value{
-                        .cast = cast_index,
-                    };
-                } else {
-                    std.debug.panic("Can't cast", .{});
+                        break :blk @unionInit(Value, switch (cast_type) {
+                            .success => "cast",
+                            .cast_to_optional => "optional_cast",
+                            else => @compileError("WTF"),
+                        }, cast_index);
+                    },
+                    else => @panic("can't cast"),
                 }
             },
         };

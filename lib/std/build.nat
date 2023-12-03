@@ -1,0 +1,7 @@
+const std = #import("std");
+const Target = std.Target;
+
+const Executable = struct{
+    target: Target,
+    main_source_path: []const u8,
+};

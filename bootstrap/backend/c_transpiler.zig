@@ -38,7 +38,7 @@ pub const TranslationUnit = struct {
     enum_type_set: AutoArrayHashMap(Compilation.Type.Index, []const u8) = .{},
     declaration_set: AutoArrayHashMap(Compilation.Declaration.Index, []const u8) = .{},
 
-    const SyscallBitset = std.StaticBitSet(6);
+    const SyscallBitset = std.StaticBitSet(7);
 
     fn create(module: *Module, allocator: Allocator) !*TranslationUnit {
         var unit = try allocator.create(TranslationUnit);
@@ -645,12 +645,14 @@ pub const TranslationUnit = struct {
                 try list.append(allocator, '_');
                 try list.appendSlice(allocator, enum_field_name);
 
-                try list.appendSlice(allocator, " = ");
+                if (!enum_field.value.invalid) {
+                    try list.appendSlice(allocator, " = ");
 
-                try unit.writeValue(module, &list, allocator, Compilation.Type.Index.invalid, 0, .{
-                    .value_index = enum_field.value,
-                    .type_index = Compilation.Type.usize,
-                });
+                    try unit.writeValue(module, &list, allocator, Compilation.Type.Index.invalid, 0, .{
+                        .value_index = enum_field.value,
+                        .type_index = Compilation.Type.usize,
+                    });
+                }
 
                 try list.appendSlice(allocator, ",\n");
             }
@@ -795,7 +797,7 @@ pub const TranslationUnit = struct {
         const syscall = module.values.syscalls.get(syscall_index);
         const arguments = syscall.getArguments();
 
-        if (!unit.syscall_bitset.isSet(arguments.len - 1)) {
+        if (!unit.syscall_bitset.isSet(arguments.len)) {
             try unit.function_declarations.appendSlice(allocator, "static __inline u64 syscall");
             try unit.function_declarations.writer(allocator).print("{}(", .{arguments.len});
             try unit.function_declarations.appendSlice(allocator, "u64 n, ");
@@ -849,7 +851,7 @@ pub const TranslationUnit = struct {
                 \\
             );
 
-            unit.syscall_bitset.set(arguments.len - 1);
+            unit.syscall_bitset.set(arguments.len);
         }
 
         try list.writer(allocator).print("syscall{}(", .{arguments.len});
