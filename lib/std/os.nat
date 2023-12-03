@@ -18,6 +18,8 @@ const exit = fn(exit_code: s32) noreturn {
     unreachable;
 }
 
+const ProcessId = system.ProcessId;
+
 const ProtectionFlags = struct(u32){
     read: bool,
     write: bool,
@@ -91,6 +93,19 @@ const current_executable_path = fn(allocator: &Allocator) ?[]u8 {
                 } else {
                     return null;
                 }
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const duplicate_process = fn () ?ProcessId {
+    switch (current) {
+        .linux =>  {
+            if (linux.unwrapSyscall(syscall_result = linux.fork())) |fork_result| {
+                return #cast(fork_result);
             } else {
                 return null;
             }

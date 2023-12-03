@@ -2,6 +2,7 @@ comptime {
     _ = start;
 }
 
+const build = #import("build.nat");
 const builtin = #import("builtin.nat");
 const os = #import("os.nat");
 const start = #import("start.nat");
@@ -133,5 +134,11 @@ const copy_bytes = fn(destination: []u8, source: []const u8) void {
         destination[i] = source[i];
     }
 }
+
+const Target = struct {
+    cpu: builtin.Cpu,
+    os: builtin.Os,
+    abi: builtin.Abi,
+};
 
 var page_allocator = PageAllocator{};

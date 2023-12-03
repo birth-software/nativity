@@ -1565,6 +1565,13 @@ const Analyzer = struct {
             .fixed_keyword_enum => blk: {
                 analyzer.token_i += 1;
 
+                // TODO: is this the best way?
+                if (analyzer.tokens[analyzer.token_i].id == .left_parenthesis) {
+                    analyzer.token_i += 1;
+                    assert(analyzer.tokens[analyzer.token_i + 1].id == .right_parenthesis);
+                    analyzer.token_i += 2;
+                }
+
                 _ = try analyzer.expectToken(.left_brace);
                 const node_list = try analyzer.containerMembers(.@"enum");
                 _ = try analyzer.expectToken(.right_brace);

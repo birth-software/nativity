@@ -1360,7 +1360,7 @@ pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger
 }
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
-    const print_stack_trace = false;
+    const print_stack_trace = true;
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {

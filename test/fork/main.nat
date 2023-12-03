@@ -1,0 +1,15 @@
+const std = #import("std");
+const main = fn() s32 {
+    if (std.os.duplicate_process()) |pid| {
+        if (pid == 0) {
+            std.print(bytes = "Hello from child\n");
+            std.os.exit(exit_code = 0);
+        } else {
+            std.print(bytes = "Hello from parent\n");
+            return 0;
+        }
+    } else {
+        std.print(bytes = "Unable to create child process\n");
+        return 1;
+    }
+}

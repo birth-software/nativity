@@ -2,10 +2,10 @@ const Os = enum{
     linux,
     macos,
     windows,
+    freestanding,
 };
 
 const Cpu = enum{
-    aarch64,
     x86_64,
 };
 
