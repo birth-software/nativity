@@ -25,6 +25,7 @@ const ScopeType = Compilation.ScopeType;
 const Slice = Compilation.Slice;
 const Struct = Compilation.Struct;
 const StringLiteral = Compilation.StringLiteral;
+const Termination = Compilation.Type.Termination;
 const Type = Compilation.Type;
 const Value = Compilation.Value;
 
@@ -79,7 +80,8 @@ const ExpectType = union(enum) {
     none,
     type_index: Type.Index,
     flexible_integer: FlexibleInteger,
-    addressable: Type.Index,
+    addressable: Addressable,
+    dereferenceable: Dereferenceable,
 
     pub const none = ExpectType{
         .none = {},
@@ -95,6 +97,11 @@ const ExpectType = union(enum) {
     const FlexibleInteger = struct {
         byte_count: u8,
         sign: ?bool = null,
+    };
+
+    const Addressable = Type.Pointer;
+    const Dereferenceable = struct {
+        element_type: Type.Index,
     };
 };
 
@@ -1392,6 +1399,7 @@ const Analyzer = struct {
                             break :blk declaration.type;
                         },
                         .addressable => declaration.type,
+                        .dereferenceable => unreachable,
                     },
                 },
             });
@@ -1767,6 +1775,7 @@ const Analyzer = struct {
                                             .element_type = slice_type_slice.element_type,
                                             .@"const" = slice_type_slice.@"const",
                                             .many = true,
+                                            .termination = slice_type_slice.termination,
                                         });
                                         break :t pointer_type;
                                     },
@@ -1873,16 +1882,6 @@ const Analyzer = struct {
             .compare_less_or_equal,
             => try analyzer.processBinaryOperation(scope_index, expect_type, node_index),
             .expression_group => return try analyzer.resolveNode(value_index, scope_index, expect_type, node.left), //unreachable,
-            .container_literal => blk: {
-                const literal_type = try analyzer.resolveType(.{
-                    .scope_index = scope_index,
-                    .node_index = node.left,
-                });
-                const container_initialization = try analyzer.analyzeContainerLiteral(scope_index, literal_type, node.right);
-                break :blk .{
-                    .container_initialization = container_initialization,
-                };
-            },
             .struct_type => blk: {
                 const left_node = analyzer.getScopeNode(scope_index, node.left);
                 const nodes = analyzer.getScopeNodeList(scope_index, left_node);
@@ -1890,13 +1889,6 @@ const Analyzer = struct {
                 const struct_type = try analyzer.processContainerType(value_index, scope_index, nodes.items, scope.file, node_index, .@"struct");
                 break :blk .{
                     .type = struct_type,
-                };
-            },
-            .anonymous_container_literal => blk: {
-                assert(expect_type == .type_index);
-                const container_initialization = try analyzer.analyzeContainerLiteral(scope_index, expect_type.type_index, node.left);
-                break :blk .{
-                    .container_initialization = container_initialization,
                 };
             },
             .boolean_not => blk: {
@@ -1936,36 +1928,35 @@ const Analyzer = struct {
                 };
             },
             .address_of => blk: {
-                var many = false;
-                var is_const = false;
-                const new_expect_type = switch (expect_type) {
+                const many = false;
+                _ = many;
+                const addressable: ExpectType.Addressable = switch (expect_type) {
                     // .none => expect_type,
-                    .type_index => |type_index| ExpectType{
-                        .addressable = switch (analyzer.module.types.array.get(type_index).*) {
-                            .pointer => |pointer| b: {
-                                is_const = pointer.@"const";
-                                many = pointer.many;
-                                break :b pointer.element_type;
-                            },
-                            .slice => |slice| b: {
-                                is_const = slice.@"const";
-                                many = true;
-                                break :b slice.element_type;
-                            },
-                            else => |t| @panic(@tagName(t)),
+                    .type_index => |type_index| switch (analyzer.module.types.array.get(type_index).*) {
+                        .pointer => |pointer| pointer,
+                        .slice => |slice| .{
+                            .@"const" = slice.@"const",
+                            .many = true,
+                            .element_type = slice.element_type,
+                            .termination = slice.termination,
                         },
+                        else => |t| @panic(@tagName(t)),
                     },
                     .flexible_integer => unreachable,
                     else => unreachable,
                 };
-                logln(.sema, .address_of, "New expect type: {}", .{new_expect_type});
 
-                const appointee_value_index = try analyzer.unresolvedAllocate(scope_index, new_expect_type, node.left);
+                const appointee_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType{
+                    .addressable = addressable,
+                }, node.left);
+
                 const unary_type_index: Type.Index = try analyzer.getPointerType(.{
                     .element_type = analyzer.module.values.array.get(appointee_value_index).getType(analyzer.module),
-                    .many = many,
-                    .@"const" = is_const,
+                    .many = addressable.many,
+                    .@"const" = addressable.@"const",
+                    .termination = addressable.termination,
                 });
+
                 const unary_index = try analyzer.module.values.unary_operations.append(analyzer.allocator, .{
                     .id = .address_of,
                     .value = appointee_value_index,
@@ -1999,13 +1990,13 @@ const Analyzer = struct {
                     .none => expect_type,
                     .type_index => |type_index| switch (analyzer.module.types.array.get(type_index).*) {
                         .pointer => unreachable,
-                        else => ExpectType{
-                            .type_index = try analyzer.getPointerType(.{
-                                .element_type = type_index,
-                                .many = false,
-                                .@"const" = false,
-                            }),
-                        },
+                        else => unreachable,
+                        //     .type_index = try analyzer.getPointerType(.{
+                        //         .element_type = type_index,
+                        //         .many = false,
+                        //         .@"const" = false,
+                        //     }),
+                        // },
                     },
                     .flexible_integer => unreachable,
                     else => unreachable,
@@ -2027,22 +2018,30 @@ const Analyzer = struct {
             .slice => blk: {
                 const expression_to_slice_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
                 const expression_to_slice_type = analyzer.getValueType(expression_to_slice_index);
-                const element_type = switch (analyzer.module.types.array.get(expression_to_slice_type).*) {
-                    .pointer => |pointer| pointer.element_type,
-                    .slice => |slice| slice.element_type,
-                    else => |t| @panic(@tagName(t)),
-                };
-                const is_const = switch (analyzer.module.types.array.get(expression_to_slice_type).*) {
-                    .pointer => |pointer| pointer.@"const",
-                    .slice => |slice| slice.@"const",
-                    else => |t| @panic(@tagName(t)),
-                };
+                // const element_type = switch ) {
+                //     .pointer => |pointer| pointer.element_type,
+                //     .slice => |slice| slice.element_type,
+                //     else => |t| @panic(@tagName(t)),
+                // };
+                // const is_const = switch (analyzer.module.types.array.get(expression_to_slice_type).*) {
+                //     .pointer => |pointer| pointer.@"const",
+                //     .slice => |slice| slice.@"const",
+                //     else => |t| @panic(@tagName(t)),
+                // };
                 const slice_index = try analyzer.module.values.slices.append(analyzer.allocator, .{
                     .sliceable = expression_to_slice_index,
                     .range = try analyzer.range(scope_index, node.right),
-                    .type = try analyzer.getSliceType(.{
-                        .element_type = element_type,
-                        .@"const" = is_const,
+                    .type = try analyzer.getSliceType(switch (analyzer.module.types.array.get(expression_to_slice_type).*) {
+                        .pointer => |pointer| .{
+                            .@"const" = constblk: {
+                                assert(pointer.many);
+                                break :constblk pointer.@"const";
+                            },
+                            .element_type = pointer.element_type,
+                            .termination = pointer.termination,
+                        },
+                        .slice => |slice| slice,
+                        else => |t| @panic(@tagName(t)),
                     }),
                 });
 
@@ -2090,10 +2089,79 @@ const Analyzer = struct {
                 }
             },
             .undefined => .undefined,
+            .anonymous_array_literal => blk: {
+                const array_element_type = switch (expect_type) {
+                    .addressable => |addressable| addr: {
+                        assert(addressable.many);
+                        break :addr addressable.element_type;
+                    },
+                    .type_index => |type_index| type_index,
+                    else => |t| @panic(@tagName(t)),
+                };
+                const expected_element_count: ?usize = null;
+
+                const array_initialization = try analyzer.analyzeArrayLiteral(scope_index, array_element_type, node.left, expected_element_count);
+                break :blk .{
+                    .array_initialization = array_initialization,
+                };
+            },
+            .anonymous_container_literal => blk: {
+                assert(expect_type == .type_index);
+                const container_initialization = try analyzer.analyzeContainerLiteral(scope_index, expect_type.type_index, node.left);
+                break :blk .{
+                    .container_initialization = container_initialization,
+                };
+            },
+            .container_literal => blk: {
+                const list_nodes = analyzer.getScopeNodeList(scope_index, analyzer.getScopeNode(scope_index, node.right));
+                const literal_type = try analyzer.resolveType(.{
+                    .scope_index = scope_index,
+                    .node_index = node.left,
+                    .length_hint = list_nodes.items.len,
+                });
+                const container_initialization = try analyzer.analyzeContainerLiteral(scope_index, literal_type, node.right);
+                break :blk .{
+                    .container_initialization = container_initialization,
+                };
+            },
+            .anonymous_array_element_initialization => {
+                try analyzer.resolveNode(value_index, scope_index, expect_type, node.left);
+                return;
+            },
             else => |t| @panic(@tagName(t)),
         };
 
         analyzer.module.values.array.get(value_index).* = new_value;
+    }
+
+    fn analyzeArrayLiteral(analyzer: *Analyzer, scope_index: Scope.Index, expected_element_type_index: Type.Index, node_list_node_index: Node.Index, expected_element_count: ?usize) !Compilation.ContainerInitialization.Index {
+        const field_initialization_node_list = analyzer.getScopeNode(scope_index, node_list_node_index);
+        const field_nodes = analyzer.getScopeNodeList(scope_index, field_initialization_node_list);
+        assert(!expected_element_type_index.invalid);
+
+        const found_element_count = field_nodes.items.len;
+        const element_count = if (expected_element_count) |ec| if (ec == found_element_count) ec else @panic("Element count mismatch in array literal") else found_element_count;
+
+        var list = try ArrayList(Value.Index).initCapacity(analyzer.allocator, element_count);
+        const element_expect_type = ExpectType{
+            .type_index = expected_element_type_index,
+        };
+        for (field_nodes.items) |element_node_index| {
+            const array_element_value_index = try analyzer.unresolvedAllocate(scope_index, element_expect_type, element_node_index);
+            list.appendAssumeCapacity(array_element_value_index);
+            // const element_node = analyzer.getScopeNode(scope_index, element_node_index);
+        }
+
+        const container_initialization_index = try analyzer.module.values.container_initializations.append(analyzer.allocator, .{
+            .field_initializations = list,
+            .type = try analyzer.getArrayType(.{
+                .element_count = @intCast(element_count),
+                .element_type = expected_element_type_index,
+                .termination = unreachable,
+            }),
+        });
+
+        return container_initialization_index;
     }
 
     fn analyzeContainerLiteral(analyzer: *Analyzer, scope_index: Scope.Index, expected_type_index: Type.Index, node_list_node_index: Node.Index) !Compilation.ContainerInitialization.Index {
@@ -2105,9 +2173,9 @@ const Analyzer = struct {
         switch (expected_type.*) {
             .@"struct" => |struct_index| {
                 const struct_type = analyzer.module.types.structs.get(struct_index);
-                var bitset = try std.DynamicBitSetUnmanaged.initEmpty(analyzer.allocator, field_nodes.items.len);
 
                 var list = try ArrayList(Value.Index).initCapacity(analyzer.allocator, struct_type.fields.items.len);
+                var bitset = try std.DynamicBitSetUnmanaged.initEmpty(analyzer.allocator, field_nodes.items.len);
 
                 for (struct_type.fields.items) |struct_field_index| {
                     const struct_field = analyzer.module.types.container_fields.get(struct_field_index);
@@ -2118,7 +2186,7 @@ const Analyzer = struct {
 
                     for (field_nodes.items, 0..) |field_node_index, index| {
                         const field_node = analyzer.getScopeNode(scope_index, field_node_index);
-                        assert(field_node.id == .field_initialization);
+                        assert(field_node.id == .container_field_initialization);
                         const identifier = analyzer.tokenIdentifier(scope_index, field_node.token + 1);
                         const identifier_index = try analyzer.processIdentifier(identifier);
 
@@ -2131,7 +2199,7 @@ const Analyzer = struct {
 
                             value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType{
                                 .type_index = struct_field.type,
-                            }, field_node.right);
+                            }, field_node.left);
                         }
                     }
 
@@ -2165,10 +2233,29 @@ const Analyzer = struct {
                 });
                 return container_initialization_index;
             },
+            .array => |array_type| {
+                if (field_nodes.items.len != array_type.element_count) {
+                    unreachable;
+                }
+
+                const expect_type = ExpectType{
+                    .type_index = array_type.element_type,
+                };
+                var list = try ArrayList(Value.Index).initCapacity(analyzer.allocator, array_type.element_count);
+
+                for (field_nodes.items) |array_element_node_index| {
+                    const element_value_index = try analyzer.unresolvedAllocate(scope_index, expect_type, array_element_node_index);
+                    list.appendAssumeCapacity(element_value_index);
+                }
+
+                const container_initialization_index = try analyzer.module.values.container_initializations.append(analyzer.allocator, .{
+                    .field_initializations = list,
+                    .type = expected_type_index,
+                });
+                return container_initialization_index;
+            },
             else => |t| @panic(@tagName(t)),
         }
-
-        unreachable;
     }
 
     fn debugNode(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) void {
@@ -2198,15 +2285,18 @@ const Analyzer = struct {
             break :blk original_string_literal;
         };
         const len: u32 = @intCast(string_literal.len);
-        const array_type = try analyzer.getArrayType(.{
+        const array_type_descriptor = Type.Array{
             .element_type = Type.u8,
             .element_count = len,
-        });
+            .termination = .null,
+        };
+        const array_type = try analyzer.getArrayType(array_type_descriptor);
 
         const pointer_type = try analyzer.getPointerType(.{
             .many = true,
             .@"const" = true,
             .element_type = array_type,
+            .termination = array_type_descriptor.termination,
         });
 
         const hash = try Module.addString(&analyzer.module.map.strings, analyzer.allocator, string_literal);
@@ -2246,6 +2336,7 @@ const Analyzer = struct {
     fn resolveType(analyzer: *Analyzer, args: struct {
         scope_index: Scope.Index,
         node_index: Node.Index,
+        length_hint: ?usize = null,
         allow_non_primitive_size: bool = false,
     }) anyerror!Type.Index {
         const scope_index = args.scope_index;
@@ -2304,64 +2395,23 @@ const Analyzer = struct {
                     },
                 };
             },
-            .const_single_pointer_type,
-            .single_pointer_type,
-            .const_many_pointer_type,
-            .many_pointer_type,
-            .zero_terminated_const_many_pointer_type,
-            .zero_terminated_many_pointer_type,
-            => blk: {
-                const element_type = try resolveType(analyzer, .{
-                    .scope_index = scope_index,
-                    .node_index = type_node.left,
-                });
-                const many = switch (type_node.id) {
-                    .const_many_pointer_type,
-                    .many_pointer_type,
-                    .zero_terminated_const_many_pointer_type,
-                    .zero_terminated_many_pointer_type,
-                    => true,
-                    .const_single_pointer_type,
-                    .single_pointer_type,
-                    => false,
-                    else => |t| @panic(@tagName(t)),
-                };
-                const is_const = switch (type_node.id) {
-                    .const_many_pointer_type,
-                    .const_single_pointer_type,
-                    .zero_terminated_const_many_pointer_type,
-                    => true,
-                    .zero_terminated_many_pointer_type,
-                    .many_pointer_type,
-                    .single_pointer_type,
-                    => false,
-                    else => |t| @panic(@tagName(t)),
-                };
+            .void_type => Type.void,
+            .ssize_type => Type.ssize,
+            .usize_type => Type.usize,
+            .bool_type => Type.boolean,
+            .simple_function_prototype => blk: {
+                const function_prototype_index = try analyzer.module.types.function_prototypes.append(analyzer.allocator, try analyzer.processSimpleFunctionPrototype(scope_index, node_index));
 
-                break :blk try analyzer.getPointerType(.{
-                    .element_type = element_type,
-                    .many = many,
-                    .@"const" = is_const,
+                const function_type_index = try analyzer.module.types.array.append(analyzer.allocator, .{
+                    .function = function_prototype_index,
                 });
+                break :blk function_type_index;
             },
-            .slice_type,
-            .const_slice_type,
-            => blk: {
-                const element_type = try resolveType(analyzer, .{
-                    .scope_index = scope_index,
-                    .node_index = type_node.right,
-                });
-
-                const is_const = switch (type_node.id) {
-                    .slice_type => false,
-                    .const_slice_type => true,
-                    else => unreachable,
-                };
-
-                break :blk try analyzer.getSliceType(.{
-                    .element_type = element_type,
-                    .@"const" = is_const,
-                });
+            .field_access => blk: {
+                const type_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node_index);
+                const type_value_ptr = analyzer.module.values.array.get(type_value_index);
+                assert(type_value_ptr.* == .type);
+                break :blk type_value_ptr.type;
             },
             .optional_type => blk: {
                 const element_type = try resolveType(analyzer, .{
@@ -2385,40 +2435,139 @@ const Analyzer = struct {
 
                 break :blk result;
             },
-            .void_type => Type.void,
-            .ssize_type => Type.ssize,
-            .usize_type => Type.usize,
-            .bool_type => Type.boolean,
-            .simple_function_prototype => blk: {
-                const function_prototype_index = try analyzer.module.types.function_prototypes.append(analyzer.allocator, try analyzer.processSimpleFunctionPrototype(scope_index, node_index));
+            .pointer_type => blk: {
+                const list_node = analyzer.getScopeNode(scope_index, type_node.left);
+                const node_list = analyzer.getScopeNodeList(scope_index, list_node);
 
-                const function_type_index = try analyzer.module.types.array.append(analyzer.allocator, .{
-                    .function = function_prototype_index,
+                var is_const = false;
+                var type_index = Type.Index.invalid;
+                var termination = Termination.none;
+                var many = false;
+
+                for (node_list.items) |element_node_index| {
+                    const element_node = analyzer.getScopeNode(scope_index, element_node_index);
+                    switch (element_node.id) {
+                        .simple_function_prototype,
+                        .identifier,
+                        .unsigned_integer_type,
+                        .optional_type,
+                        => {
+                            if (!type_index.invalid) {
+                                unreachable;
+                            }
+                            type_index = try analyzer.resolveType(.{
+                                .scope_index = scope_index,
+                                .node_index = element_node_index,
+                            });
+                        },
+                        .const_expression => is_const = true,
+                        .many_pointer_expression => many = true,
+                        .zero_terminated => {
+                            assert(many);
+                            assert(termination == .none);
+                            termination = .zero;
+                        },
+                        .null_terminated => {
+                            assert(many);
+                            assert(termination == .none);
+                            termination = .null;
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+
+                assert(!type_index.invalid);
+
+                break :blk try analyzer.getPointerType(.{
+                    .@"const" = is_const,
+                    .many = many,
+                    .element_type = type_index,
+                    .termination = termination,
                 });
-                break :blk function_type_index;
             },
-            .field_access => blk: {
-                const type_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node_index);
-                const type_value_ptr = analyzer.module.values.array.get(type_value_index);
-                assert(type_value_ptr.* == .type);
-                break :blk type_value_ptr.type;
+            .slice_type => blk: {
+                const list_node = analyzer.getScopeNode(scope_index, type_node.left);
+                const node_list = analyzer.getScopeNodeList(scope_index, list_node);
+
+                var is_const = false;
+                var type_index = Type.Index.invalid;
+                const termination = Termination.none;
+
+                for (node_list.items) |element_node_index| {
+                    const element_node = analyzer.getScopeNode(scope_index, element_node_index);
+                    switch (element_node.id) {
+                        .simple_function_prototype,
+                        .identifier,
+                        .unsigned_integer_type,
+                        => {
+                            if (!type_index.invalid) {
+                                unreachable;
+                            }
+                            type_index = try analyzer.resolveType(.{
+                                .scope_index = scope_index,
+                                .node_index = element_node_index,
+                            });
+                        },
+                        .const_expression => is_const = true,
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+
+                assert(!type_index.invalid);
+
+                break :blk try analyzer.getSliceType(.{
+                    .@"const" = is_const,
+                    .element_type = type_index,
+                    .termination = termination,
+                });
             },
             .array_type => blk: {
-                const array_element_type_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.type, type_node.right);
-                const array_element_type_value = analyzer.module.values.array.get(array_element_type_value_index);
-                assert(array_element_type_value.* == .type);
-                const array_element_type_index = array_element_type_value.type;
+                const list_node = analyzer.getScopeNode(scope_index, type_node.left);
+                const node_list = analyzer.getScopeNodeList(scope_index, list_node);
 
-                const length_expression_index = try analyzer.unresolvedAllocate(scope_index, ExpectType{
-                    .type_index = Type.usize,
-                }, type_node.left);
-                const length: usize = analyzer.resolveInteger(scope_index, length_expression_index);
+                var termination: ?Termination = null;
+                var length_expression: ?usize = null;
 
-                const array_type = try analyzer.getArrayType(.{
-                    .element_type = array_element_type_index,
-                    .element_count = @intCast(length),
+                for (node_list.items[0 .. node_list.items.len - 1]) |element_node_index| {
+                    const element_node = analyzer.getScopeNode(scope_index, element_node_index);
+                    switch (element_node.id) {
+                        .identifier => {
+                            if (length_expression != null) {
+                                unreachable;
+                            }
+
+                            length_expression = analyzer.resolveInteger(scope_index, try analyzer.unresolvedAllocate(scope_index, ExpectType{
+                                .type_index = Type.usize,
+                            }, element_node_index));
+                        },
+                        .discard => {
+                            const length = args.length_hint orelse unreachable;
+                            length_expression = length;
+                        },
+                        .null_terminated => {
+                            if (termination != null) {
+                                unreachable;
+                            }
+                            termination = .null;
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+
+                assert(length_expression != null);
+
+                const type_index = try analyzer.resolveType(.{
+                    .scope_index = scope_index,
+                    .node_index = node_list.items[node_list.items.len - 1],
                 });
-                break :blk array_type;
+
+                assert(!type_index.invalid);
+
+                break :blk try analyzer.getArrayType(.{
+                    .element_type = type_index,
+                    .element_count = length_expression orelse unreachable,
+                    .termination = termination orelse .none,
+                });
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -3321,13 +3470,16 @@ const Analyzer = struct {
                     else => |t| @panic(@tagName(t)),
                 }
             },
-            .addressable => |element_type_index| {
-                const destination_type = analyzer.module.types.array.get(element_type_index);
+            .addressable => |addressable| {
+                const destination_type = analyzer.module.types.array.get(addressable.element_type);
                 const source_type = analyzer.module.types.array.get(source);
 
                 switch (source_type.*) {
                     .array => |array| {
-                        if (array.element_type.eq(element_type_index)) {
+                        assert(addressable.many);
+                        assert(addressable.termination == array.termination);
+
+                        if (array.element_type.eq(addressable.element_type)) {
                             return .success;
                         } else {
                             switch (destination_type.*) {
@@ -3336,7 +3488,11 @@ const Analyzer = struct {
                         }
                     },
                     .function => |source_function| {
-                        if (element_type_index.eq(source)) {
+                        assert(!addressable.many);
+                        assert(addressable.termination == .none);
+                        assert(addressable.@"const");
+
+                        if (addressable.element_type.eq(source)) {
                             return .success;
                         } else {
                             switch (destination_type.*) {
@@ -3350,11 +3506,13 @@ const Analyzer = struct {
                                 },
                                 else => |t| @panic(@tagName(t)),
                             }
-                            unreachable;
                         }
                     },
                     else => |t| @panic(@tagName(t)),
                 }
+            },
+            .dereferenceable => {
+                unreachable;
             },
             // else => |t| @panic(@tagName(t)),
         };
@@ -3368,6 +3526,7 @@ const Analyzer = struct {
                     .element_type = pointer.element_type,
                     .many = pointer.many,
                     .@"const" = pointer.@"const",
+                    .termination = pointer.termination,
                 },
             });
             gop.value_ptr.* = type_index;

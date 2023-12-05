@@ -430,6 +430,11 @@ const fork = fn() usize {
     return result;
 }
 
+const execve = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) usize {
+    const result = #syscall(#cast(Syscall.execve), #cast(path), #cast(argv), #cast(env));
+    return result;
+}
+
 const unwrapSyscall = fn(syscall_result: usize) ?usize {
     const signed_syscall_result: ssize = #cast(syscall_result);
     if (signed_syscall_result >= 0) {

@@ -245,24 +245,33 @@ pub const Type = union(enum) {
     array: Array,
     optional: Optional,
 
-    const Optional = struct {
+    pub const Optional = struct {
         element_type: Type.Index,
+    };
+
+    pub const Termination = enum {
+        none,
+        null,
+        zero,
     };
 
     pub const Array = struct {
         element_type: Type.Index,
-        element_count: u32,
+        element_count: usize,
+        termination: Termination,
     };
 
     pub const Slice = struct {
         element_type: Type.Index,
         @"const": bool,
+        termination: Termination,
     };
 
     pub const Pointer = struct {
         element_type: Type.Index,
         many: bool,
         @"const": bool,
+        termination: Termination,
     };
 
     pub const List = BlockList(@This());
@@ -416,6 +425,7 @@ pub const extra_common_type_data = blk: {
             .many = true,
             .@"const" = true,
             .element_type = Type.u8,
+            .termination = .null,
         },
     };
 
@@ -765,6 +775,7 @@ pub const Value = union(enum) {
     branch: Branch.Index,
     cast: Cast.Index,
     container_initialization: ContainerInitialization.Index,
+    array_initialization: ContainerInitialization.Index,
     field_access: FieldAccess.Index,
     slice_access: Slice.Access.Index,
     indexed_access: IndexedAccess.Index,
@@ -822,7 +833,9 @@ pub const Value = union(enum) {
             .binary_operation => |binary_operation| module.values.binary_operations.get(binary_operation).type,
             .bool => Type.boolean,
             .declaration => Type.void,
-            .container_initialization => |container_initialization| module.values.container_initializations.get(container_initialization).type,
+            .container_initialization,
+            .array_initialization,
+            => |initialization| module.values.container_initializations.get(initialization).type,
             .syscall => Type.usize,
             .unary_operation => |unary_operation_index| module.values.unary_operations.get(unary_operation_index).type,
             .pointer_null_literal => semantic_analyzer.optional_pointer_to_any_type,
@@ -887,7 +900,6 @@ pub const Module = struct {
     types: struct {
         array: BlockList(Type) = .{},
         enums: BlockList(Enum) = .{},
-        arrays: BlockList(Type.Array) = .{},
         structs: BlockList(Struct) = .{},
         container_fields: BlockList(ContainerField) = .{},
         enum_fields: BlockList(Enum.Field) = .{},
@@ -1188,6 +1200,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
             .element_type = Type.any,
             .many = false,
             .@"const" = true,
+            .termination = .none,
         },
     });
     semantic_analyzer.optional_pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
@@ -1360,7 +1373,7 @@ pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger
 }
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
-    const print_stack_trace = true;
+    const print_stack_trace = false;
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {

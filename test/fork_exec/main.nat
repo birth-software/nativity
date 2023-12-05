@@ -1,0 +1,18 @@
+const std = #import("std");
+const main = fn() s32{
+    if (std.os.duplicate_process()) |pid| {
+        if (pid == 0) {
+            std.print(bytes = "Hello from child\n");
+            const argv = [_:null] ?[&:0]const u8{"/usr/bin/ls"};
+            const env = [_:null] ?[&:null]const u8 {};
+            std.os.execute(path = "/usr/bin/ls", argv = argv.&, env = env.&);
+            return 1;
+        } else {
+            std.print(bytes = "Hello from parent\n");
+            return 0;
+        }
+    } else {
+        std.print(bytes = "Unable to create child process\n");
+        return 1;
+    }
+}
