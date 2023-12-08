@@ -7,10 +7,9 @@ const system = switch (current) {
     .windows => windows,
 };
 
-
 const exit = fn(exit_code: s32) noreturn {
     switch (current) {
-        .linux => _ = #syscall(231, exit_code),
+        .linux => _ = #syscall(#cast(linux.Syscall.exit_group), exit_code),
         .macos => macos.exit(exit_code),
         .windows => windows.ExitProcess(exit_code),
     }
@@ -18,7 +17,64 @@ const exit = fn(exit_code: s32) noreturn {
     unreachable;
 }
 
-const ProcessId = system.ProcessId;
+const max_file_operation_byte_count = switch (current) {
+    .linux => 0x7ffff000,
+    else => #error("OS not supported"),
+};
+
+const FileDescriptor = struct{
+    handle: system.FileDescriptor,
+
+    const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ?usize {
+        if (bytes.len > 0) {
+            switch (current) {
+                .linux => {
+                    const len: usize = #min(max_file_operation_byte_count, bytes.len);
+                    if (linux.unwrapSyscall(syscall_result = #syscall(#cast(linux.Syscall.read), file_descriptor.handle, #cast(bytes.ptr), len))) |byte_count| {
+                        return byte_count;
+                    } else {
+                        return null;
+                    }
+                },
+                else => #error("OS not supported"),
+            }
+        } else {
+            return 0;
+        }
+    }
+
+    const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) ?usize {
+        switch (current) {
+            .linux => {
+                const len: usize = #min(max_file_operation_byte_count, bytes.len);
+                const raw_result = #syscall(#cast(linux.Syscall.write), file_descriptor.handle, #cast(bytes.ptr), len);
+                if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
+                    return byte_count;
+                } else {
+                    return null;
+                }
+            },
+            else => #error("OS not supported"),
+        }
+    }
+};
+
+const StdFileDescriptor = enum {
+    stdin = 0,
+    stdout = 1,
+    stderr = 2,
+
+    const get = fn(descriptor: StdFileDescriptor) FileDescriptor{
+        switch (current) {
+            .linux, .macos => {
+                return FileDescriptor{
+                    .handle = #cast(descriptor),
+                };
+            },
+            else => #error("OS not supported"),
+        }
+    }
+};
 
 const ProtectionFlags = struct(u32){
     read: bool,
@@ -83,16 +139,11 @@ const max_path_byte_count = switch (current) {
     else => #error("OS not supported"),
 };
 
-const current_executable_path = fn(allocator: &Allocator) ?[]u8 {
+const current_executable_path = fn(buffer: []u8) ?[]u8 {
     switch (current) {
         .linux => {
-            var buffer: [max_path_byte_count]u8 = undefined;
-            if (readlink(file_path = "/proc/self/exe", buffer = buffer.&)) |bytes| {
-                if (allocator.duplicate_bytes(bytes)) |result| {
-                    return result;
-                } else {
-                    return null;
-                }
+            if (readlink(file_path = "/proc/self/exe", buffer)) |bytes| {
+                return bytes;
             } else {
                 return null;
             }
@@ -101,7 +152,11 @@ const current_executable_path = fn(allocator: &Allocator) ?[]u8 {
     }
 }
 
-const duplicate_process = fn () ?ProcessId {
+const Process = struct{
+    const Id = system.ProcessId;
+};
+
+const duplicate_process = fn () ?Process.Id {
     switch (current) {
         .linux =>  {
             if (linux.unwrapSyscall(syscall_result = linux.fork())) |fork_result| {
@@ -123,41 +178,186 @@ const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env:
     }
 }
 
-const FileDescriptor = struct{
-    handle: system.FileDescriptor,
-
-    const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) ?usize {
-        switch (current) {
-            .linux => {
-                const raw_result = #syscall(1, file_descriptor.handle, #cast(bytes.ptr), bytes.len);
-                if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
-                    return byte_count;
-                } else {
-                    return null;
-                }
-            },
-            else => #error("OS not supported"),
-        }
+const event_file_descriptor = fn(initial_value: u32, flags: u32) ?s32 {
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.event_file_descriptor(count = initial_value, flags))) |raw_result| {
+                const result: s32 = #cast(raw_result);
+                return result;
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
     }
-};
+}
 
-const StdFileDescriptor = enum {
-    stdin = 0,
-    stdout = 1,
-    stderr = 2,
+const dup2 = fn(old_file_descriptor: system.FileDescriptor, new_file_descriptor: system.FileDescriptor) bool {
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.dup2(old = old_file_descriptor, new = new_file_descriptor))) |_| {
+                return true;
+            } else {
+                return false;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
 
-    const get = fn(descriptor: StdFileDescriptor) FileDescriptor{
-        switch (current) {
-            .linux, .macos => {
-                return FileDescriptor{
-                    .handle = #cast(descriptor),
+const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) ?FileDescriptor{
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.open(path, flags, permissions))) |raw_result| {
+                const file_descriptor = FileDescriptor{
+                    .handle = #cast(raw_result),
                 };
-            },
-            else => #error("OS not supported"),
-        }
-    }
-};
 
+                return file_descriptor;
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const close = fn(file_descriptor: s32) bool {
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.close(file_descriptor))) |_| {
+                return true;
+            } else {
+                return false;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const pipe2 = fn(flags: u32) ?[2]system.FileDescriptor{
+    switch (current) {
+        .linux => {
+            var pipe: [2]s32 = undefined;
+            if (linux.unwrapSyscall(syscall_result = linux.pipe2(pipe_pointer = pipe.&, flags))) |_| {
+                return pipe;
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const set_up_child_process_io_posix = fn(io_channel_behavior: IoChannelBehavior, pipe_file_descriptor: s32, std_io_channel_descriptor: s32, dev_null_file_descriptor: s32) bool {
+    switch (io_channel_behavior) {
+        .pipe => return dup2(old_file_descriptor = pipe_file_descriptor, new_file_descriptor = std_io_channel_descriptor),
+        .close => {
+            if (!close(file_descriptor = std_io_channel_descriptor)) {
+                 unreachable;
+            }
+            return true;
+        },
+        .inherit => return true,
+        .ignore => return dup2(old_file_descriptor = dev_null_file_descriptor, new_file_descriptor = std_io_channel_descriptor),
+    }
+}
+
+const PollFileDescriptor = system.PollFileDescriptor;
+
+const poll = fn(file_descriptors: []PollFileDescriptor, timeout: s32) ?usize {
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.poll(file_descriptors = file_descriptors.ptr, file_descriptor_count = file_descriptors.len, timeout = timeout))) |result| {
+                return result;
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const write_u64_pipe = fn (file_handle: s32, value: u64) ?usize {
+    const file = FileDescriptor{
+        .handle = file_handle,
+    };
+    const value_ptr: [&]u8 = #cast(value.&);
+    const bytes = value_ptr[0..#size(u64)];
+    return file.write(bytes);
+}
+
+const read_u64_pipe = fn (file_handle: s32) ?u64{ 
+    const file = FileDescriptor{
+        .handle = file_handle,
+    };
+    var value: u64 = 0;
+    const value_ptr: [&]u8 = #cast(value.&);
+    const bytes = value_ptr[0..#size(u64)];
+    if (file.read(bytes)) |character_read_count| {
+        if (character_read_count == #size(u64)) {
+            return value;
+        } else {
+            return null;
+        }
+    } else {
+        return null;
+    }
+}
+
+const termsig = fn(status: u32) u32 {
+    return status & 0x7f;
+}
+
+const ifexited = fn(status: u32) bool {
+    return termsig(status) == 0;
+}
+
+const exitstatus = fn(status: u32) u8 {
+    const result: u8 = #cast((status & 0xff00) >> 8);
+    return result;
+}
+
+const stopsig = fn(status: u32) u32 {
+    return exitstatus(status);
+}
+
+const ifstopped = fn(status: u32) bool {
+    const result: u16 = #cast(((status & 0xffff) * 0x10001) >> 8);
+    return result > 0x7f00;
+}
+
+const ifsignaled = fn(status: u32) bool {
+    return (status & 0xffff) - 1 < 0xff;
+}
+
+const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
+    switch (current) {
+        .linux => {
+            var status: u32 = undefined;
+            while (true) {
+                const raw_syscall_result = linux.waitpid(pid, status = status.&, flags, resource_usage = 0);
+                const signed_syscall_result: ssize = #cast(raw_syscall_result);
+                if (raw_syscall_result != -4) {
+                    if (linux.unwrapSyscall(syscall_result = raw_syscall_result)) |_| {
+                        return status;
+                    } else {
+                        return null;
+                    }
+                }
+            }
+        },
+        else => #error("OS not supported"),
+    }
+
+}
+
+const IoChannelBehavior = enum{
+    pipe,
+    close,
+    inherit,
+    ignore,
+};
 
 const linux = #import("os/linux.nat");
 const macos = #import("os/macos.nat");

@@ -435,6 +435,56 @@ const execve = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: 
     return result;
 }
 
+const event_file_descriptor = fn(count: u32, flags: u32) usize {
+    const result = #syscall(#cast(Syscall.eventfd2), #cast(count), #cast(flags));
+    return result;
+}
+
+const dup2 = fn(old: s32, new: s32) usize {
+    const result = #syscall(#cast(Syscall.dup2), #cast(old), #cast(new));
+    return result;
+}
+
+const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) usize {
+    const result = #syscall(#cast(Syscall.open), #cast(path), flags, permissions);
+    return result;
+}
+
+const openat = fn(directory_file_descriptor: s32, path: [&:0]const u8, flags: u32, permissions: u32) usize {
+    const result = #syscall(#cast(Syscall.openat), #cast(directory_file_descriptor), #cast(path), flags, permissions);
+    return result;
+}
+
+const read = fn(file_descriptor: s32, bytes_ptr: [&]u8, bytes_len: usize) usize {
+    const result = #syscall(#cast(Syscall.read), #cast(file_descriptor), #cast(bytes_ptr), bytes_len);
+    return result;
+}
+
+const write = fn(file_descriptor: s32, bytes_ptr: [&]const u8, bytes_len: usize) usize {
+    const result = #syscall(#cast(Syscall.write), #cast(file_descriptor), #cast(bytes_ptr), bytes_len);
+    return result;
+}
+
+const close = fn(file_descriptor: s32) usize {
+    const result = #syscall(#cast(Syscall.close), #cast(file_descriptor));
+    return result;
+}
+
+const pipe2 = fn (pipe_pointer: &[2]s32, flags: u32) usize {
+    const result = #syscall(#cast(Syscall.pipe2), #cast(pipe_pointer), flags);
+    return result;
+}
+
+const waitpid = fn(pid: ProcessId, status: &u32, flags: u32, resource_usage: usize) usize {
+    const result = #syscall(#cast(Syscall.wait4), pid, #cast(status), flags, resource_usage);
+    return result;
+}
+
+const poll = fn(file_descriptors: [&]PollFileDescriptor, file_descriptor_count: usize, timeout: s32) usize {
+    const result = #syscall(#cast(Syscall.poll), #cast(file_descriptors), file_descriptor_count, #cast(timeout));
+    return result;
+}
+
 const unwrapSyscall = fn(syscall_result: usize) ?usize {
     const signed_syscall_result: ssize = #cast(syscall_result);
     if (signed_syscall_result >= 0) {
@@ -443,3 +493,26 @@ const unwrapSyscall = fn(syscall_result: usize) ?usize {
         return null;
     }
 }
+
+const EventFileDescriptorFlags = enum(u32) {
+    semaphore = 1,
+    cloexec = 0o2000000,
+    nonblock = 0o4000,
+};
+
+const PollFileDescriptor = struct{
+    file_descriptor: FileDescriptor,
+    events: Poll,
+    revents: Poll,
+
+    const Poll = struct(u16) {
+        in: bool = false,
+        pri: bool = false,
+        out: bool = false,
+        err: bool = false,
+        hup: bool = false,
+        nval: bool = false,
+        rdnorm: bool = false,
+        rdband: bool = false,
+    };
+};

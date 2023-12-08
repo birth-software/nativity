@@ -2,6 +2,7 @@ const std = #import("std");
 
 const main = fn() s32 {
     const size = 0x1000;
+
     if (std.page_allocator.allocate(size, alignment = 12)) |result| {
         result[0] = 0;
         std.print(bytes = "Allocation succeeded. Freeing...\n");

@@ -1,0 +1,11 @@
+const main = fn() s32 {
+    var i: s32 = 0;
+    while (i < 10) {
+        i += 1;
+        if (i == 5) {
+            break;
+        }
+    }
+
+    return i - 5;
+}

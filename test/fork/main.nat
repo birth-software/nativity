@@ -1,4 +1,5 @@
 const std = #import("std");
+
 const main = fn() s32 {
     if (std.os.duplicate_process()) |pid| {
         if (pid == 0) {
