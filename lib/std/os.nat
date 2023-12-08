@@ -114,6 +114,15 @@ const duplicate_process = fn () ?ProcessId {
     }
 }
 
+const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) usize {
+    switch (current) {
+        .linux =>  {
+            return linux.execve(path, argv, env);
+        },
+        else => #error("OS not supported"),
+    }
+}
+
 const FileDescriptor = struct{
     handle: system.FileDescriptor,
 
