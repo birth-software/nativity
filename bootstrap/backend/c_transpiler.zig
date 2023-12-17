@@ -58,12 +58,14 @@ pub const TranslationUnit = struct {
     string_literals: ArrayList(u8) = .{},
     primitive_type_declarations: ArrayList(u8) = .{},
     type_forward_declarations: ArrayList(u8) = .{},
+    macros: ArrayList(u8) = .{},
     type_declarations: ArrayList(u8) = .{},
     function_declarations: ArrayList(u8) = .{},
     global_variable_declarations: ArrayList(u8) = .{},
     function_definitions: ArrayList(u8) = .{},
     syscall_bitset: SyscallBitset = SyscallBitset.initEmpty(),
     function_set: AutoArrayHashMap(Compilation.Function.Index, []const u8) = .{},
+    macro_set: std.EnumSet(Macro) = std.EnumSet(Macro).initEmpty(),
     struct_type_set: TypeSet = .{},
     optional_type_set: TypeSet = .{},
     slice_type_set: TypeSet = .{},
@@ -141,7 +143,7 @@ pub const TranslationUnit = struct {
         // }
 
         if (declaration.mutability == .@"const") {
-            switch (module.types.array.get(declaration.type).*) {
+            switch (module.types.array.get(declaration.getType()).*) {
                 .optional => |optional| switch (module.types.array.get(optional.element_type).*) {
                     .pointer => {},
                     else => {
@@ -162,7 +164,7 @@ pub const TranslationUnit = struct {
             }
         }
 
-        try unit.writeType(module, list, allocator, declaration.type, separation_character);
+        try unit.writeType(module, list, allocator, declaration.getType(), separation_character);
 
         try list.append(allocator, ' ');
 
@@ -172,13 +174,13 @@ pub const TranslationUnit = struct {
 
         try unit.writeValue(module, list, allocator, Type.Index.invalid, indentation, .{
             .value_index = declaration.init_value,
-            .type_index = declaration.type,
+            .type_index = declaration.getType(),
         });
     }
 
     fn writeAssignment(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, assignment_index: Compilation.Assignment.Index, function_return_type: Type.Index, indentation: usize) !void {
         const assignment = module.values.assignments.get(assignment_index);
-        const left_type = module.values.array.get(assignment.source).getType(module);
+        const left_type = module.values.array.get(assignment.destination).getType(module);
         try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
             .value_index = assignment.destination,
             .type_index = left_type,
@@ -189,10 +191,48 @@ pub const TranslationUnit = struct {
             .add => try list.append(allocator, '+'),
         }
         try list.appendSlice(allocator, "= ");
+
         try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
             .value_index = assignment.source,
-            .type_index = Type.Index.invalid,
+            .type_index = left_type,
         });
+    }
+
+    fn writeReturn(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, return_index: Compilation.Return.Index, function_return_type: Type.Index, indentation: usize) !void {
+        const return_expr = module.values.returns.get(return_index);
+        try list.appendSlice(allocator, "return ");
+        const return_value = module.values.array.get(return_expr.value);
+        const return_value_type_index = return_value.getType(module);
+        // _ = return_value_type_index;
+        switch (module.types.array.get(function_return_type).*) {
+            .optional => switch (module.types.array.get(return_value_type_index).*) {
+                .optional => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                    .value_index = return_expr.value,
+                    .type_index = function_return_type,
+                }),
+                else => {
+                    try list.append(allocator, '(');
+                    try unit.writeType(module, list, allocator, function_return_type, '_');
+                    try list.appendSlice(allocator, ") {\n");
+
+                    try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                    try list.appendSlice(allocator, ".value = ");
+                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                        .value_index = return_expr.value,
+                        .type_index = return_value_type_index,
+                    });
+                    try list.appendSlice(allocator, ",\n");
+                    try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                    try list.appendSlice(allocator, ".is_null = false,\n");
+                    try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                    try list.append(allocator, '}');
+                },
+            },
+            else => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                .value_index = return_expr.value,
+                .type_index = function_return_type,
+            }),
+        }
     }
 
     fn writeBlock(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, block_index: Compilation.Block.Index, function_return_type: Type.Index, old_indentation: usize) !void {
@@ -215,45 +255,7 @@ pub const TranslationUnit = struct {
                     try list.append(allocator, ';');
                 },
                 .@"return" => |return_index| {
-                    const return_expr = module.values.returns.get(return_index);
-                    try list.appendSlice(allocator, "return ");
-                    const return_value = module.values.array.get(return_expr.value);
-                    const return_value_type_index = return_value.getType(module);
-                    // _ = return_value_type_index;
-                    switch (module.types.array.get(function_return_type).*) {
-                        .optional => switch (module.types.array.get(return_value_type_index).*) {
-                            .optional => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                                .value_index = return_expr.value,
-                                .type_index = function_return_type,
-                            }),
-                            else => {
-                                try list.append(allocator, '(');
-                                try unit.writeType(module, list, allocator, function_return_type, '_');
-                                try list.appendSlice(allocator, ") {\n");
-
-                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                                try list.appendSlice(allocator, ".value = ");
-                                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                                    .value_index = return_expr.value,
-                                    .type_index = return_value_type_index,
-                                });
-                                try list.appendSlice(allocator, ",\n");
-                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                                try list.appendSlice(allocator, ".is_null = false,\n");
-                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                                try list.append(allocator, '}');
-                            },
-                        },
-                        else => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                            .value_index = return_expr.value,
-                            .type_index = function_return_type,
-                        }),
-                    }
-
-                    try list.append(allocator, ';');
-                },
-                .syscall => |syscall_index| {
-                    try unit.writeSyscall(module, list, allocator, syscall_index, function_return_type, indentation);
+                    try unit.writeReturn(module, list, allocator, return_index, function_return_type, indentation);
                     try list.append(allocator, ';');
                 },
                 .@"unreachable" => {
@@ -265,33 +267,8 @@ pub const TranslationUnit = struct {
                     try list.append(allocator, ';');
                 },
                 .branch => |branch_index| {
-                    const branch = module.values.branches.get(branch_index);
-                    try list.appendSlice(allocator, "if (");
-                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                        .value_index = branch.expression,
-                        .type_index = Type.Index.invalid,
-                    });
-                    try list.appendSlice(allocator, ") ");
-                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                        .value_index = branch.taken_expression,
-                        .type_index = function_return_type,
-                    });
-
-                    if (!branch.not_taken_expression.invalid) {
-                        if (module.values.array.get(branch.taken_expression).* == .block) {
-                            _ = list.pop();
-                            try list.appendSlice(allocator, " else ");
-                        } else {
-                            unreachable;
-                        }
-                        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                            .value_index = branch.not_taken_expression,
-                            .type_index = function_return_type,
-                        });
-
-                        if (module.values.array.get(branch.not_taken_expression).* == .block) {
-                            continue;
-                        }
+                    if (!try unit.writeBranch(module, list, allocator, branch_index, function_return_type, indentation)) {
+                        continue;
                     }
                 },
                 .assembly_block => |assembly_block_index| {
@@ -333,6 +310,61 @@ pub const TranslationUnit = struct {
                 .block => |new_block_index| {
                     try unit.writeBlock(module, list, allocator, new_block_index, function_return_type, indentation);
                 },
+                .switch_expression => |switch_index| {
+                    const switch_expression = module.values.switches.get(switch_index);
+                    try list.appendSlice(allocator, "switch (");
+                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                        .value_index = switch_expression.value,
+                        .type_index = Type.Index.invalid,
+                    });
+                    try list.appendSlice(allocator, ") {\n");
+
+                    for (switch_expression.groups.items) |switch_case_group| {
+                        for (switch_case_group.conditions.items) |condition_value_index| {
+                            try list.appendNTimes(allocator, ' ', (indentation + 1) * margin_width);
+                            try list.appendSlice(allocator, "case ");
+                            try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
+                                .value_index = condition_value_index,
+                                .type_index = Type.Index.invalid,
+                            });
+                            try list.appendSlice(allocator, ":\n");
+                        }
+
+                        _ = list.pop();
+
+                        switch (module.values.array.get(switch_case_group.expression).*) {
+                            .block => {
+                                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                                    .value_index = switch_case_group.expression,
+                                    .type_index = Type.Index.invalid,
+                                });
+                            },
+                            else => {
+                                try list.appendSlice(allocator, " {\n");
+
+                                try unit.writeValue(module, list, allocator, function_return_type, indentation + 2, .{
+                                    .value_index = switch_case_group.expression,
+                                    .type_index = Type.Index.invalid,
+                                });
+                                try list.appendSlice(allocator, ";\n");
+
+                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                                try list.appendSlice(allocator, "}\n");
+                            },
+                        }
+
+                        try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                        try list.appendSlice(allocator, " break;\n");
+                    }
+
+                    try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                    try list.appendSlice(allocator, "};\n");
+                },
+                .intrinsic => |intrinsic_index| {
+                    try unit.writeIntrinsic(module, list, allocator, intrinsic_index, function_return_type, indentation, .statement);
+                    try list.append(allocator, ';');
+                },
+                .@"break" => try list.appendSlice(allocator, "break;"),
                 else => |t| @panic(@tagName(t)),
             }
 
@@ -371,7 +403,14 @@ pub const TranslationUnit = struct {
             return unit.declaration_set.values()[index];
         } else {
             const declaration = module.values.declarations.get(declaration_index);
-            const base_declaration_name = module.getName(declaration.name).?;
+            const base_declaration_name = blk: {
+                const name = module.getName(declaration.name).?;
+                if (declaration.scope_type == .global and equal(u8, name, "main")) {
+                    break :blk "user_entry_point";
+                } else {
+                    break :blk name;
+                }
+            };
             var list = ArrayList(u8){};
 
             try list.insertSlice(allocator, 0, base_declaration_name);
@@ -408,12 +447,22 @@ pub const TranslationUnit = struct {
             try unit.declaration_set.putNoClobber(allocator, declaration_index, list.items);
 
             switch (declaration.scope_type) {
-                .global => switch (module.types.array.get(declaration.type).*) {
+                .global => switch (module.types.array.get(declaration.getType()).*) {
                     .function,
                     .type,
                     => {},
-                    .@"struct" => {
-                        try unit.writeDeclaration(module, &unit.global_variable_declarations, allocator, declaration_index, 0, '_');
+                    .integer,
+                    .@"struct",
+                    .pointer,
+                    => {
+                        const new_separation_character: u8 = switch (module.types.array.get(declaration.getType()).*) {
+                            .integer,
+                            .@"struct",
+                            => '_',
+                            .pointer => ' ',
+                            else => unreachable,
+                        };
+                        try unit.writeDeclaration(module, &unit.global_variable_declarations, allocator, declaration_index, 0, new_separation_character);
                         try unit.global_variable_declarations.append(allocator, ';');
                         try unit.global_variable_declarations.appendNTimes(allocator, '\n', 2);
                     },
@@ -441,10 +490,10 @@ pub const TranslationUnit = struct {
 
         try list.append(allocator, '(');
 
-        if (function_prototype.arguments) |function_arguments| {
-            for (function_arguments) |argument_index| {
+        if (function_prototype.arguments.items.len > 0) {
+            for (function_prototype.arguments.items) |argument_index| {
                 const arg_declaration = module.values.declarations.get(argument_index);
-                try unit.writeType(module, list, allocator, arg_declaration.type, ' ');
+                try unit.writeType(module, list, allocator, arg_declaration.getType(), ' ');
                 try list.append(allocator, ' ');
                 const arg_name = module.getName(arg_declaration.name).?;
                 try list.appendSlice(allocator, arg_name);
@@ -462,6 +511,7 @@ pub const TranslationUnit = struct {
         const function_definition = module.types.function_definitions.get(function_index);
         const function_prototype_type = module.types.array.get(function_definition.prototype);
         const function_prototype_index = function_prototype_type.function;
+
         try unit.writeFunctionPrototype(module, list, allocator, function_prototype_index, name);
 
         return name;
@@ -475,11 +525,17 @@ pub const TranslationUnit = struct {
             .noreturn => try list.appendSlice(allocator, "[[noreturn]] void"),
             .bool => try list.appendSlice(allocator, "bool"),
             .integer => |integer| {
-                try list.append(allocator, switch (integer.signedness) {
-                    .signed => 's',
-                    .unsigned => 'u',
-                });
-                try list.writer(allocator).print("{}", .{integer.bit_count});
+                if (type_index.eq(Type.usize)) {
+                    try list.appendSlice(allocator, "usize");
+                } else if (type_index.eq(Type.ssize)) {
+                    try list.appendSlice(allocator, "ssize");
+                } else {
+                    try list.append(allocator, switch (integer.signedness) {
+                        .signed => 's',
+                        .unsigned => 'u',
+                    });
+                    try list.writer(allocator).print("{}", .{integer.bit_count});
+                }
             },
             .pointer => {
                 const name = try unit.cachePointerType(module, allocator, type_index, separation_character);
@@ -516,6 +572,7 @@ pub const TranslationUnit = struct {
             .pointer => |pointer| {
                 switch (module.types.array.get(pointer.element_type).*) {
                     .function => |function| return try unit.writeFunctionPrototype(module, list, allocator, function, try std.mem.concat(allocator, u8, &.{ "(*", name, ")" })),
+                    .optional => {},
                     else => |t| @panic(@tagName(t)),
                 }
             },
@@ -529,11 +586,17 @@ pub const TranslationUnit = struct {
 
     fn writeAssembly(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, assembly_block_index: Compilation.Assembly.Block.Index, indentation: usize) !void {
         const assembly_block = module.values.assembly_blocks.get(assembly_block_index);
+
         try list.appendSlice(allocator, "__asm__ __volatile__(\n");
+
+        var operand_values = ArrayList(Value.Index){};
+
         for (assembly_block.instructions) |instruction_index| {
-            const generic_instruction = module.values.assembly_instructions.get(instruction_index);
             try list.appendNTimes(allocator, ' ', (indentation + 1) * margin_width);
             try list.append(allocator, '"');
+
+            const generic_instruction = module.values.assembly_instructions.get(instruction_index);
+
             switch (module.descriptor.target.cpu.arch) {
                 .x86_64 => {
                     const architecture = @field(Compilation.Assembly, "x86_64");
@@ -541,20 +604,21 @@ pub const TranslationUnit = struct {
                     const instruction: architecture.Instruction = @enumFromInt(generic_instruction.id);
                     const instruction_name = switch (instruction) {
                         .@"and" => "andq",
+                        .mov => "movq",
                         .xor => @tagName(instruction),
                         .call => "callq",
                     };
                     try list.appendSlice(allocator, instruction_name);
 
                     assert(generic_instruction.operands.len <= 2);
+
                     if (generic_instruction.operands.len > 0) {
                         try list.append(allocator, ' ');
-                        var operand_i: usize = generic_instruction.operands.len;
 
-                        while (operand_i > 0) {
-                            operand_i -= 1;
+                        var skip = false;
 
-                            const operand = generic_instruction.operands[operand_i];
+                        var operand_iterator = std.mem.reverseIterator(generic_instruction.operands);
+                        while (operand_iterator.next()) |operand| {
                             switch (operand) {
                                 .register => |generic_register| {
                                     const register: architecture.Register = @enumFromInt(generic_register);
@@ -565,10 +629,29 @@ pub const TranslationUnit = struct {
                                     try list.writer(allocator).print("$0x{x}", .{number_literal});
                                 },
                                 .value_index => |value_index| {
-                                    try unit.writeValue(module, list, allocator, Type.Index.invalid, indentation + 1, .{
-                                        .value_index = value_index,
-                                        .type_index = Type.Index.invalid,
-                                    });
+                                    const operand_value = module.values.array.get(value_index);
+
+                                    switch (operand_value.*) {
+                                        .unary_operation => |unary_operation_index| {
+                                            const unary_operation = module.values.unary_operations.get(unary_operation_index);
+                                            switch (unary_operation.id) {
+                                                .address_of => try list.writer(allocator).print("%{}", .{operand_values.items.len}),
+                                                else => |t| @panic(@tagName(t)),
+                                            }
+                                        },
+                                        .function_definition => {
+                                            try unit.writeValue(module, list, allocator, Type.Index.invalid, indentation + 1, .{
+                                                .value_index = value_index,
+                                                .type_index = Type.Index.invalid,
+                                            });
+                                            skip = true;
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+
+                                    if (!skip) {
+                                        try operand_values.append(allocator, value_index);
+                                    }
                                 },
                             }
 
@@ -581,7 +664,31 @@ pub const TranslationUnit = struct {
                 },
                 else => unreachable,
             }
+
             try list.appendSlice(allocator, "\\n\\t\"\n");
+        }
+
+        if (operand_values.items.len > 0) {
+            try list.appendNTimes(allocator, ' ', indentation * margin_width);
+            try list.appendSlice(allocator, ":\n");
+            try list.appendNTimes(allocator, ' ', indentation * margin_width);
+            try list.appendSlice(allocator, ": ");
+
+            for (operand_values.items) |operand_value_index| {
+                try list.appendSlice(allocator, "\"x\"(");
+
+                try unit.writeValue(module, list, allocator, Type.Index.invalid, indentation + 1, .{
+                    .value_index = operand_value_index,
+                    .type_index = Type.Index.invalid,
+                });
+
+                try list.appendSlice(allocator, "), ");
+            }
+
+            _ = list.pop();
+            _ = list.pop();
+
+            try list.append(allocator, '\n');
         }
 
         try list.appendNTimes(allocator, ' ', indentation * margin_width);
@@ -593,6 +700,7 @@ pub const TranslationUnit = struct {
         assert(t.* == .@"struct");
         const result = if (unit.struct_type_set.get(type_index, separation_character)) |r| r else blk: {
             const type_name = try unit.renderTypeName(module, allocator, type_index);
+            // if (std.mem.containsAtLeast(u8, type_name, 1, "Process")) @breakpoint();
             logln(.c, .g, "Registering struct {s}: #{}", .{ type_name, type_index.uniqueInteger() });
             try unit.struct_type_set.put(allocator, type_index, .{
                 .underscore = type_name,
@@ -623,7 +731,7 @@ pub const TranslationUnit = struct {
                             try list.appendSlice(allocator, " : ");
                             try list.writer(allocator).print("{}", .{module.types.array.get(struct_field.type).getBitSize()});
                         },
-                        true => try unit.writeCDeclaration(module, &list, allocator, struct_field_name, struct_field.type, '_'),
+                        true => try unit.writeCDeclaration(module, &list, allocator, struct_field_name, struct_field.type, ' '),
                     }
 
                     try list.appendSlice(allocator, ";\n");
@@ -885,86 +993,233 @@ pub const TranslationUnit = struct {
         return result;
     }
 
-    fn writeSyscall(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, syscall_index: Compilation.Syscall.Index, function_return_type: Type.Index, indentation: usize) !void {
-        const syscall = module.values.syscalls.get(syscall_index);
-        const arguments = syscall.getArguments();
+    const ValueType = enum {
+        statement,
+        expression,
+    };
 
-        if (!unit.syscall_bitset.isSet(arguments.len)) {
-            try unit.function_declarations.appendSlice(allocator, "static __inline u64 syscall");
-            try unit.function_declarations.writer(allocator).print("{}(", .{arguments.len});
-            try unit.function_declarations.appendSlice(allocator, "u64 n, ");
-            for (0..arguments.len) |arg_i| {
-                try unit.function_declarations.writer(allocator).print("u64 arg{}, ", .{arg_i});
+    fn writeIntrinsic(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, intrinsic_index: Compilation.Intrinsic.Index, function_return_type: Type.Index, indentation: usize, value_type: ValueType) !void {
+        const intrinsic = module.values.intrinsics.get(intrinsic_index);
+        switch (intrinsic.kind) {
+            .syscall => |syscall_arguments| {
+                const syscall_argument_count = syscall_arguments.items.len;
+                if (!unit.syscall_bitset.isSet(syscall_argument_count - 1)) {
+                    try unit.function_declarations.appendSlice(allocator, "u64 syscall");
+                    try unit.function_declarations.writer(allocator).print("{}(", .{syscall_argument_count});
+                    for (0..syscall_argument_count) |arg_i| {
+                        try unit.function_declarations.writer(allocator).print("u64 arg{}, ", .{arg_i});
+                    }
+                    _ = unit.function_declarations.pop();
+                    _ = unit.function_declarations.pop();
+                    try unit.function_declarations.appendSlice(allocator,
+                        \\) {
+                        \\
+                    );
+
+                    const simple_register_argument_count = @min(syscall_argument_count, 4);
+                    const complex_register_argument_count = syscall_argument_count - simple_register_argument_count;
+                    const simple_argument_registers = [_]u8{ 'a', 'D', 'S', 'd' };
+                    const complex_argument_registers = [_]u8{ 10, 8, 9 };
+
+                    for (0..complex_register_argument_count) |i| {
+                        try unit.function_declarations.appendNTimes(allocator, ' ', indentation * margin_width);
+                        try unit.function_declarations.writer(allocator).print("register unsigned long r{} __asm__(\"r{}\") = arg{};\n", .{ complex_argument_registers[i], complex_argument_registers[i], simple_argument_registers.len + i });
+                    }
+
+                    try unit.function_declarations.appendSlice(allocator,
+                        \\    unsigned long ret;
+                        \\
+                        \\    __asm__ __volatile__("syscall"
+                        \\        : "=a"(ret)
+                        \\        : 
+                    );
+
+                    for (0..simple_register_argument_count, simple_argument_registers[0..simple_register_argument_count]) |arg_i, arg_register| {
+                        try unit.function_declarations.writer(allocator).print("\"{c}\"(arg{}), ", .{ arg_register, arg_i });
+                    }
+
+                    for (complex_argument_registers[0..complex_register_argument_count]) |arg_register| {
+                        try unit.function_declarations.writer(allocator).print("\"r\"(r{}), ", .{arg_register});
+                    }
+
+                    _ = unit.function_declarations.pop();
+                    _ = unit.function_declarations.pop();
+
+                    try unit.function_declarations.appendSlice(allocator,
+                        \\
+                        \\        : "rcx", "r11", "memory"
+                        \\    );
+                        \\
+                        \\    return ret;
+                        \\}
+                        \\
+                        \\
+                    );
+
+                    unit.syscall_bitset.set(syscall_argument_count - 1);
+                }
+
+                try list.writer(allocator).print("syscall{}(", .{syscall_argument_count});
+
+                for (syscall_arguments.items) |argument_index| {
+                    try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                        .value_index = argument_index,
+                        .type_index = Type.Index.invalid,
+                    });
+                    try list.appendSlice(allocator, ", ");
+                }
+
+                _ = list.pop();
+                _ = list.pop();
+                try list.append(allocator, ')');
+            },
+            .cast => |cast_value_index| {
+                if (value_type == .statement) unreachable;
+
+                const cast_type = intrinsic.type;
+                const cast_value = module.values.array.get(cast_value_index);
+
+                try list.append(allocator, '(');
+                try unit.writeType(module, list, allocator, cast_type, ' ');
+                try list.append(allocator, ')');
+
+                const cast_value_type = module.types.array.get(cast_value.getType(module));
+
+                switch (cast_value_type.*) {
+                    .@"struct" => |struct_index| {
+                        const struct_type = module.types.structs.get(struct_index);
+                        switch (struct_type.backing_type.invalid) {
+                            false => {
+                                try list.appendSlice(allocator, "*(");
+                                try unit.writeType(module, list, allocator, struct_type.backing_type, '_');
+                                try list.appendSlice(allocator, "*)&(");
+                                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                                    .value_index = cast_value_index,
+                                    .type_index = function_return_type,
+                                });
+                                try list.append(allocator, ')');
+                            },
+                            true => @panic("Unable to bitcast non-packed struct"),
+                        }
+                    },
+                    else => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                        .value_index = cast_value_index,
+                        .type_index = Type.Index.invalid,
+                    }),
+                }
+            },
+            .optional_wrap => |value_to_wrap_index| {
+                const optional_type = module.types.array.get(intrinsic.type);
+                switch (optional_type.*) {
+                    .optional => |optional| {
+                        const optional_element_type = module.types.array.get(optional.element_type);
+                        switch (optional_element_type.*) {
+                            .pointer => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                                .value_index = value_to_wrap_index,
+                                .type_index = optional.element_type,
+                            }),
+                            else => {
+                                try list.append(allocator, '(');
+                                try unit.writeType(module, list, allocator, intrinsic.type, '_');
+                                try list.appendSlice(allocator, ") {\n");
+                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                                try list.appendSlice(allocator, ".value = ");
+                                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                                    .value_index = value_to_wrap_index,
+                                    .type_index = Type.Index.invalid,
+                                });
+                                try list.appendSlice(allocator, ",\n");
+                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                                try list.appendSlice(allocator, ".is_null = false,\n");
+                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                                try list.append(allocator, '}');
+                            },
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            .array_coerce_to_slice => |array_to_coerce_value_index| {
+                try list.append(allocator, '(');
+                try unit.writeType(module, list, allocator, intrinsic.type, '_');
+                try list.appendSlice(allocator, ") {\n");
+                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                try list.appendSlice(allocator, ".ptr = ");
+                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                    .value_index = array_to_coerce_value_index,
+                    .type_index = Type.Index.invalid,
+                });
+                switch (module.values.array.get(array_to_coerce_value_index).*) {
+                    .string_literal => {},
+                    else => try list.appendSlice(allocator, ".value"),
+                }
+                try list.appendSlice(allocator, ",\n");
+                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                const array_value = module.values.array.get(array_to_coerce_value_index);
+                const array_type = module.types.array.get(array_value.getType(module));
+                const array_length = switch (array_type.*) {
+                    .array => |array| array.element_count,
+                    .pointer => |pointer| switch (module.types.array.get(pointer.element_type).*) {
+                        .array => |array| array.element_count,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+                try list.writer(allocator).print(".len = {},\n", .{array_length});
+                try list.appendNTimes(allocator, ' ', indentation * margin_width);
+                try list.append(allocator, '}');
+            },
+            .sign_extend, .zero_extend => |value_index| {
+                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                    .value_index = value_index,
+                    .type_index = intrinsic.type,
+                });
+            },
+            .min => |binary| {
+                try list.appendSlice(allocator, try unit.cacheMacro(allocator, .MIN));
+                try list.append(allocator, '(');
+
+                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                    .value_index = binary.left,
+                    .type_index = intrinsic.type,
+                });
+
+                try list.appendSlice(allocator, ", ");
+
+                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                    .value_index = binary.right,
+                    .type_index = intrinsic.type,
+                });
+
+                try list.append(allocator, ')');
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+    }
+
+    const Macro = enum {
+        MIN,
+    };
+
+    fn cacheMacro(unit: *TranslationUnit, allocator: Allocator, macro: Macro) ![]const u8 {
+        if (!unit.macro_set.contains(macro)) {
+            switch (macro) {
+                .MIN => {
+                    try unit.macros.appendSlice(allocator,
+                        \\#define MIN(a, b) \
+                        \\  ({ __typeof__ (a) _a = (a); \
+                        \\     __typeof__ (b) _b = (b); \
+                        \\  _a < _b ? _a : _b; })
+                        \\
+                        \\
+                    );
+                },
             }
-            _ = unit.function_declarations.pop();
-            _ = unit.function_declarations.pop();
-            try unit.function_declarations.appendSlice(allocator,
-                \\) {
-                \\
-            );
 
-            const simple_register_argument_count = @min(arguments.len, 3);
-            const complex_register_argument_count = arguments.len - simple_register_argument_count;
-            const simple_argument_registers = [_]u8{ 'D', 'S', 'd' };
-            const complex_argument_registers = [_]u8{ 10, 8, 9 };
-
-            for (0..complex_register_argument_count) |i| {
-                try unit.function_declarations.appendNTimes(allocator, ' ', indentation * margin_width);
-                try unit.function_declarations.writer(allocator).print("register unsigned long r{} __asm__(\"r{}\") = arg{};\n", .{ complex_argument_registers[i], complex_argument_registers[i], 3 + i });
-            }
-
-            try unit.function_declarations.appendSlice(allocator,
-                \\    unsigned long ret;
-                \\
-                \\    __asm__ __volatile__("syscall"
-                \\        : "=a"(ret)
-                \\        : "a"(n), 
-            );
-
-            for (0..simple_register_argument_count, simple_argument_registers[0..simple_register_argument_count]) |arg_i, arg_register| {
-                try unit.function_declarations.writer(allocator).print("\"{c}\"(arg{}), ", .{ arg_register, arg_i });
-            }
-
-            for (complex_argument_registers[0..complex_register_argument_count]) |arg_register| {
-                try unit.function_declarations.writer(allocator).print("\"r\"(r{}), ", .{arg_register});
-            }
-
-            _ = unit.function_declarations.pop();
-            _ = unit.function_declarations.pop();
-
-            try unit.function_declarations.appendSlice(allocator,
-                \\
-                \\        : "rcx", "r11", "memory"
-                \\    );
-                \\
-                \\    return ret;
-                \\}
-                \\
-                \\
-            );
-
-            unit.syscall_bitset.set(arguments.len);
+            unit.macro_set.setPresent(macro, true);
         }
 
-        try list.writer(allocator).print("syscall{}(", .{arguments.len});
-
-        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-            .value_index = syscall.number,
-            .type_index = function_return_type,
-        });
-        try list.appendSlice(allocator, ", ");
-
-        for (arguments) |argument_index| {
-            try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                .value_index = argument_index,
-                .type_index = Type.Index.invalid,
-            });
-            try list.appendSlice(allocator, ", ");
-        }
-
-        _ = list.pop();
-        _ = list.pop();
-        try list.append(allocator, ')');
+        return @tagName(macro);
     }
 
     fn writeUnreachable(list: *ArrayList(u8), allocator: Allocator) !void {
@@ -974,9 +1229,18 @@ pub const TranslationUnit = struct {
     fn writeCall(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, call_index: Compilation.Call.Index, function_return_type: Type.Index, indentation: usize) !void {
         const call = module.values.calls.get(call_index);
         const call_value = module.values.array.get(call.value);
+        var argument_declarations = ArrayList(Compilation.Declaration.Index){};
         switch (call_value.*) {
             .function_definition => |function_definition_index| {
                 const name = try unit.renderFunctionName(module, allocator, function_definition_index);
+                // if (equal(u8, name, "os_execute")) {
+                //     @breakpoint();
+                // }
+                const function_definition = module.types.function_definitions.get(function_definition_index);
+                const function_prototype_type = module.types.array.get(function_definition.prototype);
+                const function_prototype = module.types.function_prototypes.get(function_prototype_type.function);
+                argument_declarations = function_prototype.arguments;
+
                 try list.appendSlice(allocator, name);
                 try list.append(allocator, '(');
             },
@@ -987,10 +1251,23 @@ pub const TranslationUnit = struct {
                     .type_index = function_return_type,
                 });
 
-                const left_type = module.types.array.get(module.values.array.get(field_access.declaration_reference).declaration_reference.type);
+                const left_type = module.types.array.get(module.values.array.get(field_access.declaration_reference).declaration_reference.getType(module));
+                // const is_pointer = switch (left_type) {
+                //     .pointer => |pointer| b: {
+                //         break :b true;
+                //     },
+                // };
                 const is_pointer = switch (left_type.*) {
                     .pointer => true,
                     else => false,
+                };
+                const container_field = module.types.container_fields.get(module.values.field_accesses.get(field_access_index).field);
+                argument_declarations = switch (module.types.array.get(container_field.type).*) {
+                    .pointer => |pointer| switch (module.types.array.get(pointer.element_type).*) {
+                        .function => |function| module.types.function_prototypes.get(function).arguments,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
                 };
 
                 if (is_pointer) {
@@ -1009,12 +1286,17 @@ pub const TranslationUnit = struct {
 
         if (!call.arguments.invalid) {
             const argument_list = module.values.argument_lists.get(call.arguments);
+            assert(argument_declarations.items.len == argument_list.array.items.len);
 
             if (argument_list.array.items.len > 0) {
-                for (argument_list.array.items) |argument_index| {
+                for (argument_list.array.items, argument_declarations.items, 0..) |argument_index, argument_declaration_index, index| {
+                    _ = index;
+
+                    const argument_declaration = module.values.declarations.get(argument_declaration_index);
+
                     try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
                         .value_index = argument_index,
-                        .type_index = Type.Index.invalid,
+                        .type_index = argument_declaration.getType(),
                     });
                     try list.appendSlice(allocator, ", ");
                 }
@@ -1027,6 +1309,39 @@ pub const TranslationUnit = struct {
         try list.append(allocator, ')');
     }
 
+    fn writeBranch(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, branch_index: Compilation.Branch.Index, function_return_type: Type.Index, indentation: usize) !bool {
+        const branch = module.values.branches.get(branch_index);
+        try list.appendSlice(allocator, "if (");
+        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+            .value_index = branch.expression,
+            .type_index = Type.Index.invalid,
+        });
+        try list.appendSlice(allocator, ") ");
+        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+            .value_index = branch.taken_expression,
+            .type_index = function_return_type,
+        });
+
+        if (!branch.not_taken_expression.invalid) {
+            if (module.values.array.get(branch.taken_expression).* == .block) {
+                _ = list.pop();
+                try list.appendSlice(allocator, " else ");
+            } else {
+                unreachable;
+            }
+            try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                .value_index = branch.not_taken_expression,
+                .type_index = function_return_type,
+            });
+
+            if (module.values.array.get(branch.not_taken_expression).* == .block) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     const ValueArguments = struct {
         value_index: Value.Index,
         type_index: Type.Index,
@@ -1035,7 +1350,6 @@ pub const TranslationUnit = struct {
     fn writeValue(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, function_return_type: Type.Index, indentation: usize, arguments: ValueArguments) anyerror!void {
         const value_index = arguments.value_index;
         const type_index = arguments.type_index;
-        _ = type_index;
         const value = module.values.array.get(value_index);
         //logln(.c, .g, "Generating C code for {s}", .{@tagName(value.*)});
         switch (value.*) {
@@ -1055,6 +1369,8 @@ pub const TranslationUnit = struct {
             },
             .binary_operation => |binary_operation_index| {
                 const binary_operation = module.values.binary_operations.get(binary_operation_index);
+
+                try list.append(allocator, '(');
                 try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
                     .value_index = binary_operation.left,
                     .type_index = binary_operation.type,
@@ -1074,6 +1390,7 @@ pub const TranslationUnit = struct {
                     .shift_left => try list.appendSlice(allocator, "<<"),
                     .shift_right => try list.appendSlice(allocator, ">>"),
                     .compare_equal => try list.appendSlice(allocator, "=="),
+                    .compare_not_equal => try list.appendSlice(allocator, "!="),
                     .compare_greater_or_equal => try list.appendSlice(allocator, ">="),
                     .compare_less_or_equal => try list.appendSlice(allocator, "<="),
                 }
@@ -1083,44 +1400,7 @@ pub const TranslationUnit = struct {
                     .value_index = binary_operation.right,
                     .type_index = binary_operation.type,
                 });
-            },
-            .sign_extend => |cast_index| {
-                const sign_extend = module.values.casts.get(cast_index);
-                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                    .value_index = sign_extend.value,
-                    .type_index = sign_extend.type,
-                });
-            },
-            .cast => |cast_index| {
-                const cast = module.values.casts.get(cast_index);
-                try list.append(allocator, '(');
-                try unit.writeType(module, list, allocator, cast.type, ' ');
                 try list.append(allocator, ')');
-                const cast_value = module.values.array.get(cast.value);
-                const cast_value_type = module.types.array.get(cast_value.getType(module));
-
-                switch (cast_value_type.*) {
-                    .@"struct" => |struct_index| {
-                        const struct_type = module.types.structs.get(struct_index);
-                        switch (struct_type.backing_type.invalid) {
-                            false => {
-                                try list.appendSlice(allocator, "*(");
-                                try unit.writeType(module, list, allocator, struct_type.backing_type, '_');
-                                try list.appendSlice(allocator, "*)&(");
-                                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                                    .value_index = cast.value,
-                                    .type_index = function_return_type,
-                                });
-                                try list.append(allocator, ')');
-                            },
-                            true => @panic("Unable to bitcast non-packed struct"),
-                        }
-                    },
-                    else => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                        .value_index = cast.value,
-                        .type_index = Type.Index.invalid,
-                    }),
-                }
             },
             .string_literal => |string_literal_descriptor| {
                 try list.appendSlice(allocator, "(u8 *)");
@@ -1133,7 +1413,6 @@ pub const TranslationUnit = struct {
                 try writeUnreachable(list, allocator);
             },
             .call => |call_index| try unit.writeCall(module, list, allocator, call_index, function_return_type, indentation),
-            .syscall => |syscall_index| try unit.writeSyscall(module, list, allocator, syscall_index, function_return_type, indentation),
             .bool => |boolean| try list.appendSlice(allocator, if (boolean) "true" else "false"),
             .block => |block_index| try unit.writeBlock(module, list, allocator, block_index, function_return_type, indentation),
             .unary_operation => |unary_operation_index| {
@@ -1145,16 +1424,92 @@ pub const TranslationUnit = struct {
                     .pointer_dereference => '*',
                 };
 
-                try list.append(allocator, expression_character);
+                const emit_expression_character = blk: {
+                    var emit = true;
+                    if (unary_operation.id == .address_of) {
+                        const unary_value_type = module.types.array.get(module.values.array.get(unary_operation.value).getType(module));
+                        switch (unary_value_type.*) {
+                            .array => |source_array| if (!arguments.type_index.invalid) switch (module.types.array.get(arguments.type_index).*) {
+                                .pointer => |pointer| switch (module.types.array.get(pointer.element_type).*) {
+                                    .array => {},
+                                    .optional => switch (module.types.array.get(source_array.element_type).*) {
+                                        .optional => emit = false,
+                                        else => |t| @panic(@tagName(t)),
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            .integer,
+                            .@"struct",
+                            .function,
+                            .pointer,
+                            => {},
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    }
+
+                    break :blk emit;
+                };
+
+                if (emit_expression_character) {
+                    try list.append(allocator, expression_character);
+                }
+
                 try list.append(allocator, '(');
                 try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
                     .value_index = unary_operation.value,
                     .type_index = unary_operation.type,
                 });
                 try list.append(allocator, ')');
+
+                if (unary_operation.id == .address_of) {
+                    if (!arguments.type_index.invalid) {
+                        switch (module.types.array.get(arguments.type_index).*) {
+                            .pointer => |pointer| switch (module.types.array.get(module.values.array.get(unary_operation.value).getType(module)).*) {
+                                .array => switch (module.types.array.get(pointer.element_type).*) {
+                                    .array => {},
+                                    .optional => try list.appendSlice(allocator, ".value"),
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                                .integer,
+                                .@"struct",
+                                .function,
+                                => {},
+                                // .array,
+                                // .optional,
+                                // .integer,
+                                // .@"struct",
+                                // .function,
+                                // => {},
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    }
+                }
             },
             .container_initialization => |container_initialization_index| {
                 const container_initialization = module.values.container_initializations.get(container_initialization_index);
+
+                // TODO: obliterate this crap and handle this in sema perfectly (optional_wrap)
+                const additional_indentation: usize = if (!type_index.invalid) blk: {
+                    switch (module.types.array.get(type_index).*) {
+                        .@"struct" => break :blk 0,
+                        .optional => |optional| switch (module.types.array.get(optional.element_type).*) {
+                            .pointer => break :blk 0,
+                            else => {
+                                try list.append(allocator, '(');
+                                try unit.writeType(module, list, allocator, type_index, '_');
+                                try list.appendSlice(allocator, ") {\n");
+                                try list.appendNTimes(allocator, ' ', (indentation + 1) * margin_width);
+                                try list.appendSlice(allocator, ".value = ");
+                                break :blk 1;
+                            },
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                } else 0;
 
                 try list.append(allocator, '(');
                 try unit.writeType(module, list, allocator, container_initialization.type, '_');
@@ -1163,15 +1518,17 @@ pub const TranslationUnit = struct {
                 const container_type = module.types.array.get(container_initialization.type);
                 switch (container_type.*) {
                     .@"struct" => {
-                        const container_fields = module.types.structs.get(container_type.@"struct").fields;
+                        const struct_type = module.types.structs.get(container_type.@"struct");
+                        logln(.c, .g, "Struct type: 0x{x}", .{@intFromPtr(struct_type)});
 
-                        for (container_initialization.field_initializations.items, container_fields.items) |field_initialization_index, container_field_index| {
+                        for (container_initialization.field_initializations.items, struct_type.fields.items) |field_initialization_index, container_field_index| {
                             try list.appendNTimes(allocator, ' ', (indentation + 1) * margin_width);
                             try list.append(allocator, '.');
                             const container_field = module.types.container_fields.get(container_field_index);
                             const field_name = module.getName(container_field.name).?;
                             try list.appendSlice(allocator, field_name);
                             try list.appendSlice(allocator, " = ");
+                            logln(.c, .g, "Name: {s}. Value: #{}. Field #{}", .{ field_name, field_initialization_index.uniqueInteger(), container_field_index.uniqueInteger() });
                             try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
                                 .value_index = field_initialization_index,
                                 .type_index = container_field.type,
@@ -1218,6 +1575,12 @@ pub const TranslationUnit = struct {
                         try list.append(allocator, '}');
                     },
                     else => |t| @panic(@tagName(t)),
+                }
+
+                if (additional_indentation > 0) {
+                    try list.appendSlice(allocator, ",\n");
+                    try list.appendNTimes(allocator, ' ', (indentation + 1) * margin_width);
+                    try list.appendSlice(allocator, "}");
                 }
             },
             .array_initialization => |array_initialization_index| {
@@ -1278,13 +1641,14 @@ pub const TranslationUnit = struct {
                 const sliceable = module.values.array.get(slice.sliceable);
 
                 const sliceable_type_index = switch (sliceable.*) {
-                    .declaration_reference => |declaration_reference| declaration_reference.type,
+                    .declaration_reference => |declaration_reference| declaration_reference.getType(module),
                     else => |t| @panic(@tagName(t)),
                 };
                 const sliceable_type = module.types.array.get(sliceable_type_index);
                 const sliceable_element_type = switch (sliceable_type.*) {
                     .pointer => |pointer| pointer.element_type,
                     .slice => |slice_type| slice_type.element_type,
+                    .array => |array_type| array_type.element_type,
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -1322,6 +1686,19 @@ pub const TranslationUnit = struct {
                         });
                         try list.appendSlice(allocator, "),\n");
                     },
+                    .array => {
+                        try list.append(allocator, '(');
+                        try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
+                            .value_index = slice.sliceable,
+                            .type_index = sliceable_type_index,
+                        });
+                        try list.appendSlice(allocator, ").value + (");
+                        try unit.writeValue(module, list, allocator, function_return_type, indentation + 1, .{
+                            .value_index = slice.range.start,
+                            .type_index = Type.Index.invalid,
+                        });
+                        try list.appendSlice(allocator, "),\n");
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
 
@@ -1349,7 +1726,7 @@ pub const TranslationUnit = struct {
                             },
                         }
                     },
-                    .slice => {
+                    .slice, .array => {
                         try list.append(allocator, '(');
                         switch (slice.range.end.invalid) {
                             false => {
@@ -1367,6 +1744,9 @@ pub const TranslationUnit = struct {
                                             .type_index = Type.Index.invalid,
                                         });
                                         try list.appendSlice(allocator, ").len");
+                                    },
+                                    .array => |array| {
+                                        try list.writer(allocator).print("{}", .{array.element_count});
                                     },
                                     else => |t| @panic(@tagName(t)),
                                 }
@@ -1460,6 +1840,22 @@ pub const TranslationUnit = struct {
                     .slice => {
                         try list.appendSlice(allocator, ".ptr");
                     },
+                    .array => try list.appendSlice(allocator, ".value"),
+                    .pointer => |pointer| {
+                        _ = pointer;
+                        // logln(.c, .g, "TODO FIXME This looks wrong", .{});
+                        // try list.appendSlice(allocator, ".value");
+
+                        // const element_type = module.types.array.get(pointer.element_type);
+                        // switch (element_type.*) {
+                        //     .optional => |optional| {
+                        //         switch (module.types.array.get(optional.element_type).*) {
+                        //             else => |t| @panic(@tagName(t)),
+                        //         }
+                        //     },
+                        //     else => |t| @panic(@tagName(t)),
+                        // }
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
 
@@ -1470,69 +1866,11 @@ pub const TranslationUnit = struct {
                 });
                 try list.append(allocator, ']');
             },
-            .optional_cast => |cast_index| {
-                const optional_cast = module.values.casts.get(cast_index);
-                const optional_type = module.types.array.get(optional_cast.type);
-                switch (optional_type.*) {
-                    .optional => |optional| {
-                        const optional_element_type = module.types.array.get(optional.element_type);
-                        switch (optional_element_type.*) {
-                            .pointer => try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                                .value_index = optional_cast.value,
-                                .type_index = optional.element_type,
-                            }),
-                            else => {
-                                try list.append(allocator, '(');
-                                try unit.writeType(module, list, allocator, optional_cast.type, '_');
-                                try list.appendSlice(allocator, ") {\n");
-                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                                try list.appendSlice(allocator, ".value = ");
-                                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                                    .value_index = optional_cast.value,
-                                    .type_index = Type.Index.invalid,
-                                });
-                                try list.appendSlice(allocator, ",\n");
-                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                                try list.appendSlice(allocator, ".is_null = false,\n");
-                                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                                try list.append(allocator, '}');
-                            },
-                        }
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-            },
-            .undefined => try list.appendSlice(allocator, "{}"),
-            .array_coerce_to_slice => |cast_index| {
-                const array_coerce_to_slice = module.values.casts.get(cast_index);
-                try list.append(allocator, '(');
-                try unit.writeType(module, list, allocator, array_coerce_to_slice.type, '_');
-                try list.appendSlice(allocator, ") {\n");
-                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                try list.appendSlice(allocator, ".ptr = ");
-                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                    .value_index = array_coerce_to_slice.value,
-                    .type_index = Type.Index.invalid,
-                });
-                switch (module.values.array.get(array_coerce_to_slice.value).*) {
-                    .string_literal => {},
-                    else => try list.appendSlice(allocator, ".value"),
-                }
-                try list.appendSlice(allocator, ",\n");
-                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                const array_value = module.values.array.get(array_coerce_to_slice.value);
-                const array_type = module.types.array.get(array_value.getType(module));
-                const array_length = switch (array_type.*) {
-                    .array => |array| array.element_count,
-                    .pointer => |pointer| switch (module.types.array.get(pointer.element_type).*) {
-                        .array => |array| array.element_count,
-                        else => |t| @panic(@tagName(t)),
-                    },
-                    else => |t| @panic(@tagName(t)),
-                };
-                try list.writer(allocator).print(".len = {},\n", .{array_length});
-                try list.appendNTimes(allocator, ' ', indentation * margin_width);
-                try list.append(allocator, '}');
+            .undefined => {
+                // Assuming this is only done at initialization
+                _ = list.pop();
+                _ = list.pop();
+                _ = list.pop();
             },
             .enum_field => |enum_field_index| {
                 const enum_field = module.types.enum_fields.get(enum_field_index);
@@ -1540,6 +1878,13 @@ pub const TranslationUnit = struct {
                 try list.append(allocator, '_');
                 const enum_field_name = module.getName(enum_field.name).?;
                 try list.appendSlice(allocator, enum_field_name);
+            },
+            .intrinsic => |intrinsic_index| try unit.writeIntrinsic(module, list, allocator, intrinsic_index, function_return_type, indentation, .expression),
+            .@"return" => |return_index| {
+                try unit.writeReturn(module, list, allocator, return_index, function_return_type, indentation);
+            },
+            .branch => |branch_index| {
+                _ = try unit.writeBranch(module, list, allocator, branch_index, function_return_type, indentation);
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -1555,7 +1900,7 @@ pub fn initialize(compilation: *Compilation, module: *Module, descriptor: Compil
     try unit.type_forward_declarations.append(allocator, '\n');
 
     var offset: u64 = 0;
-    const slices = [_][]const u8{ unit.primitive_type_declarations.items, unit.type_forward_declarations.items, unit.type_declarations.items, unit.function_declarations.items, unit.global_variable_declarations.items, unit.string_literals.items, unit.function_definitions.items };
+    const slices = [_][]const u8{ unit.primitive_type_declarations.items, unit.type_forward_declarations.items, unit.macros.items, unit.type_declarations.items, unit.function_declarations.items, unit.global_variable_declarations.items, unit.string_literals.items, unit.function_definitions.items };
     for (slices) |slice| {
         try c_source_file.pwriteAll(slice, offset);
         offset += slice.len;
@@ -1571,11 +1916,25 @@ pub fn initialize(compilation: *Compilation, module: *Module, descriptor: Compil
     var zig_command_line = ArrayList([]const u8){};
     try zig_command_line.append(allocator, "zig");
     try zig_command_line.append(allocator, "build-exe");
+
+    const local_cache_dir = std.fs.cwd().realpathAlloc(allocator, "zig-cache") catch b: {
+        std.fs.cwd().makeDir("nat/zig-cache") catch {};
+        break :b try std.fs.cwd().realpathAlloc(allocator, "nat/zig-cache");
+    };
+    const home_directory = std.os.getenv("HOME") orelse @panic("Unable to get HOME environment variable. Did you forget to pass it to the process?");
+    const global_cache_dir = try std.mem.concat(allocator, u8, &.{ home_directory, "/.cache/zig" });
+    try zig_command_line.append(allocator, "--cache-dir");
+    try zig_command_line.append(allocator, local_cache_dir);
+    try zig_command_line.append(allocator, "--global-cache-dir");
+    try zig_command_line.append(allocator, global_cache_dir);
+
     try zig_command_line.append(allocator, try std.mem.concat(allocator, u8, &.{ "-femit-bin=", descriptor.executable_path }));
     try zig_command_line.append(allocator, "-cflags");
+
     for (c_flags) |c_flag| {
         try zig_command_line.append(allocator, c_flag);
     }
+
     try zig_command_line.append(allocator, "--");
     try zig_command_line.append(allocator, c_source_file_realpath);
 
@@ -1586,10 +1945,13 @@ pub fn initialize(compilation: *Compilation, module: *Module, descriptor: Compil
     switch (run_result.term) {
         .Exited => |exit_code| {
             if (exit_code != 0) {
+                std.debug.print("\nERROR: Zig command exited with code {}:\n", .{exit_code});
                 for (zig_command_line.items) |arg| {
                     std.debug.print("{s} ", .{arg});
                 }
-                std.debug.panic("\nZig command exited with code {}:\n{s}", .{ exit_code, run_result.stderr });
+                std.debug.print("\n\n{s}", .{run_result.stderr});
+
+                @panic("Internal error");
             }
         },
         else => |t| @panic(@tagName(t)),

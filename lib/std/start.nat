@@ -6,12 +6,24 @@ comptime {
 const _start = fn () noreturn export cc(.naked) {
     #asm({
         xor ebp, ebp;
+        mov rdi, rsp;
         and rsp, 0xfffffffffffffff0;
         call {start};
     });
 }
 
-const start = fn() noreturn export {
+var argument_count: usize = 0;
+var argument_values: [&]const [&:0]const u8 = undefined;
+var environment_values: [&:null]const ?[&:null]const u8 = undefined;
+
+const start = fn(argc_argv_address: usize) noreturn export {
+    var argument_address_iterator = argc_argv_address;
+    const argument_count_ptr: &usize = #cast(argument_address_iterator);
+    argument_count = argument_count_ptr.@;
+    argument_address_iterator += #size(usize);
+    argument_values = #cast(argument_address_iterator);
+    argument_address_iterator += #size(usize) * (argument_count + 1);
+    environment_values = #cast(argument_address_iterator);
     const result = #import("main").main();
     std.os.exit(exit_code = result);
 }

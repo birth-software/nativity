@@ -1,7 +1,47 @@
 const std = #import("std");
+const assert = std.assert;
+const Allocator = std.Allocator;
 const Target = std.Target;
 
 const Executable = struct{
     target: Target,
-    main_source_path: []const u8,
+    main_source_path: [:0]const u8,
+
+    const compile = fn(executable: Executable, compiler_path: [&:0]const u8) bool {
+        if (std.os.duplicate_process()) |pid| {
+            if (pid == 0) {
+                const argv = [_:null] ?[&:0]const u8{ compiler_path, #cast(executable.main_source_path.ptr), };
+                std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
+                return true;
+            } else {
+                if (std.os.waitpid(pid, flags = 0)) |raw_status| {
+                    if (std.os.ifexited(status = raw_status)) {
+                        const exit_status = std.os.exitstatus(status = raw_status);
+
+                        if (exit_status == 0) {
+                            return true;
+                        } else {
+                            std.print(bytes = "Bad exit code\n");
+                            return false;
+                        }
+                    } else if (std.os.ifsignaled(status = raw_status)) {
+                        std.print(bytes = "Signaled\n");
+                        return false;
+                    } else if (std.os.ifstopped(status = raw_status)) {
+                        std.print(bytes = "Stopped\n");
+                        return false;
+                    } else {
+                        std.print(bytes = "Unknown process termination\n");
+                        return false;
+                    }
+                } else {
+                    std.print(bytes = "Wait failed\n");
+                    return false;
+                }
+            }
+        } else {
+            std.print(bytes = "Unable to create child process\n");
+            return false;
+        }
+    }
 };

@@ -54,6 +54,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
     var maybe_main_package_path: ?[]const u8 = null;
     var target_triplet: []const u8 = "x86_64-linux-gnu";
     var should_transpile_to_c: ?bool = null;
+    var maybe_only_parse: ?bool = null;
 
     var i: usize = 0;
     while (i < arguments.len) : (i += 1) {
@@ -128,6 +129,16 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
+        } else if (equal(u8, current_argument, "-parse")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                maybe_main_package_path = arg;
+                maybe_only_parse = true;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
         } else {
             maybe_main_package_path = current_argument;
         }
@@ -136,6 +147,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
     const cross_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = target_triplet });
     const target = cross_target.toTarget();
     const transpile_to_c = should_transpile_to_c orelse true;
+    const only_parse = maybe_only_parse orelse false;
 
     var is_build = false;
     const main_package_path = if (maybe_main_package_path) |path| path else blk: {
@@ -160,6 +172,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
         .target = target,
         .transpile_to_c = transpile_to_c,
         .is_build = is_build,
+        .only_parse = only_parse,
     };
 }
 
@@ -206,24 +219,6 @@ pub const ContainerField = struct {
 pub const ContainerInitialization = struct {
     field_initializations: ArrayList(Value.Index),
     type: Type.Index,
-
-    pub const List = BlockList(@This());
-    pub const Index = List.Index;
-};
-
-pub const Enum = struct {
-    scope: Scope.Index,
-    fields: ArrayList(Enum.Field.Index) = .{},
-    backing_type: Type.Index,
-
-    pub const Field = struct {
-        name: u32,
-        value: Value.Index,
-        parent: Type.Index,
-
-        pub const List = BlockList(@This());
-        pub const Index = Enum.Field.List.Index;
-    };
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -276,6 +271,24 @@ pub const Type = union(enum) {
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
+
+    pub const Enum = struct {
+        scope: Scope.Index,
+        fields: ArrayList(Enum.Field.Index) = .{},
+        backing_type: Type.Index,
+
+        pub const Field = struct {
+            name: u32,
+            value: Value.Index,
+            parent: Type.Index,
+
+            pub const List = BlockList(@This());
+            pub const Index = Enum.Field.List.Index;
+        };
+
+        pub const List = BlockList(@This());
+        pub const Index = Enum.List.Index;
+    };
 
     pub const Integer = struct {
         bit_count: u16,
@@ -365,13 +378,40 @@ pub const Type = union(enum) {
     });
 };
 
+pub const Intrinsic = struct {
+    kind: Kind,
+    type: Type.Index,
+
+    pub const Kind = union(enum) {
+        cast: Value.Index,
+        array_coerce_to_slice: Value.Index,
+        min: Binary,
+        optional_wrap: Value.Index,
+        optional_unwrap: Value.Index,
+        optional_check: Value.Index,
+        sign_extend: Value.Index,
+        syscall: ArrayList(Value.Index),
+        zero_extend: Value.Index,
+
+        pub const Binary = struct {
+            left: Value.Index,
+            right: Value.Index,
+        };
+    };
+
+    pub const List = BlockList(@This());
+    pub const Index = @This().List.Index;
+};
+
 // Each time an enum is added here, a corresponding insertion in the initialization must be made
-pub const Intrinsic = enum {
+pub const ValidIntrinsic = enum {
     //@"asm", this is processed separately as it need special parsing
+    cast,
     @"error",
     import,
+    min,
+    size,
     syscall,
-    cast,
 };
 
 pub const FixedTypeKeyword = enum {
@@ -460,13 +500,35 @@ pub const Declaration = struct {
     init_value: Value.Index,
     name: u32,
     argument_index: ?u32,
-    type: Type.Index,
+    // A union is needed here because of global lazy declarations
+    type: Declaration.Type,
     scope: Scope.Index,
 
     pub const Reference = struct {
         value: Declaration.Index,
-        type: Type.Index,
+
+        pub fn getType(reference: Reference, module: *Module) Compilation.Type.Index {
+            return module.values.declarations.get(reference.value).getType();
+        }
     };
+
+    pub const Type = union(enum) {
+        resolved: Compilation.Type.Index,
+        inferred: Compilation.Type.Index,
+        unresolved: Node.Index,
+    };
+
+    pub fn getType(declaration: *Declaration) Compilation.Type.Index {
+        const type_index: Compilation.Type.Index = switch (declaration.type) {
+            .resolved => |resolved| resolved,
+            .inferred => |inferred| inferred,
+            .unresolved => unreachable,
+        };
+
+        assert(!type_index.invalid);
+
+        return type_index;
+    }
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -478,7 +540,7 @@ pub const Function = struct {
     prototype: Type.Index,
 
     pub const Prototype = struct {
-        arguments: ?[]const Declaration.Index,
+        arguments: ArrayList(Declaration.Index),
         return_type: Type.Index,
         attributes: Attributes = .{},
 
@@ -610,6 +672,7 @@ pub const BinaryOperation = struct {
         compare_greater_or_equal,
         compare_less_than,
         compare_less_or_equal,
+        compare_not_equal,
     };
 };
 
@@ -639,6 +702,19 @@ pub const Branch = struct {
     taken_expression: Value.Index,
     not_taken_expression: Value.Index,
     reaches_end: bool,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
+pub const Switch = struct {
+    value: Value.Index,
+    groups: ArrayList(Group),
+
+    pub const Group = struct {
+        conditions: ArrayList(Value.Index),
+        expression: Value.Index,
+    };
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -728,12 +804,14 @@ pub const Assembly = struct {
         pub const Instruction = enum {
             @"and",
             call,
+            mov,
             xor,
         };
 
         pub const Register = enum {
             ebp,
             rsp,
+            rdi,
         };
     };
 };
@@ -745,12 +823,14 @@ pub const StringLiteral = struct {
 
 pub const Value = union(enum) {
     void,
-    bool: bool,
+    @"break",
     undefined,
     @"unreachable",
+    bool: bool,
     pointer_null_literal,
     optional_null_literal,
     unresolved: Unresolved,
+    intrinsic: Intrinsic.Index,
     declaration: Declaration.Index,
     declaration_reference: Declaration.Reference,
     loop: Loop.Index,
@@ -760,20 +840,16 @@ pub const Value = union(enum) {
     assign: Assignment.Index,
     type: Type.Index,
     integer: Integer,
-    syscall: Syscall.Index,
     call: Call.Index,
     argument_list: ArgumentList,
     @"return": Return.Index,
     argument: Declaration.Index,
     string_literal: StringLiteral,
-    enum_field: Enum.Field.Index,
+    enum_field: Type.Enum.Field.Index,
     extern_function: Function.Prototype.Index,
-    sign_extend: Cast.Index,
-    zero_extend: Cast.Index,
     binary_operation: BinaryOperation.Index,
     unary_operation: UnaryOperation.Index,
     branch: Branch.Index,
-    cast: Cast.Index,
     container_initialization: ContainerInitialization.Index,
     array_initialization: ContainerInitialization.Index,
     field_access: FieldAccess.Index,
@@ -781,10 +857,11 @@ pub const Value = union(enum) {
     indexed_access: IndexedAccess.Index,
     optional_check: OptionalCheck.Index,
     optional_unwrap: OptionalUnwrap.Index,
-    optional_cast: Cast.Index,
+    // optional_cast: Cast.Index,
     array_coerce_to_slice: Cast.Index,
     slice: Slice.Index,
     assembly_block: Assembly.Block.Index,
+    switch_expression: Switch.Index,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -800,20 +877,26 @@ pub const Value = union(enum) {
     };
 
     pub fn isComptime(value: *Value, module: *Module) bool {
+        _ = module;
+
         return switch (value.*) {
             .integer => |integer| integer.type.eq(Type.comptime_int),
-            .declaration_reference => |declaration_reference| module.values.declarations.get(declaration_reference.value).mutability == .@"const" and isComptime(module.values.array.get(module.values.declarations.get(declaration_reference.value).init_value), module),
-            .bool, .void, .undefined, .function_definition, .type, .enum_field => true,
+            .declaration_reference => false,
+            .bool, .void, .function_definition, .type, .enum_field => true,
             // TODO:
             .call,
-            .syscall,
+            // .syscall,
             .binary_operation,
             .container_initialization,
-            .cast,
+            // .cast,
             .optional_unwrap,
             .pointer_null_literal,
             .indexed_access,
             .slice,
+            .array_initialization,
+            .undefined,
+            .intrinsic,
+            .field_access,
             => false,
             // TODO:
             else => |t| @panic(@tagName(t)),
@@ -824,7 +907,7 @@ pub const Value = union(enum) {
         const result = switch (value) {
             .call => |call_index| module.values.calls.get(call_index).type,
             .integer => |integer| integer.type,
-            .declaration_reference => |declaration_reference| declaration_reference.type,
+            .declaration_reference => |declaration_reference| declaration_reference.getType(module),
             .string_literal => |string_literal| string_literal.type,
             .type => Type.type,
             .enum_field => |enum_field_index| module.types.enum_fields.get(enum_field_index).parent,
@@ -832,19 +915,18 @@ pub const Value = union(enum) {
             .function_declaration => |function_index| module.types.function_declarations.get(function_index).prototype,
             .binary_operation => |binary_operation| module.values.binary_operations.get(binary_operation).type,
             .bool => Type.boolean,
-            .declaration => Type.void,
+            // .declaration => Type.void,
             .container_initialization,
             .array_initialization,
             => |initialization| module.values.container_initializations.get(initialization).type,
-            .syscall => Type.usize,
+            .intrinsic => |intrinsic_index| module.values.intrinsics.get(intrinsic_index).type,
             .unary_operation => |unary_operation_index| module.values.unary_operations.get(unary_operation_index).type,
             .pointer_null_literal => semantic_analyzer.optional_pointer_to_any_type,
             .optional_null_literal => semantic_analyzer.optional_any,
             .field_access => |field_access_index| module.types.container_fields.get(module.values.field_accesses.get(field_access_index).field).type,
-            .cast,
-            .optional_cast,
-            .array_coerce_to_slice,
-            => |cast_index| module.values.casts.get(cast_index).type,
+            // .cast,
+            // .optional_cast,
+            // .array_coerce_to_slice => |cast_index| module.values.casts.get(cast_index).type,
             .slice => |slice_index| module.values.slices.get(slice_index).type,
             .slice_access => |slice_access_index| module.values.slice_accesses.get(slice_access_index).type,
             .optional_check => Type.boolean,
@@ -854,6 +936,22 @@ pub const Value = union(enum) {
                 const indexed_expression_type = module.types.array.get(indexed_expression_type_index);
                 break :blk switch (indexed_expression_type.*) {
                     .slice => |slice| slice.element_type,
+                    .array => |array| array.element_type,
+                    .pointer => |pointer| switch (pointer.many) {
+                        true => pointer.element_type,
+                        false => unreachable,
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+            },
+            .undefined => Type.any,
+            .optional_unwrap => |optional_unwrap_index| blk: {
+                const optional_unwrap = module.values.optional_unwraps.get(optional_unwrap_index);
+                const optional_value = module.values.array.get(optional_unwrap.value);
+                const expected_optional_type_index = optional_value.getType(module);
+                const expected_optional_type = module.types.array.get(expected_optional_type_index);
+                break :blk switch (expected_optional_type.*) {
+                    .optional => |optional| optional.element_type,
                     else => |t| @panic(@tagName(t)),
                 };
             },
@@ -880,12 +978,13 @@ pub const Module = struct {
         blocks: BlockList(Block) = .{},
         loops: BlockList(Loop) = .{},
         assignments: BlockList(Assignment) = .{},
-        syscalls: BlockList(Syscall) = .{},
+        intrinsics: BlockList(Intrinsic) = .{},
+        // syscalls: BlockList(Syscall) = .{},
         calls: BlockList(Call) = .{},
         argument_lists: BlockList(ArgumentList) = .{},
         returns: BlockList(Return) = .{},
         container_initializations: BlockList(ContainerInitialization) = .{},
-        casts: BlockList(Cast) = .{},
+        // casts: BlockList(Cast) = .{},
         branches: BlockList(Branch) = .{},
         binary_operations: BlockList(BinaryOperation) = .{},
         unary_operations: BlockList(UnaryOperation) = .{},
@@ -896,13 +995,14 @@ pub const Module = struct {
         optional_unwraps: BlockList(OptionalUnwrap) = .{},
         assembly_blocks: BlockList(Assembly.Block) = .{},
         assembly_instructions: BlockList(Assembly.Instruction) = .{},
+        switches: BlockList(Switch) = .{},
     } = .{},
     types: struct {
         array: BlockList(Type) = .{},
-        enums: BlockList(Enum) = .{},
+        enums: BlockList(Type.Enum) = .{},
         structs: BlockList(Struct) = .{},
         container_fields: BlockList(ContainerField) = .{},
-        enum_fields: BlockList(Enum.Field) = .{},
+        enum_fields: BlockList(Type.Enum.Field) = .{},
         function_definitions: BlockList(Function) = .{},
         function_declarations: BlockList(Function) = .{},
         function_prototypes: BlockList(Function.Prototype) = .{},
@@ -928,6 +1028,7 @@ pub const Module = struct {
         target: std.Target,
         transpile_to_c: bool,
         is_build: bool,
+        only_parse: bool,
     };
 
     const ImportFileResult = struct {
@@ -1144,109 +1245,132 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     assert(module.main_package.dependencies.size == 2);
 
-    _ = try module.importPackage(compilation.base_allocator, module.main_package.dependencies.get("std").?);
+    if (!descriptor.only_parse) {
+        _ = try module.importPackage(compilation.base_allocator, module.main_package.dependencies.get("std").?);
+    } else {
+        _ = try module.importPackage(compilation.base_allocator, module.main_package);
+    }
 
     for (module.map.imports.values()) |import| {
         try module.generateAbstractSyntaxTreeForFile(compilation.base_allocator, import);
     }
 
-    inline for (@typeInfo(FixedTypeKeyword).Enum.fields) |enum_field| {
-        _ = try module.types.array.append(compilation.base_allocator, switch (@field(FixedTypeKeyword, enum_field.name)) {
-            .usize => @unionInit(Type, "integer", .{
-                .bit_count = 64,
-                .signedness = .unsigned,
-            }),
-            .ssize => @unionInit(Type, "integer", .{
-                .bit_count = 64,
-                .signedness = .signed,
-            }),
-            else => @unionInit(Type, enum_field.name, {}),
-        });
-    }
-
-    inline for (@typeInfo(HardwareUnsignedIntegerType).Enum.fields) |enum_field| {
-        _ = try module.types.array.append(compilation.base_allocator, .{
-            .integer = .{
-                .signedness = .unsigned,
-                .bit_count = switch (@field(HardwareUnsignedIntegerType, enum_field.name)) {
-                    .u8 => 8,
-                    .u16 => 16,
-                    .u32 => 32,
-                    .u64 => 64,
-                },
-            },
-        });
-    }
-
-    inline for (@typeInfo(HardwareSignedIntegerType).Enum.fields) |enum_field| {
-        _ = try module.types.array.append(compilation.base_allocator, .{
-            .integer = .{
-                .signedness = .signed,
-                .bit_count = switch (@field(HardwareSignedIntegerType, enum_field.name)) {
-                    .s8 => 8,
-                    .s16 => 16,
-                    .s32 => 32,
-                    .s64 => 64,
-                },
-            },
-        });
-    }
-
-    for (extra_common_type_data) |type_data| {
-        _ = try module.types.array.append(compilation.base_allocator, type_data);
-    }
-    semantic_analyzer.pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
-        .pointer = .{
-            .element_type = Type.any,
-            .many = false,
-            .@"const" = true,
-            .termination = .none,
-        },
-    });
-    semantic_analyzer.optional_pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
-        .optional = .{
-            .element_type = semantic_analyzer.pointer_to_any_type,
-        },
-    });
-    semantic_analyzer.optional_any = try module.types.array.append(compilation.base_allocator, .{
-        .optional = .{
-            .element_type = Type.any,
-        },
-    });
-
-    semantic_analyzer.unreachable_index = try module.values.array.append(compilation.base_allocator, .@"unreachable");
-    semantic_analyzer.pointer_null_index = try module.values.array.append(compilation.base_allocator, .pointer_null_literal);
-    semantic_analyzer.optional_null_index = try module.values.array.append(compilation.base_allocator, .optional_null_literal);
-    semantic_analyzer.undefined_index = try module.values.array.append(compilation.base_allocator, .undefined);
-
-    const value_index = try module.values.array.append(compilation.base_allocator, .{
-        .unresolved = .{
-            .node_index = .{ .value = 0 },
-        },
-    });
-
-    try semantic_analyzer.initialize(compilation, module, packages[0], value_index);
-
-    if (descriptor.transpile_to_c) {
-        try c_transpiler.initialize(compilation, module, descriptor);
-        if (descriptor.is_build) {
-            var process = std.ChildProcess.init(&.{descriptor.executable_path}, compilation.base_allocator);
-            switch (try process.spawnAndWait()) {
-                .Exited => |exit_code| {
-                    if (exit_code != 0) {
-                        @panic("Exited with errors");
-                    }
-                },
-                else => @panic("Unexpected program state"),
-            }
+    if (!descriptor.only_parse) {
+        inline for (@typeInfo(FixedTypeKeyword).Enum.fields) |enum_field| {
+            _ = try module.types.array.append(compilation.base_allocator, switch (@field(FixedTypeKeyword, enum_field.name)) {
+                .usize => @unionInit(Type, "integer", .{
+                    .bit_count = 64,
+                    .signedness = .unsigned,
+                }),
+                .ssize => @unionInit(Type, "integer", .{
+                    .bit_count = 64,
+                    .signedness = .signed,
+                }),
+                else => @unionInit(Type, enum_field.name, {}),
+            });
         }
-    } else {
-        unreachable;
-        // const ir = try intermediate_representation.initialize(compilation, module);
-        //
-        // switch (descriptor.target.cpu.arch) {
-        //     inline else => |arch| try emit.get(arch).initialize(compilation.base_allocator, ir, descriptor),
-        // }
+
+        inline for (@typeInfo(HardwareUnsignedIntegerType).Enum.fields) |enum_field| {
+            _ = try module.types.array.append(compilation.base_allocator, .{
+                .integer = .{
+                    .signedness = .unsigned,
+                    .bit_count = switch (@field(HardwareUnsignedIntegerType, enum_field.name)) {
+                        .u8 => 8,
+                        .u16 => 16,
+                        .u32 => 32,
+                        .u64 => 64,
+                    },
+                },
+            });
+        }
+
+        inline for (@typeInfo(HardwareSignedIntegerType).Enum.fields) |enum_field| {
+            _ = try module.types.array.append(compilation.base_allocator, .{
+                .integer = .{
+                    .signedness = .signed,
+                    .bit_count = switch (@field(HardwareSignedIntegerType, enum_field.name)) {
+                        .s8 => 8,
+                        .s16 => 16,
+                        .s32 => 32,
+                        .s64 => 64,
+                    },
+                },
+            });
+        }
+
+        for (extra_common_type_data) |type_data| {
+            _ = try module.types.array.append(compilation.base_allocator, type_data);
+        }
+        semantic_analyzer.pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
+            .pointer = .{
+                .element_type = Type.any,
+                .many = false,
+                .@"const" = true,
+                .termination = .none,
+            },
+        });
+        semantic_analyzer.optional_pointer_to_any_type = try module.types.array.append(compilation.base_allocator, .{
+            .optional = .{
+                .element_type = semantic_analyzer.pointer_to_any_type,
+            },
+        });
+        semantic_analyzer.optional_any = try module.types.array.append(compilation.base_allocator, .{
+            .optional = .{
+                .element_type = Type.any,
+            },
+        });
+
+        semantic_analyzer.unreachable_index = try module.values.array.append(compilation.base_allocator, .@"unreachable");
+        semantic_analyzer.pointer_null_index = try module.values.array.append(compilation.base_allocator, .pointer_null_literal);
+        semantic_analyzer.optional_null_index = try module.values.array.append(compilation.base_allocator, .optional_null_literal);
+        semantic_analyzer.undefined_index = try module.values.array.append(compilation.base_allocator, .undefined);
+        semantic_analyzer.boolean_false = try module.values.array.append(compilation.base_allocator, .{
+            .bool = false,
+        });
+        semantic_analyzer.boolean_true = try module.values.array.append(compilation.base_allocator, .{
+            .bool = true,
+        });
+
+        const value_index = try module.values.array.append(compilation.base_allocator, .{
+            .unresolved = .{
+                .node_index = .{ .value = 0 },
+            },
+        });
+
+        try semantic_analyzer.initialize(compilation, module, packages[0], value_index);
+
+        if (descriptor.transpile_to_c) {
+            try c_transpiler.initialize(compilation, module, descriptor);
+            if (descriptor.is_build) {
+                const argv = [_][]const u8{ descriptor.executable_path, "--compiler", compilation.executable_absolute_path };
+                const process_result = try std.ChildProcess.run(.{
+                    .allocator = compilation.base_allocator,
+                    .argv = &argv,
+                });
+
+                switch (process_result.term) {
+                    .Exited => |exit_code| {
+                        if (exit_code != 0) {
+                            for (argv) |arg| {
+                                std.debug.print("{s} ", .{arg});
+                            }
+                            std.debug.print("exited with failure: {}\n", .{exit_code});
+                            std.debug.print("STDOUT:\n```\n{s}\n```\n", .{process_result.stdout});
+                            std.debug.print("STDERR:\n```\n{s}\n```\n", .{process_result.stderr});
+                            @panic("Internal error");
+                        }
+                    },
+                    else => @panic("Unexpected program state"),
+                }
+            }
+        } else {
+            unreachable;
+            // const ir = try intermediate_representation.initialize(compilation, module);
+            //
+            // switch (descriptor.target.cpu.arch) {
+            //     inline else => |arch| try emit.get(arch).initialize(compilation.base_allocator, ir, descriptor),
+            // }
+        }
     }
 }
 
@@ -1317,6 +1441,10 @@ pub const File = struct {
     fn parse(file: *File, allocator: Allocator, file_index: File.Index) !void {
         assert(file.status == .lexed);
         file.syntactic_analyzer_result = try syntactic_analyzer.analyze(allocator, file.lexical_analyzer_result.tokens.items, file.source_code, file_index);
+
+        // if (file_index.uniqueInteger() == 5) {
+        //     assert(file.syntactic_analyzer_result.nodes.items[1356].id != .node_list);
+        // }
         // if (!@import("builtin").is_test) {
         //     print("[SYNTACTIC ANALYSIS] {} ns\n", .{file.syntactic_analyzer_result.time});
         // }
@@ -1353,7 +1481,7 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
 
 var logger_bitset = std.EnumSet(LoggerScope).initEmpty();
 
-var writer = std.io.getStdErr().writer();
+var writer = std.io.getStdOut().writer();
 
 fn shouldLog(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger) bool {
     return logger_bitset.contains(logger_scope) and getLoggerScopeType(logger_scope).Logger.bitset.contains(logger);

@@ -32,7 +32,7 @@ pub fn BlockList(comptime T: type) type {
 
     return struct {
         // TODO: make this not reallocate the whole block. Instead, use a pointer to the block as the ArrayList item
-        blocks: ArrayList(Block) = .{},
+        blocks: ArrayList(*Block) = .{},
         len: usize = 0,
         first_block: u32 = 0,
 
@@ -136,7 +136,7 @@ pub fn BlockList(comptime T: type) type {
             const max_allocation = list.blocks.items.len * item_count;
             const result = switch (list.len < max_allocation) {
                 true => blk: {
-                    const block = &list.blocks.items[list.first_block];
+                    const block = list.blocks.items[list.first_block];
                     if (block.allocateIndex()) |element_index| {
                         break :blk Index{
                             .element = element_index,
@@ -148,13 +148,11 @@ pub fn BlockList(comptime T: type) type {
                 },
                 false => blk: {
                     const block_index = list.blocks.items.len;
-                    const new_block = list.blocks.addOneAssumeCapacity();
+                    const new_block = try allocator.create(Block);
                     new_block.* = .{};
+                    list.blocks.appendAssumeCapacity(new_block);
                     const element_index = new_block.allocateIndex() catch unreachable;
-                    const ptr = &new_block.items[element_index];
-                    _ = ptr;
                     list.first_block += @intFromBool(block_index != 0);
-
                     break :blk Index{
                         .element = element_index,
                         .block = @intCast(block_index),

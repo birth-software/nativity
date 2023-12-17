@@ -54,7 +54,6 @@ echo -e "\e[35m[SUMMARY]\e[0m"
 echo -e "\e[35m=========\e[0m"
 echo -e "Ran $total_test_count compilations (\e[32m$passed_compilation_count\e[0m succeeded, \e[31m$failed_compilation_count\e[0m failed)."
 echo -e "Ran $ran_test_count tests (\e[32m $passed_test_count\e[0m passed, \e[31m$failed_test_count\e[0m failed)."
-echo -e "\e[35m=========\e[0m"
 
 if [[ "$failed_compilation_count" != "0" ]]; then
     printf $"\nFailed compilations:\n"
@@ -73,6 +72,8 @@ if [[ "$failed_test_count" != "0" ]]; then
         echo -e "\e[31m$failed_test\e[0m"
     done
 fi
+
+echo -e "\e[35m=========\e[0m"
 
 if [[ "$failed_test_count" == "0" && "$failed_compilation_count" == "0" ]]; then
     echo -e "\e[32mSUCCESS!\e[0m"

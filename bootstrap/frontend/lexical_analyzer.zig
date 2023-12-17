@@ -14,7 +14,8 @@ const File = Compilation.File;
 const logln = Compilation.logln;
 const fs = @import("../fs.zig");
 
-pub const Token = packed struct(u64) {
+// TODO: switch to packed struct when speed is important
+pub const Token = struct {
     start: u32,
     len: u24,
     id: Id,
@@ -85,6 +86,7 @@ pub const Token = packed struct(u64) {
         fixed_keyword_cc = 0x98,
         fixed_keyword_for = 0x99,
         fixed_keyword_undefined = 0x9a,
+        fixed_keyword_break = 0x9b,
     };
 
     pub const Index = u32;
@@ -119,6 +121,7 @@ pub const FixedKeyword = enum {
     cc,
     @"for",
     undefined,
+    @"break",
 };
 
 pub const Result = struct {
