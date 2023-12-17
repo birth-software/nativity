@@ -52,7 +52,7 @@ do
         failed_compilations+=("$test_i. $STANDALONE_TEST_NAME")
     fi
 
-    echo -e "[$test_i/$total_test_count] [$result] $STANDALONE_TEST_NAME"
+    echo -e "[$test_i/$total_test_count] [$result] [STANDALONE] $STANDALONE_TEST_NAME"
 
     test_i=$(($test_i + 1))
 done
@@ -87,7 +87,7 @@ do
         failed_compilations+=("$test_i. $MY_TESTNAME")
     fi
 
-    echo -e "[$test_i/$total_test_count] [$result] $MY_TESTNAME"
+    echo -e "[$test_i/$total_test_count] [$result] [INTEGRAL] $MY_TESTNAME"
 
     test_i=$(($test_i + 1))
     cd $my_current_directory
