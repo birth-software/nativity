@@ -1177,6 +1177,10 @@ const Analyzer = struct {
             .call,
             .slice_access,
             => null,
+            .bool => |boolean_value| switch (boolean_value) {
+                true => return boolean_true,
+                false => return boolean_false,
+            },
             .enum_field => value_index,
             .indexed_access => |indexed_access_index| blk: {
                 const indexed_access = analyzer.module.values.indexed_accesses.get(indexed_access_index);
@@ -1314,6 +1318,7 @@ const Analyzer = struct {
 
         const true_reaches_end = switch (analyzer.module.values.array.get(taken_expression_index).*) {
             .block => |block_index| analyzer.module.values.blocks.get(block_index).reaches_end,
+            .string_literal => true,
             else => |t| @panic(@tagName(t)),
         };
 
@@ -1348,6 +1353,7 @@ const Analyzer = struct {
                 const false_reaches_end = switch (analyzer.module.values.array.get(not_taken_expression_index).*) {
                     .block => |block_index| analyzer.module.values.blocks.get(block_index).reaches_end,
                     .branch => |branch_index| analyzer.module.values.branches.get(branch_index).reaches_end,
+                    .string_literal => true,
                     else => |t| @panic(@tagName(t)),
                 };
                 const reaches_end = if_result.reaches_end or false_reaches_end;
@@ -1983,21 +1989,7 @@ const Analyzer = struct {
                                     const right_index = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, node.right.value, scope_index);
                                     const right_value = analyzer.module.values.array.get(right_index);
 
-                                    switch (right_value.*) {
-                                        .function_definition,
-                                        .type,
-                                        .enum_field,
-                                        .declaration_reference,
-                                        .integer,
-                                        => break :blk right_value.*,
-                                        else => |t| @panic(@tagName(t)),
-                                    }
-                                    //
-
-                                    logln(.sema, .node, "Right: {}", .{right_value});
-                                    // struct_scope.declarations.get(identifier);
-
-                                    unreachable;
+                                    break :blk right_value.*;
                                 },
                                 .@"enum" => |enum_index| {
                                     const enum_type = analyzer.module.types.enums.get(enum_index);
@@ -4339,22 +4331,6 @@ const Analyzer = struct {
 
 pub fn initialize(compilation: *Compilation, module: *Module, package: *Package, main_value_index: Value.Index) !void {
     _ = try analyzeExistingPackage(main_value_index, compilation, module, package);
-
-    var decl_iterator = module.values.declarations.iterator();
-    while (decl_iterator.nextPointer()) |decl| {
-        const declaration_name = module.getName(decl.name).?;
-        if (equal(u8, declaration_name, "_start")) {
-            const value = module.values.array.get(decl.init_value);
-            module.entry_point = switch (value.*) {
-                .function_definition => |function_index| function_index,
-                .unresolved => panic("Unresolved declaration: {s}", .{declaration_name}),
-                else => |t| @panic(@tagName(t)),
-            };
-            break;
-        }
-    } else {
-        @panic("Entry point not found");
-    }
 }
 
 pub fn analyzeExistingPackage(value_index: Value.Index, compilation: *Compilation, module: *Module, package: *Package) !Type.Index {

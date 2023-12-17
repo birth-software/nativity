@@ -1,6 +1,11 @@
 const std = #import("std");
+const builtin = #import("builtin");
 comptime {
-    _ = _start;
+    if (builtin.link_libc) {
+        _ = main;
+    } else {
+        _ = _start;
+    }
 }
 
 const _start = fn () noreturn export cc(.naked) {
@@ -26,4 +31,8 @@ const start = fn(argc_argv_address: usize) noreturn export {
     environment_values = #cast(argument_address_iterator);
     const result = #import("main").main();
     std.os.exit(exit_code = result);
+}
+
+const main = fn(argc: s32, argv: [&:null]?[&:null]u8, env: [&:null]?[&:null]u8) s32 export {
+    return #import("main").main();
 }

@@ -641,13 +641,13 @@ const Analyzer = struct {
             break :blk payload_node;
         } else Node.Index.invalid;
 
-        const if_block = try analyzer.block(.{ .is_comptime = false });
+        const if_taken_expression = try analyzer.expression();
 
         const if_node = try analyzer.addNode(.{
             .id = .@"if",
             .token = if_token,
             .left = if_condition,
-            .right = if_block,
+            .right = if_taken_expression,
         });
 
         const result = switch (analyzer.tokens[analyzer.token_i].id) {
@@ -1013,6 +1013,7 @@ const Analyzer = struct {
                 .identifier,
                 .colon,
                 .fixed_keyword_if,
+                .fixed_keyword_else,
                 .discard,
                 => break,
                 else => blk: {
@@ -1542,6 +1543,7 @@ const Analyzer = struct {
                 .identifier,
                 .number_literal,
                 .hash,
+                .fixed_keyword_if,
                 => blk: {
                     const field_expression_initializer = try analyzer.expression();
                     switch (analyzer.tokens[analyzer.token_i].id) {
