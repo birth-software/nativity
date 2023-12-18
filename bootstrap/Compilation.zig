@@ -47,7 +47,8 @@ fn reportUnterminatedArgumentError(string: []const u8) noreturn {
     std.debug.panic("Unterminated argument: {s}", .{string});
 }
 
-fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
+fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descriptor {
+    const allocator = compilation.base_allocator;
     const arguments = (try std.process.argsAlloc(allocator))[1..];
 
     var maybe_executable_path: ?[]const u8 = null;
@@ -55,92 +56,118 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
     var target_triplet: []const u8 = "x86_64-linux-gnu";
     var should_transpile_to_c: ?bool = null;
     var maybe_only_parse: ?bool = null;
+    var link_libc = false;
 
-    var i: usize = 0;
-    while (i < arguments.len) : (i += 1) {
-        const current_argument = arguments[i];
-        if (equal(u8, current_argument, "-o")) {
-            if (i + 1 != arguments.len) {
-                maybe_executable_path = arguments[i + 1];
-                assert(maybe_executable_path.?.len != 0);
-                i += 1;
-            } else {
-                reportUnterminatedArgumentError(current_argument);
-            }
-        } else if (equal(u8, current_argument, "-target")) {
-            if (i + 1 != arguments.len) {
-                target_triplet = arguments[i + 1];
-                i += 1;
-            } else {
-                reportUnterminatedArgumentError(current_argument);
-            }
-        } else if (equal(u8, current_argument, "-log")) {
-            if (i + 1 != arguments.len) {
-                i += 1;
-
-                var log_argument_iterator = std.mem.splitScalar(u8, arguments[i], ',');
-
-                while (log_argument_iterator.next()) |log_argument| {
-                    var log_argument_splitter = std.mem.splitScalar(u8, log_argument, '.');
-                    const log_scope_candidate = log_argument_splitter.next() orelse unreachable;
-                    var recognized_scope = false;
-
-                    inline for (@typeInfo(LoggerScope).Enum.fields) |logger_scope_enum_field| {
-                        const log_scope = @field(LoggerScope, logger_scope_enum_field.name);
-
-                        if (equal(u8, @tagName(log_scope), log_scope_candidate)) {
-                            const LogScope = getLoggerScopeType(log_scope);
-
-                            if (log_argument_splitter.next()) |particular_log_candidate| {
-                                var recognized_particular = false;
-                                inline for (@typeInfo(LogScope.Logger).Enum.fields) |particular_log_field| {
-                                    const particular_log = @field(LogScope.Logger, particular_log_field.name);
-
-                                    if (equal(u8, particular_log_candidate, @tagName(particular_log))) {
-                                        LogScope.Logger.bitset.setPresent(particular_log, true);
-                                        recognized_particular = true;
-                                    }
-                                } else if (!recognized_particular) std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
-                            } else {
-                                // LogScope.Logger.bitset = @TypeOf(LogScope.Logger.bitset).initFull();
-                            }
-
-                            logger_bitset.setPresent(log_scope, true);
-
-                            recognized_scope = true;
-                        }
-                    } else if (!recognized_scope) std.debug.panic("Unrecognized log scope: {s}", .{log_scope_candidate});
-                }
-            } else {
-                reportUnterminatedArgumentError(current_argument);
-            }
-        } else if (equal(u8, current_argument, "-transpile_to_c")) {
-            if (i + 1 != arguments.len) {
-                i += 1;
-
-                const arg = arguments[i];
-                if (std.mem.eql(u8, arg, "true")) {
-                    should_transpile_to_c = true;
-                } else if (std.mem.eql(u8, arg, "false")) {
-                    should_transpile_to_c = false;
-                } else {
-                    unreachable;
-                }
-            } else {
-                reportUnterminatedArgumentError(current_argument);
-            }
-        } else if (equal(u8, current_argument, "-parse")) {
-            if (i + 1 != arguments.len) {
-                i += 1;
-
-                const arg = arguments[i];
-                maybe_main_package_path = arg;
-                maybe_only_parse = true;
-            } else {
-                reportUnterminatedArgumentError(current_argument);
-            }
+    if (arguments.len == 0) {
+        // foo
+    } else if (equal(u8, arguments[0], "init")) {
+        if (arguments.len == 1) {
+            unreachable;
         } else {
-            maybe_main_package_path = current_argument;
+            @panic("Init does not take arguments");
+        }
+    } else {
+        var i: usize = 0;
+        while (i < arguments.len) : (i += 1) {
+            const current_argument = arguments[i];
+            if (equal(u8, current_argument, "-o")) {
+                if (i + 1 != arguments.len) {
+                    maybe_executable_path = arguments[i + 1];
+                    assert(maybe_executable_path.?.len != 0);
+                    i += 1;
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else if (equal(u8, current_argument, "-target")) {
+                if (i + 1 != arguments.len) {
+                    target_triplet = arguments[i + 1];
+                    i += 1;
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else if (equal(u8, current_argument, "-log")) {
+                if (i + 1 != arguments.len) {
+                    i += 1;
+
+                    var log_argument_iterator = std.mem.splitScalar(u8, arguments[i], ',');
+
+                    while (log_argument_iterator.next()) |log_argument| {
+                        var log_argument_splitter = std.mem.splitScalar(u8, log_argument, '.');
+                        const log_scope_candidate = log_argument_splitter.next() orelse unreachable;
+                        var recognized_scope = false;
+
+                        inline for (@typeInfo(LoggerScope).Enum.fields) |logger_scope_enum_field| {
+                            const log_scope = @field(LoggerScope, logger_scope_enum_field.name);
+
+                            if (equal(u8, @tagName(log_scope), log_scope_candidate)) {
+                                const LogScope = getLoggerScopeType(log_scope);
+
+                                if (log_argument_splitter.next()) |particular_log_candidate| {
+                                    var recognized_particular = false;
+                                    inline for (@typeInfo(LogScope.Logger).Enum.fields) |particular_log_field| {
+                                        const particular_log = @field(LogScope.Logger, particular_log_field.name);
+
+                                        if (equal(u8, particular_log_candidate, @tagName(particular_log))) {
+                                            LogScope.Logger.bitset.setPresent(particular_log, true);
+                                            recognized_particular = true;
+                                        }
+                                    } else if (!recognized_particular) std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
+                                } else {
+                                    // LogScope.Logger.bitset = @TypeOf(LogScope.Logger.bitset).initFull();
+                                }
+
+                                logger_bitset.setPresent(log_scope, true);
+
+                                recognized_scope = true;
+                            }
+                        } else if (!recognized_scope) std.debug.panic("Unrecognized log scope: {s}", .{log_scope_candidate});
+                    }
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else if (equal(u8, current_argument, "-transpile_to_c")) {
+                if (i + 1 != arguments.len) {
+                    i += 1;
+
+                    const arg = arguments[i];
+                    if (std.mem.eql(u8, arg, "true")) {
+                        should_transpile_to_c = true;
+                    } else if (std.mem.eql(u8, arg, "false")) {
+                        should_transpile_to_c = false;
+                    } else {
+                        unreachable;
+                    }
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else if (equal(u8, current_argument, "-parse")) {
+                if (i + 1 != arguments.len) {
+                    i += 1;
+
+                    const arg = arguments[i];
+                    maybe_main_package_path = arg;
+                    maybe_only_parse = true;
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else if (equal(u8, current_argument, "-link_libc")) {
+                if (i + 1 != arguments.len) {
+                    i += 1;
+
+                    const arg = arguments[i];
+                    if (std.mem.eql(u8, arg, "true")) {
+                        link_libc = true;
+                    } else if (std.mem.eql(u8, arg, "false")) {
+                        link_libc = false;
+                    } else {
+                        unreachable;
+                    }
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else {
+                maybe_main_package_path = current_argument;
+            }
         }
     }
 
@@ -173,6 +200,7 @@ fn parseArguments(allocator: Allocator) !Compilation.Module.Descriptor {
         .transpile_to_c = transpile_to_c,
         .is_build = is_build,
         .only_parse = only_parse,
+        .link_libc = link_libc,
     };
 }
 
@@ -192,7 +220,7 @@ pub fn init(allocator: Allocator) !void {
     try compilation.build_directory.makePath(cache_dir_name);
     try compilation.build_directory.makePath(installation_dir_name);
 
-    const compilation_descriptor = try parseArguments(allocator);
+    const compilation_descriptor = try parseArguments(compilation);
 
     try compilation.compileModule(compilation_descriptor);
 }
@@ -934,6 +962,7 @@ pub const Value = union(enum) {
                 const indexed_expression = module.values.array.get(module.values.indexed_accesses.get(indexed_access_index).indexed_expression);
                 const indexed_expression_type_index = indexed_expression.getType(module);
                 const indexed_expression_type = module.types.array.get(indexed_expression_type_index);
+
                 break :blk switch (indexed_expression_type.*) {
                     .slice => |slice| slice.element_type,
                     .array => |array| array.element_type,
@@ -950,10 +979,21 @@ pub const Value = union(enum) {
                 const optional_value = module.values.array.get(optional_unwrap.value);
                 const expected_optional_type_index = optional_value.getType(module);
                 const expected_optional_type = module.types.array.get(expected_optional_type_index);
+
                 break :blk switch (expected_optional_type.*) {
                     .optional => |optional| optional.element_type,
                     else => |t| @panic(@tagName(t)),
                 };
+            },
+            .branch => |branch_index| {
+                // TODO
+                const branch = module.values.branches.get(branch_index);
+                const taken = module.values.array.get(branch.taken_expression);
+                const not_taken = module.values.array.get(branch.not_taken_expression);
+                const taken_type = taken.getType(module);
+                const not_taken_type = not_taken.getType(module);
+                _ = not_taken_type;
+                return taken_type;
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -1029,6 +1069,7 @@ pub const Module = struct {
         transpile_to_c: bool,
         is_build: bool,
         only_parse: bool,
+        link_libc: bool,
     };
 
     const ImportFileResult = struct {
@@ -1170,23 +1211,6 @@ fn realpathAlloc(allocator: Allocator, pathname: []const u8) ![]const u8 {
 }
 
 pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !void {
-    // TODO: generate an actual file
-    const builtin_file_name = "builtin.nat";
-    var cache_dir = try compilation.build_directory.openDir("cache", .{});
-    const builtin_file = try cache_dir.createFile(builtin_file_name, .{});
-    try builtin_file.writer().print(
-        \\const builtin = #import("std").builtin;
-        \\const cpu = builtin.Cpu.{s};
-        \\const os = builtin.Os.{s};
-        \\const abi = builtin.Abi.{s};
-        \\
-    , .{
-        @tagName(descriptor.target.cpu.arch),
-        @tagName(descriptor.target.os.tag),
-        @tagName(descriptor.target.abi),
-    });
-    builtin_file.close();
-
     const module: *Module = try compilation.base_allocator.create(Module);
     module.* = Module{
         .main_package = blk: {
@@ -1206,6 +1230,24 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
         },
         .descriptor = descriptor,
     };
+
+    const builtin_file_name = "builtin.nat";
+    var cache_dir = try compilation.build_directory.openDir("cache", .{});
+    const builtin_file = try cache_dir.createFile(builtin_file_name, .{});
+    try builtin_file.writer().print(
+        \\const builtin = #import("std").builtin;
+        \\const cpu = builtin.Cpu.{s};
+        \\const os = builtin.Os.{s};
+        \\const abi = builtin.Abi.{s};
+        \\const link_libc = {};
+        \\
+    , .{
+        @tagName(module.descriptor.target.cpu.arch),
+        @tagName(module.descriptor.target.os.tag),
+        @tagName(module.descriptor.target.abi),
+        module.descriptor.link_libc,
+    });
+    builtin_file.close();
 
     const std_package_dir = "lib/std";
 
@@ -1245,7 +1287,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
     assert(module.main_package.dependencies.size == 2);
 
-    if (!descriptor.only_parse) {
+    if (!module.descriptor.only_parse) {
         _ = try module.importPackage(compilation.base_allocator, module.main_package.dependencies.get("std").?);
     } else {
         _ = try module.importPackage(compilation.base_allocator, module.main_package);
@@ -1255,7 +1297,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
         try module.generateAbstractSyntaxTreeForFile(compilation.base_allocator, import);
     }
 
-    if (!descriptor.only_parse) {
+    if (!module.descriptor.only_parse) {
         inline for (@typeInfo(FixedTypeKeyword).Enum.fields) |enum_field| {
             _ = try module.types.array.append(compilation.base_allocator, switch (@field(FixedTypeKeyword, enum_field.name)) {
                 .usize => @unionInit(Type, "integer", .{
@@ -1339,10 +1381,10 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
         try semantic_analyzer.initialize(compilation, module, packages[0], value_index);
 
-        if (descriptor.transpile_to_c) {
-            try c_transpiler.initialize(compilation, module, descriptor);
-            if (descriptor.is_build) {
-                const argv = [_][]const u8{ descriptor.executable_path, "--compiler", compilation.executable_absolute_path };
+        if (module.descriptor.transpile_to_c) {
+            try c_transpiler.initialize(compilation, module);
+            if (module.descriptor.is_build) {
+                const argv = [_][]const u8{ module.descriptor.executable_path, "--compiler", compilation.executable_absolute_path };
                 const process_result = try std.ChildProcess.run(.{
                     .allocator = compilation.base_allocator,
                     .argv = &argv,

@@ -405,7 +405,7 @@ pub const TranslationUnit = struct {
             const declaration = module.values.declarations.get(declaration_index);
             const base_declaration_name = blk: {
                 const name = module.getName(declaration.name).?;
-                if (declaration.scope_type == .global and equal(u8, name, "main")) {
+                if (mangle and declaration.scope_type == .global and equal(u8, name, "main")) {
                     break :blk "user_entry_point";
                 } else {
                     break :blk name;
@@ -476,34 +476,45 @@ pub const TranslationUnit = struct {
     }
 
     fn writeFunctionPrototype(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, function_prototype_index: Compilation.Function.Prototype.Index, name: []const u8) !void {
-        const function_prototype = module.types.function_prototypes.get(function_prototype_index);
-        switch (function_prototype.attributes.calling_convention) {
-            .system_v => {},
-            .naked => try list.appendSlice(allocator, "[[gnu::naked]] "),
-        }
-
-        try unit.writeType(module, list, allocator, function_prototype.return_type, ' ');
-
-        try list.append(allocator, ' ');
-
-        try list.appendSlice(allocator, name);
-
-        try list.append(allocator, '(');
-
-        if (function_prototype.arguments.items.len > 0) {
-            for (function_prototype.arguments.items) |argument_index| {
-                const arg_declaration = module.values.declarations.get(argument_index);
-                try unit.writeType(module, list, allocator, arg_declaration.getType(), ' ');
-                try list.append(allocator, ' ');
-                const arg_name = module.getName(arg_declaration.name).?;
-                try list.appendSlice(allocator, arg_name);
-                try list.appendSlice(allocator, ", ");
+        const is_main = equal(u8, "main", name);
+        if (is_main) {
+            try list.appendSlice(allocator, "int main(int argc, char** argv, char** envp)");
+        } else {
+            const function_prototype = module.types.function_prototypes.get(function_prototype_index);
+            switch (function_prototype.attributes.calling_convention) {
+                .system_v => {},
+                .naked => try list.appendSlice(allocator, "[[gnu::naked]] "),
             }
-            _ = list.pop();
-            _ = list.pop();
-        }
 
-        try list.append(allocator, ')');
+            try unit.writeType(module, list, allocator, function_prototype.return_type, ' ');
+
+            try list.append(allocator, ' ');
+
+            try list.appendSlice(allocator, name);
+
+            try list.append(allocator, '(');
+
+
+            if (function_prototype.arguments.items.len > 0) {
+                for (function_prototype.arguments.items, 0..) |argument_index, index| {
+                    _ = index;
+
+                    const arg_declaration = module.values.declarations.get(argument_index);
+                    if (is_main) {
+                    } else {
+                        try unit.writeType(module, list, allocator, arg_declaration.getType(), ' ');
+                    }
+                    try list.append(allocator, ' ');
+                    const arg_name = module.getName(arg_declaration.name).?;
+                    try list.appendSlice(allocator, arg_name);
+                    try list.appendSlice(allocator, ", ");
+                }
+                _ = list.pop();
+                _ = list.pop();
+            }
+
+            try list.append(allocator, ')');
+        }
     }
 
     fn writeFunctionHeader(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, function_index: Compilation.Function.Index) ![]const u8 {
@@ -1311,35 +1322,63 @@ pub const TranslationUnit = struct {
 
     fn writeBranch(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, branch_index: Compilation.Branch.Index, function_return_type: Type.Index, indentation: usize) !bool {
         const branch = module.values.branches.get(branch_index);
-        try list.appendSlice(allocator, "if (");
-        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-            .value_index = branch.expression,
-            .type_index = Type.Index.invalid,
-        });
-        try list.appendSlice(allocator, ") ");
-        try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-            .value_index = branch.taken_expression,
-            .type_index = function_return_type,
-        });
+        const classic = switch (module.values.array.get(branch.taken_expression).*) {
+            .block => true,
+            else => false,
+        };
 
-        if (!branch.not_taken_expression.invalid) {
-            if (module.values.array.get(branch.taken_expression).* == .block) {
-                _ = list.pop();
-                try list.appendSlice(allocator, " else ");
-            } else {
-                unreachable;
-            }
+        if (classic) {
+            try list.appendSlice(allocator, "if (");
             try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
-                .value_index = branch.not_taken_expression,
+                .value_index = branch.expression,
+                .type_index = Type.Index.invalid,
+            });
+            try list.appendSlice(allocator, ") ");
+            try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                .value_index = branch.taken_expression,
                 .type_index = function_return_type,
             });
 
-            if (module.values.array.get(branch.not_taken_expression).* == .block) {
-                return false;
-            }
-        }
+            if (!branch.not_taken_expression.invalid) {
+                if (module.values.array.get(branch.taken_expression).* == .block) {
+                    _ = list.pop();
+                    try list.appendSlice(allocator, " else ");
+                } else {
+                    unreachable;
+                }
+                try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                    .value_index = branch.not_taken_expression,
+                    .type_index = function_return_type,
+                });
 
-        return true;
+                if (module.values.array.get(branch.not_taken_expression).* == .block) {
+                    return false;
+                }
+            }
+
+            return true;
+        } else {
+            assert(!branch.not_taken_expression.invalid);
+
+            try list.appendSlice(allocator, "(");
+            try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                .value_index = branch.expression,
+                .type_index = Type.Index.invalid,
+            });
+            try list.appendSlice(allocator, ") ? (");
+            try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                .value_index = branch.taken_expression,
+                .type_index = Type.Index.invalid,
+            });
+            try list.appendSlice(allocator, ") : (");
+            try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
+                .value_index = branch.not_taken_expression,
+                .type_index = Type.Index.invalid,
+            });
+            try list.appendSlice(allocator, ")");
+
+            return true;
+        }
     }
 
     const ValueArguments = struct {
@@ -1891,10 +1930,10 @@ pub const TranslationUnit = struct {
     }
 };
 
-pub fn initialize(compilation: *Compilation, module: *Module, descriptor: Compilation.Module.Descriptor) !void {
+pub fn initialize(compilation: *Compilation, module: *Module) !void {
     const allocator = compilation.base_allocator;
     var unit = try TranslationUnit.create(module, allocator);
-    const c_source_file_path = try std.mem.concat(allocator, u8, &.{ descriptor.executable_path, ".c" });
+    const c_source_file_path = try std.mem.concat(allocator, u8, &.{ module.descriptor.executable_path, ".c" });
     const c_source_file = try std.fs.cwd().createFile(c_source_file_path, .{});
 
     try unit.type_forward_declarations.append(allocator, '\n');
@@ -1911,11 +1950,16 @@ pub fn initialize(compilation: *Compilation, module: *Module, descriptor: Compil
     const c_flags = [_][]const u8{
         "-std=c2x",
         "-g",
+        "-funsigned-char",
     };
 
     var zig_command_line = ArrayList([]const u8){};
     try zig_command_line.append(allocator, "zig");
     try zig_command_line.append(allocator, "build-exe");
+
+    if (module.descriptor.link_libc) {
+        try zig_command_line.append(allocator, "-lc");
+    }
 
     const local_cache_dir = std.fs.cwd().realpathAlloc(allocator, "zig-cache") catch b: {
         std.fs.cwd().makeDir("nat/zig-cache") catch {};
@@ -1928,7 +1972,8 @@ pub fn initialize(compilation: *Compilation, module: *Module, descriptor: Compil
     try zig_command_line.append(allocator, "--global-cache-dir");
     try zig_command_line.append(allocator, global_cache_dir);
 
-    try zig_command_line.append(allocator, try std.mem.concat(allocator, u8, &.{ "-femit-bin=", descriptor.executable_path }));
+
+    try zig_command_line.append(allocator, try std.mem.concat(allocator, u8, &.{ "-femit-bin=", module.descriptor.executable_path }));
     try zig_command_line.append(allocator, "-cflags");
 
     for (c_flags) |c_flag| {
