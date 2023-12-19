@@ -384,13 +384,22 @@ const Analyzer = struct {
                         .left_brace,
                         => break,
                         .fixed_keyword_extern => b: {
-                            const result = try analyzer.addNode(.{
-                                .id = .extern_qualifier,
-                                .token = attribute_token,
+                            analyzer.consumeToken();
+                            _ = try analyzer.expectToken(.left_parenthesis);
+                            const string_literal = try analyzer.addNode(.{
+                                .id = .string_literal,
+                                .token = try analyzer.expectToken(.string_literal),
                                 .left = Node.Index.invalid,
                                 .right = Node.Index.invalid,
                             });
-                            analyzer.consumeToken();
+                            _ = try analyzer.expectToken(.right_parenthesis);
+
+                            const result = try analyzer.addNode(.{
+                                .id = .extern_qualifier,
+                                .token = attribute_token,
+                                .left = string_literal,
+                                .right = Node.Index.invalid,
+                            });
                             break :b result;
                         },
                         .fixed_keyword_export => b: {
@@ -1391,6 +1400,7 @@ const Analyzer = struct {
             .right_parenthesis,
             .left_brace,
             .equal,
+            .fixed_keyword_extern,
             => return node_index,
             else => |t| @panic(@tagName(t)),
         }

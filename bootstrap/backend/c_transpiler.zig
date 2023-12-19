@@ -64,7 +64,8 @@ pub const TranslationUnit = struct {
     global_variable_declarations: ArrayList(u8) = .{},
     function_definitions: ArrayList(u8) = .{},
     syscall_bitset: SyscallBitset = SyscallBitset.initEmpty(),
-    function_set: AutoArrayHashMap(Compilation.Function.Index, []const u8) = .{},
+    function_definition_set: AutoArrayHashMap(Compilation.Function.Index, []const u8) = .{},
+    function_declaration_set: AutoArrayHashMap(Compilation.Function.Index, []const u8) = .{},
     macro_set: std.EnumSet(Macro) = std.EnumSet(Macro).initEmpty(),
     struct_type_set: TypeSet = .{},
     optional_type_set: TypeSet = .{},
@@ -103,6 +104,13 @@ pub const TranslationUnit = struct {
         );
 
         {
+            var function_declarations = module.types.function_declarations.iterator();
+            while (function_declarations.nextIndex()) |function_declaration_index| {
+                _ = try unit.writeFunctionDeclaration(module, allocator, function_declaration_index);
+            }
+        }
+
+        {
             var function_definitions = module.types.function_definitions.iterator();
             while (function_definitions.nextIndex()) |function_definition_index| {
                 _ = try unit.writeFunctionDefinition(module, allocator, function_definition_index);
@@ -112,18 +120,33 @@ pub const TranslationUnit = struct {
         return unit;
     }
 
+    fn writeFunctionDeclaration(unit: *TranslationUnit, module: *Module, allocator: Allocator, function_declaration_index: Compilation.Function.Index) ![]const u8 {
+        if (unit.function_declaration_set.getIndex(function_declaration_index)) |index| {
+            return unit.function_declaration_set.values()[index];
+        } else {
+            const function_name = try unit.renderFunctionDeclarationName(module, allocator, function_declaration_index);
+            try unit.writeFunctionHeader(module, &unit.function_declarations, allocator, module.types.function_declarations.get(function_declaration_index), function_name);
+            try unit.function_declaration_set.putNoClobber(allocator, function_declaration_index, function_name);
+
+            try unit.function_declarations.appendSlice(allocator, ";\n\n");
+
+            return function_name;
+        }
+    }
+
     fn writeFunctionDefinition(unit: *TranslationUnit, module: *Module, allocator: Allocator, function_definition_index: Compilation.Function.Index) ![]const u8 {
-        if (unit.function_set.getIndex(function_definition_index)) |index| {
-            return unit.function_set.values()[index];
+        if (unit.function_definition_set.getIndex(function_definition_index)) |index| {
+            return unit.function_definition_set.values()[index];
         } else {
             const function_definition = module.types.function_definitions.get(function_definition_index);
             const function_prototype_type = function_definition.prototype;
             const function_prototype = module.types.function_prototypes.get(module.types.array.get(function_prototype_type).function);
 
-            const function_name = try unit.writeFunctionHeader(module, &unit.function_declarations, allocator, function_definition_index);
-            try unit.function_set.putNoClobber(allocator, function_definition_index, function_name);
+            const function_name = try unit.renderFunctionDefinitionName(module, allocator, function_definition_index);
+            try unit.writeFunctionHeader(module, &unit.function_declarations, allocator, function_definition, function_name);
+            try unit.function_definition_set.putNoClobber(allocator, function_definition_index, function_name);
 
-            _ = try unit.writeFunctionHeader(module, &unit.function_definitions, allocator, function_definition_index);
+            try unit.writeFunctionHeader(module, &unit.function_definitions, allocator, function_definition, function_name);
             try unit.function_declarations.appendSlice(allocator, ";\n\n");
 
             try unit.function_definitions.append(allocator, ' ');
@@ -387,14 +410,25 @@ pub const TranslationUnit = struct {
         return result;
     }
 
-    fn renderFunctionName(unit: *TranslationUnit, module: *Module, allocator: Allocator, function_index: Compilation.Function.Index) ![]const u8 {
-        const function_definition = module.types.function_definitions.get(function_index);
+    fn renderFunctionDefinitionName(unit: *TranslationUnit, module: *Module, allocator: Allocator, function_definition_index: Compilation.Function.Index) ![]const u8 {
+        const function_definition = module.types.function_definitions.get(function_definition_index);
         const function_prototype_type = module.types.array.get(function_definition.prototype);
         const function_prototype_index = function_prototype_type.function;
         const function_prototype = module.types.function_prototypes.get(function_prototype_index);
         const mangle = !(function_prototype.attributes.@"export" or function_prototype.attributes.@"extern");
-        const function_declaration_index = module.map.functions.get(function_index).?;
+        const function_declaration_index = module.map.function_definitions.get(function_definition_index).?;
         const name = try unit.renderDeclarationName(module, allocator, function_declaration_index, mangle);
+        return name;
+    }
+
+    fn renderFunctionDeclarationName(unit: *TranslationUnit, module: *Module, allocator: Allocator, function_declaration_index: Compilation.Function.Index) ![]const u8 {
+        const function_declaration = module.types.function_declarations.get(function_declaration_index);
+        const function_prototype_type = module.types.array.get(function_declaration.prototype);
+        const function_prototype_index = function_prototype_type.function;
+        const function_prototype = module.types.function_prototypes.get(function_prototype_index);
+        const mangle = !(function_prototype.attributes.@"export" or function_prototype.attributes.@"extern");
+        const declaration_index = module.map.function_declarations.get(function_declaration_index).?;
+        const name = try unit.renderDeclarationName(module, allocator, declaration_index, mangle);
         return name;
     }
 
@@ -481,6 +515,11 @@ pub const TranslationUnit = struct {
             try list.appendSlice(allocator, "int main(int argc, char** argv, char** envp)");
         } else {
             const function_prototype = module.types.function_prototypes.get(function_prototype_index);
+
+            if (function_prototype.attributes.@"extern") {
+                try list.appendSlice(allocator, "extern ");
+            }
+
             switch (function_prototype.attributes.calling_convention) {
                 .system_v => {},
                 .naked => try list.appendSlice(allocator, "[[gnu::naked]] "),
@@ -494,14 +533,12 @@ pub const TranslationUnit = struct {
 
             try list.append(allocator, '(');
 
-
             if (function_prototype.arguments.items.len > 0) {
                 for (function_prototype.arguments.items, 0..) |argument_index, index| {
                     _ = index;
 
                     const arg_declaration = module.values.declarations.get(argument_index);
-                    if (is_main) {
-                    } else {
+                    if (is_main) {} else {
                         try unit.writeType(module, list, allocator, arg_declaration.getType(), ' ');
                     }
                     try list.append(allocator, ' ');
@@ -517,15 +554,11 @@ pub const TranslationUnit = struct {
         }
     }
 
-    fn writeFunctionHeader(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, function_index: Compilation.Function.Index) ![]const u8 {
-        const name = try unit.renderFunctionName(module, allocator, function_index);
-        const function_definition = module.types.function_definitions.get(function_index);
-        const function_prototype_type = module.types.array.get(function_definition.prototype);
+    fn writeFunctionHeader(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, function: *const Compilation.Function, name: []const u8) !void {
+        const function_prototype_type = module.types.array.get(function.prototype);
         const function_prototype_index = function_prototype_type.function;
 
         try unit.writeFunctionPrototype(module, list, allocator, function_prototype_index, name);
-
-        return name;
     }
 
     fn writeType(unit: *TranslationUnit, module: *Module, list: *ArrayList(u8), allocator: Allocator, type_index: Type.Index, separation_character: u8) anyerror!void {
@@ -1241,12 +1274,10 @@ pub const TranslationUnit = struct {
         const call = module.values.calls.get(call_index);
         const call_value = module.values.array.get(call.value);
         var argument_declarations = ArrayList(Compilation.Declaration.Index){};
-        switch (call_value.*) {
-            .function_definition => |function_definition_index| {
-                const name = try unit.renderFunctionName(module, allocator, function_definition_index);
-                // if (equal(u8, name, "os_execute")) {
-                //     @breakpoint();
-                // }
+
+        const callable_name = switch (call_value.*) {
+            .function_definition => |function_definition_index| blk: {
+                const name = try unit.renderFunctionDefinitionName(module, allocator, function_definition_index);
                 const function_definition = module.types.function_definitions.get(function_definition_index);
                 const function_prototype_type = module.types.array.get(function_definition.prototype);
                 const function_prototype = module.types.function_prototypes.get(function_prototype_type.function);
@@ -1254,8 +1285,22 @@ pub const TranslationUnit = struct {
 
                 try list.appendSlice(allocator, name);
                 try list.append(allocator, '(');
+
+                break :blk name;
             },
-            .field_access => |field_access_index| {
+            .function_declaration => |function_declaration_index| blk: {
+                const name = try unit.renderFunctionDeclarationName(module, allocator, function_declaration_index);
+                const function_declaration = module.types.function_declarations.get(function_declaration_index);
+                const function_prototype_type = module.types.array.get(function_declaration.prototype);
+                const function_prototype = module.types.function_prototypes.get(function_prototype_type.function);
+                argument_declarations = function_prototype.arguments;
+
+                try list.appendSlice(allocator, name);
+                try list.append(allocator, '(');
+
+                break :blk name;
+            },
+            .field_access => |field_access_index| blk: {
                 const field_access = module.values.field_accesses.get(field_access_index);
                 try unit.writeValue(module, list, allocator, function_return_type, indentation, .{
                     .value_index = field_access.declaration_reference,
@@ -1291,9 +1336,11 @@ pub const TranslationUnit = struct {
                 const field_name = module.getName(field.name).?;
                 try list.appendSlice(allocator, field_name);
                 try list.append(allocator, '(');
+                break :blk "field_access";
             },
             else => |t| @panic(@tagName(t)),
-        }
+        };
+        _ = callable_name;
 
         if (!call.arguments.invalid) {
             const argument_list = module.values.argument_lists.get(call.arguments);
@@ -1961,6 +2008,11 @@ pub fn initialize(compilation: *Compilation, module: *Module) !void {
         try zig_command_line.append(allocator, "-lc");
     }
 
+    for (module.map.libraries.keys()) |library_name| {
+        const library_argument = try std.mem.concat(allocator, u8, &.{ "-l", library_name });
+        try zig_command_line.append(allocator, library_argument);
+    }
+
     const local_cache_dir = std.fs.cwd().realpathAlloc(allocator, "zig-cache") catch b: {
         std.fs.cwd().makeDir("nat/zig-cache") catch {};
         break :b try std.fs.cwd().realpathAlloc(allocator, "nat/zig-cache");
@@ -1971,7 +2023,6 @@ pub fn initialize(compilation: *Compilation, module: *Module) !void {
     try zig_command_line.append(allocator, local_cache_dir);
     try zig_command_line.append(allocator, "--global-cache-dir");
     try zig_command_line.append(allocator, global_cache_dir);
-
 
     try zig_command_line.append(allocator, try std.mem.concat(allocator, u8, &.{ "-femit-bin=", module.descriptor.executable_path }));
     try zig_command_line.append(allocator, "-cflags");
