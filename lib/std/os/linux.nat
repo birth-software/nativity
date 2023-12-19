@@ -485,6 +485,11 @@ const poll = fn(file_descriptors: [&]PollFileDescriptor, file_descriptor_count: 
     return result;
 }
 
+const memfd_create = fn(name: [&:0]const u8, flags: u32) usize {
+    const result = #syscall(#cast(Syscall.memfd_create), flags);
+    return result;
+}
+
 const unwrapSyscall = fn(syscall_result: usize) ?usize {
     const signed_syscall_result: ssize = #cast(syscall_result);
     if (signed_syscall_result >= 0) {

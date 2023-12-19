@@ -11,6 +11,7 @@ const main = fn () s32 {
         },
         .main_source_path = "src/main.nat",
         .link_libc = true,
+        .name = "link_libc",
     };
 
     if (executable.compile()) {

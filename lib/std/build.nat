@@ -7,6 +7,7 @@ const Executable = struct{
     target: Target,
     main_source_path: [:0]const u8,
     link_libc: bool = false,
+    name: []const u8,
 
     const compile = fn(executable: Executable) bool {
         const argument_count = std.start.argument_count;
@@ -21,7 +22,7 @@ const Executable = struct{
     const compile_with_compiler_path = fn(executable: Executable, compiler_path: [&:0]const u8) bool {
         if (std.os.duplicate_process()) |pid| {
             if (pid == 0) {
-                const argv = [_:null] ?[&:0]const u8{ compiler_path, #cast(executable.main_source_path.ptr), "-link_libc", if (executable.link_libc) "true" else "false"};
+                const argv = [_:null] ?[&:0]const u8{ compiler_path, "-main_source_file", #cast(executable.main_source_path.ptr), "-link_libc", if (executable.link_libc) "true" else "false", "-name", #cast(executable.name.ptr) };
                 std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
                 return true;
             } else {

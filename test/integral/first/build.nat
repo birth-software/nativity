@@ -10,6 +10,7 @@ const main = fn () s32 {
             .abi = .gnu,
         },
         .main_source_path = "src/main.nat",
+        .name = "first",
     };
 
     if (executable.compile()) {
