@@ -563,7 +563,6 @@ pub const Declaration = struct {
 };
 
 pub const Function = struct {
-    scope: Scope.Index,
     body: Block.Index,
     prototype: Type.Index,
 
@@ -571,11 +570,12 @@ pub const Function = struct {
         arguments: ArrayList(Declaration.Index),
         return_type: Type.Index,
         attributes: Attributes = .{},
+        scope: Scope.Index,
 
         pub const List = BlockList(@This());
         pub const Index = Prototype.List.Index;
 
-        pub const Attributes = packed struct {
+        pub const Attributes = struct {
             @"extern": bool = false,
             @"export": bool = false,
             @"inline": Inline = .none,
@@ -885,7 +885,6 @@ pub const Value = union(enum) {
     indexed_access: IndexedAccess.Index,
     optional_check: OptionalCheck.Index,
     optional_unwrap: OptionalUnwrap.Index,
-    // optional_cast: Cast.Index,
     array_coerce_to_slice: Cast.Index,
     slice: Slice.Index,
     assembly_block: Assembly.Block.Index,
@@ -908,9 +907,16 @@ pub const Value = union(enum) {
         _ = module;
 
         return switch (value.*) {
+            .bool,
+            .void,
+            .function_definition,
+            .function_declaration,
+            .type,
+            .enum_field,
+            .string_literal,
+            => true,
             .integer => |integer| integer.type.eq(Type.comptime_int),
             .declaration_reference => false,
-            .bool, .void, .function_definition, .type, .enum_field => true,
             // TODO:
             .call,
             // .syscall,
@@ -1048,7 +1054,8 @@ pub const Module = struct {
         function_prototypes: BlockList(Function.Prototype) = .{},
     } = .{},
     map: struct {
-        functions: data_structures.AutoArrayHashMap(Function.Index, Declaration.Index) = .{},
+        function_definitions: data_structures.AutoArrayHashMap(Function.Index, Declaration.Index) = .{},
+        function_declarations: data_structures.AutoArrayHashMap(Function.Index, Declaration.Index) = .{},
         strings: StringKeyMap([]const u8) = .{},
         imports: StringArrayHashMap(File.Index) = .{},
         types: data_structures.AutoArrayHashMap(Type.Index, Declaration.Index) = .{},
@@ -1057,6 +1064,7 @@ pub const Module = struct {
         pointers: data_structures.AutoArrayHashMap(Type.Pointer, Type.Index) = .{},
         optionals: data_structures.AutoArrayHashMap(Type.Index, Type.Index) = .{},
         arrays: data_structures.AutoArrayHashMap(Type.Array, Type.Index) = .{},
+        libraries: data_structures.StringArrayHashMap(void) = .{},
     } = .{},
     main_package: *Package,
     entry_point: Function.Index = Function.Index.invalid,

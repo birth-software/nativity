@@ -667,6 +667,7 @@ const Analyzer = struct {
         const left_type = switch (left_value_index.invalid) {
             false => switch (analyzer.module.values.array.get(left_value_index).*) {
                 .function_definition => |function_index| analyzer.module.types.function_prototypes.get(analyzer.module.types.array.get(analyzer.module.types.function_definitions.get(function_index).prototype).function).return_type,
+                .function_declaration => |function_index| analyzer.module.types.function_prototypes.get(analyzer.module.types.array.get(analyzer.module.types.function_declarations.get(function_index).prototype).function).return_type,
                 .field_access => |field_access_index| blk: {
                     const field_access_type_index = analyzer.module.types.container_fields.get(analyzer.module.values.field_accesses.get(field_access_index).field).type;
                     const field_access_type = analyzer.module.types.array.get(field_access_type_index);
@@ -721,6 +722,15 @@ const Analyzer = struct {
                                 },
                                 false => Value.Index.invalid,
                             };
+                            break :b try analyzer.processCallToFunctionPrototype(scope_index, function_prototype_index, call_argument_node_list.items, method_object);
+                        },
+                        .function_declaration => |function_index| {
+                            const function_declaration = analyzer.module.types.function_declarations.get(function_index);
+                            const function_prototype_index = analyzer.module.types.array.get(function_declaration.prototype).function;
+                            // TODO:
+                            assert(!is_field_access);
+                            const method_object = Value.Index.invalid;
+
                             break :b try analyzer.processCallToFunctionPrototype(scope_index, function_prototype_index, call_argument_node_list.items, method_object);
                         },
                         .field_access => |field_access_index| {
@@ -1693,7 +1703,10 @@ const Analyzer = struct {
                                     const function_prototype = analyzer.module.types.array.get(function_definition.prototype);
                                     const return_type_index = analyzer.functionPrototypeReturnType(function_prototype.function);
                                     logln(.sema, .fn_return_type, "Function {s} has return type #{}", .{ analyzer.module.getName(declaration.name).?, return_type_index.uniqueInteger() });
-                                    try analyzer.module.map.functions.put(analyzer.allocator, function_index, declaration_index);
+                                    try analyzer.module.map.function_definitions.put(analyzer.allocator, function_index, declaration_index);
+                                },
+                                .function_declaration => |function_index| {
+                                    try analyzer.module.map.function_declarations.put(analyzer.allocator, function_index, declaration_index);
                                 },
                                 .type => |type_index| {
                                     try analyzer.module.map.types.put(analyzer.allocator, type_index, declaration_index);
@@ -1880,17 +1893,10 @@ const Analyzer = struct {
             },
             .compiler_intrinsic => try analyzer.compilerIntrinsic(scope_index, expect_type, node_index),
             .function_definition => blk: {
-                const function_scope_index = try analyzer.module.values.scopes.append(analyzer.allocator, .{
-                    .parent = scope_index,
-                    .file = analyzer.module.values.scopes.get(scope_index).file,
-                    .token = node.token,
-                });
-
-                logln(.sema, .type, "Creating function scope #{}. Parent #{}", .{ function_scope_index.uniqueInteger(), scope_index.uniqueInteger() });
-
-                const function_prototype_index = try analyzer.functionPrototype(function_scope_index, node.left);
+                const function_prototype_index = try analyzer.functionPrototype(scope_index, node.left);
                 const function_prototype = analyzer.module.types.function_prototypes.get(function_prototype_index);
                 assert(!function_prototype.attributes.@"extern");
+                const function_scope_index = function_prototype.scope;
 
                 const expected_type = ExpectType{
                     .type_index = analyzer.functionPrototypeReturnType(function_prototype_index),
@@ -1904,7 +1910,6 @@ const Analyzer = struct {
                 const function_index = try analyzer.module.types.function_definitions.append(analyzer.allocator, .{
                     .prototype = prototype_type_index,
                     .body = function_body,
-                    .scope = function_scope_index,
                 });
 
                 const result = Value{
@@ -1924,7 +1929,6 @@ const Analyzer = struct {
                         const function_declaration_index = try analyzer.module.types.function_declarations.append(analyzer.allocator, .{
                             .prototype = prototype_type_index,
                             .body = Block.Index.invalid,
-                            .scope = Scope.Index.invalid,
                         });
                         break :b Value{
                             .function_declaration = function_declaration_index,
@@ -1933,7 +1937,6 @@ const Analyzer = struct {
                     false => unreachable,
                 };
             },
-            .simple_while => unreachable,
             .block => blk: {
                 const block_index = try analyzer.block(scope_index, expect_type, node_index);
                 break :blk Value{
@@ -3077,11 +3080,17 @@ const Analyzer = struct {
         return type_index;
     }
 
-    fn processSimpleFunctionPrototype(analyzer: *Analyzer, scope_index: Scope.Index, simple_function_prototype_node_index: Node.Index) !Function.Prototype {
-        const simple_function_prototype_node = analyzer.getScopeNode(scope_index, simple_function_prototype_node_index);
+    fn processSimpleFunctionPrototype(analyzer: *Analyzer, old_scope_index: Scope.Index, simple_function_prototype_node_index: Node.Index) !Function.Prototype {
+        const simple_function_prototype_node = analyzer.getScopeNode(old_scope_index, simple_function_prototype_node_index);
         assert(simple_function_prototype_node.id == .simple_function_prototype);
         const arguments_node_index = simple_function_prototype_node.left;
         const return_type_node_index = simple_function_prototype_node.right;
+
+        const scope_index = try analyzer.module.values.scopes.append(analyzer.allocator, .{
+            .parent = old_scope_index,
+            .file = analyzer.module.values.scopes.get(old_scope_index).file,
+            .token = simple_function_prototype_node.token,
+        });
 
         var argument_declarations = ArrayList(Declaration.Index){};
         switch (arguments_node_index.invalid) {
@@ -3128,6 +3137,7 @@ const Analyzer = struct {
         return .{
             .arguments = argument_declarations,
             .return_type = return_type,
+            .scope = scope_index,
         };
     }
 
@@ -3149,8 +3159,14 @@ const Analyzer = struct {
                     const attribute_node = analyzer.getScopeNode(scope_index, attribute_node_index);
 
                     switch (attribute_node.id) {
-                        .extern_qualifier => function_prototype.attributes.@"extern" = true,
                         .export_qualifier => function_prototype.attributes.@"export" = true,
+                        .extern_qualifier => {
+                            const string_literal_node = analyzer.getScopeNode(scope_index, attribute_node.left);
+                            const original_string_literal = analyzer.tokenStringLiteral(scope_index, string_literal_node.token);
+                            const fixed_string_literal = try fixupStringLiteral(analyzer.allocator, original_string_literal);
+                            _ = try analyzer.module.map.libraries.getOrPut(analyzer.allocator, fixed_string_literal);
+                            function_prototype.attributes.@"extern" = true;
+                        },
                         .calling_convention => {
                             const calling_convention_type_declaration = try analyzer.forceDeclarationAnalysis(scope_index, "std.builtin.CallingConvention");
                             const calling_convention_type = switch (analyzer.module.values.array.get(calling_convention_type_declaration).*) {
