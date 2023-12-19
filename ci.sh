@@ -26,7 +26,7 @@ nat_compiler=$my_current_directory/zig-out/bin/nat
 for standalone_test_case in $standalone_test_directory_files
 do
     STANDALONE_TEST_NAME=${standalone_test_case##*/}
-    $nat_compiler $standalone_test_case/main.nat
+    $nat_compiler -main_source_file $standalone_test_case/main.nat
 
     if [[ "$?" == "0" ]]; then
         passed_compilation_count=$(($passed_compilation_count + 1))
@@ -66,7 +66,7 @@ do
     if [[ "$?" == "0" ]]; then
         passed_compilation_count=$(($passed_compilation_count + 1))
         if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-            nat/src
+            nat/$MY_TESTNAME
 
             if [[ "$?" == "0" ]]; then
                 passed_test_count=$(($passed_test_count + 1))

@@ -41,6 +41,7 @@ const installation_dir_name = "installation";
 
 const ArgumentParsingError = error{
     main_package_path_not_specified,
+    main_source_file_not_found,
 };
 
 fn reportUnterminatedArgumentError(string: []const u8) noreturn {
@@ -57,6 +58,7 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
     var should_transpile_to_c: ?bool = null;
     var maybe_only_parse: ?bool = null;
     var link_libc = false;
+    var maybe_executable_name: ?[]const u8 = null;
 
     if (arguments.len == 0) {
         // foo
@@ -165,8 +167,26 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
                 } else {
                     reportUnterminatedArgumentError(current_argument);
                 }
+            } else if (equal(u8, current_argument, "-main_source_file")) {
+                if (i + 1 != arguments.len) {
+                    i += 1;
+
+                    const arg = arguments[i];
+                    maybe_main_package_path = arg;
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
+            } else if (equal(u8, current_argument, "-name")) {
+                if (i + 1 != arguments.len) {
+                    i += 1;
+
+                    const arg = arguments[i];
+                    maybe_executable_name = arg;
+                } else {
+                    reportUnterminatedArgumentError(current_argument);
+                }
             } else {
-                maybe_main_package_path = current_argument;
+                std.debug.panic("Unrecognized argument: {s}", .{current_argument});
             }
         }
     }
@@ -177,7 +197,12 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
     const only_parse = maybe_only_parse orelse false;
 
     var is_build = false;
-    const main_package_path = if (maybe_main_package_path) |path| path else blk: {
+    const main_package_path = if (maybe_main_package_path) |path| blk: {
+        const file = std.fs.cwd().openFile(path, .{}) catch return error.main_source_file_not_found;
+        file.close();
+
+        break :blk path;
+    } else blk: {
         const build_file = "build.nat";
         const file = std.fs.cwd().openFile(build_file, .{}) catch return error.main_package_path_not_specified;
         file.close();
@@ -187,7 +212,12 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
     };
 
     const executable_path = maybe_executable_path orelse blk: {
-        const executable_name = if (is_build) "build" else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
+        const executable_name = if (is_build) b: {
+            assert(maybe_executable_name == null);
+            break :b "build";
+        } else b: {
+            break :b if (maybe_executable_name) |name| name else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
+        };
         assert(executable_name.len > 0);
         const result = try std.mem.concat(allocator, u8, &.{ "nat/", executable_name });
         break :blk result;

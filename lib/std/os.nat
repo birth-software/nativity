@@ -352,6 +352,23 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
 
 }
 
+const memfd_create = fn(name: [&:0]const u8, flags: u32) ?FileDescriptor{
+    switch (current) {
+        .linux => {
+            if (linux.unwrapSyscall(syscall_result = linux.memfd_create(path, flags))) |raw_result| {
+                const file_descriptor = FileDescriptor{
+                    .handle = #cast(raw_result),
+                };
+
+                return file_descriptor;
+            } else {
+                return null;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
 const IoChannelBehavior = enum{
     pipe,
     close,
