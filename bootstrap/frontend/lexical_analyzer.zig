@@ -27,7 +27,8 @@ pub const Token = struct {
         identifier = 0x03,
         number_literal = 0x04,
         string_literal = 0x05,
-        discard = 0x06,
+        character_literal = 0x06,
+        discard = 0x07,
         bang = '!', // 0x21
         hash = '#', // 0x23
         dollar_sign = '$', // 0x24
@@ -208,8 +209,15 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
 
                 break :blk .number_literal;
             },
-            '\'' => {
-                unreachable;
+            '\'' => blk: {
+                index += 1;
+                index += @intFromBool(text[index] == '\'');
+                index += 1;
+                const is_end_char_literal = text[index] == '\'';
+                index += @intFromBool(is_end_char_literal);
+                if (!is_end_char_literal) unreachable;
+
+                break :blk .character_literal;
             },
             '"' => blk: {
                 index += 1;
@@ -230,7 +238,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                 index += 1;
                 continue;
             },
-            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/', '&', '|', '^', '?', '$' => |operator| blk: {
+            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/', '&', '|', '^', '?', '$', '%' => |operator| blk: {
                 index += 1;
                 break :blk @enumFromInt(operator);
             },

@@ -1,0 +1,30 @@
+const std = #import("std");
+const print = std.print;
+
+const count_slice_byte_count = fn(slices: []const []const u8) usize {
+    var byte_count: usize = 0;
+    
+    for (slices) |slice| {
+        byte_count += slice.len;
+    }
+
+    return byte_count;
+}
+
+const print_values = fn(slice: []const u8) void {
+    for (slice, 0..) |value, index| {
+        std.print_usize(n = index);
+        std.print(bytes = ": ");
+        std.print_u8(n = value);
+        std.print(bytes = "\n");
+    }
+}
+
+const main = fn () s32 {
+    const a = [_]u8{1, 1, 4, 5, 6};
+    const b = [_]u8{1, 4, 6};
+    const expected_result: usize = a.len + b.len;
+    const result = count_slice_byte_count(slices = .{a.&, b.&}.&);
+    print_values(slice = a.&);
+    return #cast(expected_result - result);
+}

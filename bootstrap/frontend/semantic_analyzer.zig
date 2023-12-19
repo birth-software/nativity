@@ -260,7 +260,11 @@ const Analyzer = struct {
             logln(.sema, .node, "Trying to resolve statement of id {s}", .{@tagName(statement_node.id)});
 
             const statement_value_index = switch (statement_node.id) {
-                .assign, .add_assign => try analyzer.module.values.array.append(analyzer.allocator, try analyzer.processAssignment(scope_index, statement_node_index)),
+                .assign,
+                .add_assign,
+                .sub_assign,
+                .div_assign,
+                => try analyzer.module.values.array.append(analyzer.allocator, try analyzer.processAssignment(scope_index, statement_node_index)),
                 .@"unreachable" => blk: {
                     reaches_end = false;
                     logln(.sema, .reaches_end, "Not reaching end because of unreachable", .{});
@@ -954,7 +958,7 @@ const Analyzer = struct {
         }
     }
 
-    fn range(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Range {
+    fn processRange(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !Range {
         const range_node = analyzer.getScopeNode(scope_index, node_index);
         assert(range_node.id == .range);
 
@@ -997,15 +1001,20 @@ const Analyzer = struct {
         };
 
         const loop_index = try analyzer.module.values.loops.append(analyzer.allocator, .{
-            .pre = Value.Index.invalid,
+            .pre = ArrayList(Value.Index){},
             .condition = condition_index,
             .body = body_index,
-            .post = Value.Index.invalid,
+            .post = ArrayList(Value.Index){},
             .reaches_end = reaches_end,
         });
 
         return loop_index;
     }
+
+    const ForPayload = struct {
+        name: []const u8,
+        value: Value.Index,
+    };
 
     fn forLoop(analyzer: *Analyzer, parent_scope_index: Scope.Index, expect_type: ExpectType, for_node_index: Node.Index) !Loop.Index {
         const for_loop_node = analyzer.getScopeNode(parent_scope_index, for_node_index);
@@ -1022,81 +1031,206 @@ const Analyzer = struct {
         const for_condition_node = analyzer.getScopeNode(scope_index, for_loop_node.left);
         assert(for_condition_node.id == .for_condition);
 
-        const for_loop_element_node = analyzer.getScopeNode(scope_index, for_condition_node.left);
-        var pre = Value.Index.invalid;
-        const for_condition = switch (for_loop_element_node.id) {
-            .range => blk: {
-                const for_range = try analyzer.range(scope_index, for_condition_node.left);
+        const for_expression_node_list_node = analyzer.getScopeNode(scope_index, for_condition_node.left);
+        const for_expression_node_list = analyzer.getScopeNodeList(scope_index, for_expression_node_list_node);
+        const for_payload_node_list_node = analyzer.getScopeNode(scope_index, for_condition_node.right);
+        const for_payload_node_list = analyzer.getScopeNodeList(scope_index, for_payload_node_list_node);
+        assert(for_payload_node_list.items.len == for_expression_node_list.items.len);
 
-                const for_loop_payload_node = analyzer.getScopeNode(scope_index, for_condition_node.right);
-                const maybe_payload_name = switch (for_loop_payload_node.id) {
-                    .node_list => b: {
-                        const nodes = analyzer.getScopeNodeList(scope_index, for_loop_payload_node);
-                        assert(nodes.items.len == 1);
-                        const payload_node_index = nodes.items[0];
-                        break :b analyzer.getPayloadName(scope_index, payload_node_index);
-                    },
-                    else => |t| @panic(@tagName(t)),
-                };
-                const payload_name = if (maybe_payload_name) |name| name else "_";
-                const declaration_type = Declaration.Type{
-                    .resolved = Type.usize,
-                };
-                const declaration_index = try analyzer.declarationCommon(scope_index, .local, .@"var", payload_name, declaration_type, for_range.start, null);
-                const declaration_value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-                    .declaration = declaration_index,
-                });
-                pre = declaration_value_index;
-
-                const binary_condition_index = try analyzer.module.values.binary_operations.append(analyzer.allocator, .{
-                    .id = .compare_less_than,
-                    .type = Type.boolean,
-                    .left = try analyzer.doIdentifierString(scope_index, ExpectType{
-                        .type_index = Type.usize,
-                    }, payload_name, scope_index),
-                    .right = for_range.end,
-                });
-
-                const condition_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-                    .binary_operation = binary_condition_index,
-                });
-                break :blk condition_index;
-            },
-            else => |t| @panic(@tagName(t)),
+        const last_element_index = switch (analyzer.getScopeNode(scope_index, for_expression_node_list.items[for_expression_node_list.items.len - 1]).id) {
+            .range => true,
+            else => false,
         };
+        _ = last_element_index;
 
-        const for_loop_body_index = try analyzer.unresolvedAllocate(scope_index, expect_type, for_loop_node.right);
-        var post = Value.Index.invalid;
-        switch (for_loop_element_node.id) {
-            .range => {
-                const for_condition_value = analyzer.module.values.array.get(for_condition);
-                switch (for_condition_value.*) {
-                    .binary_operation => |binary_operation_index| {
-                        const binary_operation = analyzer.module.values.binary_operations.get(binary_operation_index);
-                        const left_index = binary_operation.left;
-                        const right_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-                            .integer = .{
-                                .value = 1,
-                                .type = Type.usize,
-                                .signedness = .unsigned,
+        var for_expression_values = ArrayList(Value.Index){};
+        var payload_names = ArrayList([]const u8){};
+
+        var index_declaration = Compilation.Declaration.Index.invalid;
+        var index_declaration_statement = Compilation.Value.Index.invalid;
+        var len_expression = Value.Index.invalid;
+
+        var discard_payload_name = false;
+
+        for (for_expression_node_list.items, for_payload_node_list.items, 0..) |for_expression_node_index, for_payload_node_index, index| {
+            const for_expression_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, for_expression_node_index);
+            try for_expression_values.append(analyzer.allocator, for_expression_value_index);
+
+            if (len_expression.invalid) {
+                const for_expression_value = analyzer.module.values.array.get(for_expression_value_index);
+                switch (for_expression_value.*) {
+                    .range => {},
+                    else => {
+                        const value_type_index = for_expression_value.getType(analyzer.module);
+                        len_expression = switch (analyzer.module.types.array.get(value_type_index).*) {
+                            .slice => b: {
+                                const slice_access = try analyzer.module.values.slice_accesses.append(analyzer.allocator, .{
+                                    .value = for_expression_value_index,
+                                    .field = .len,
+                                    .type = Type.usize,
+                                });
+
+                                break :b try analyzer.module.values.array.append(analyzer.allocator, .{
+                                    .slice_access = slice_access,
+                                });
                             },
+                            else => |t| @panic(@tagName(t)),
+                        };
+                    }
+                }
+            }
+
+            const payload_name = if (analyzer.getPayloadName(scope_index, for_payload_node_index)) |name| name else blk: {
+                if (discard_payload_name) {
+                    unreachable;
+                }
+                discard_payload_name = true;
+                break :blk "_";
+            };
+
+            try payload_names.append(analyzer.allocator, payload_name);
+
+            switch (analyzer.module.values.array.get(for_expression_value_index).*) {
+                .range => |range| {
+                    if (index != for_expression_node_list.items.len - 1) unreachable;
+                    const declaration_type = Declaration.Type{
+                        .resolved = Type.usize,
+                    };
+                    assert(index_declaration.invalid);
+                    index_declaration = try analyzer.declarationCommon(scope_index, .local, .@"var", payload_name, declaration_type, range.start, null);
+                    index_declaration_statement = try analyzer.module.values.array.append(analyzer.allocator, .{
+                        .declaration = index_declaration,
+                    });
+                    len_expression = switch (range.end.invalid) {
+                        true => len_expression,
+                        false => range.end,
+                    };
+                },
+                .declaration_reference => {},
+                else => |t| @panic(@tagName(t)),
+            }
+        }
+
+        const index_implicit = index_declaration.invalid;
+        if (index_implicit) {
+            const declaration_type = Declaration.Type{
+                .resolved = Type.usize,
+            };
+            assert(index_declaration.invalid);
+            const index_initial_value = try analyzer.module.values.array.append(analyzer.allocator, .{
+                .integer = .{
+                    .value = 0,
+                    .type = Type.usize,
+                    .signedness = .unsigned,
+                },
+            });
+            index_declaration = try analyzer.declarationCommon(scope_index, .local, .@"var", "_", declaration_type, index_initial_value, null);
+            index_declaration_statement = try analyzer.module.values.array.append(analyzer.allocator, .{
+                .declaration = index_declaration,
+            });
+        }
+
+        {
+            const idx_decl_type = analyzer.module.values.declarations.get(index_declaration).getType();
+            assert(!idx_decl_type.eq(Type.@"comptime_int"));
+
+        }
+
+        var pre = ArrayList(Value.Index){};
+        try pre.append(analyzer.allocator, index_declaration_statement);
+
+        assert(!len_expression.invalid);
+
+        const index_reference = try analyzer.referenceDeclaration(scope_index, ExpectType{
+            .type_index = Type.usize,
+        }, index_declaration);
+
+        const binary_operation = Compilation.BinaryOperation{
+            .id = .compare_less_than,
+            .type = Type.boolean,
+            .left = index_reference,
+            .right = len_expression,
+        };
+        assert(!binary_operation.left.invalid);
+        assert(!binary_operation.right.invalid);
+        const binary_condition_index = try analyzer.module.values.binary_operations.append(analyzer.allocator, binary_operation);
+
+        const condition_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+            .binary_operation = binary_condition_index,
+        });
+
+        if (index_implicit or for_expression_values.items.len > 1) {
+            const len = for_expression_values.items.len - @intFromBool(!index_implicit);
+            for (for_expression_values.items[0..len], payload_names.items[0..len]) |for_expression_value_index, payload_name| {
+                const for_expression_value = analyzer.module.values.array.get(for_expression_value_index);
+                const for_expression_type = for_expression_value.getType(analyzer.module);
+                switch (analyzer.module.types.array.get(for_expression_type).*) {
+                    .slice => |slice| {
+                        const slice_access = try analyzer.module.values.slice_accesses.append(analyzer.allocator, .{
+                            .value = for_expression_value_index,
+                            .field = .ptr,
+                            .type = try analyzer.getPointerType(.{
+                                .termination = slice.termination,
+                                .many = true,
+                                .@"const" = slice.@"const",
+                                .element_type = slice.element_type,
+                            }),
                         });
 
-                        const assignment_index = try analyzer.module.values.assignments.append(analyzer.allocator, .{
-                            .operation = .add,
-                            .destination = left_index,
-                            .source = right_index,
+                        const slice_access_value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+                            .slice_access = slice_access,
                         });
 
-                        const assignment_value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-                            .assign = assignment_index,
+                        const loop_index_reference = try analyzer.referenceDeclaration(scope_index, ExpectType{
+                            .type_index = Type.usize,
+                        }, index_declaration);
+
+                        const indexed_access = try analyzer.module.values.indexed_accesses.append(analyzer.allocator, .{
+                            .indexed_expression = slice_access_value_index,
+                            .index_expression = loop_index_reference,
                         });
-                        post = assignment_value_index;
+
+                        const indexed_access_value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+                            .indexed_access = indexed_access,
+                        });
+
+                        try analyzer.payloads.append(analyzer.allocator, Payload{
+                            .name = payload_name,
+                            .mutability = .@"const",
+                            .type = slice.element_type,
+                            .value = indexed_access_value_index,
+                        });
                     },
                     else => |t| @panic(@tagName(t)),
                 }
-            },
+            }
+        }
+
+        const for_loop_body_index = try analyzer.unresolvedAllocate(scope_index, expect_type, for_loop_node.right);
+        switch (analyzer.module.values.array.get(for_loop_body_index).*) {
+            .block => {},
             else => |t| @panic(@tagName(t)),
+        }
+
+        var post = ArrayList(Value.Index){};
+        {
+            const left_index = index_reference;
+            const right_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+                .integer = .{
+                    .value = 1,
+                    .type = Type.usize,
+                    .signedness = .unsigned,
+                },
+            });
+            const assignment_index = try analyzer.module.values.assignments.append(analyzer.allocator, .{
+                .operation = .add,
+                .destination = left_index,
+                .source = right_index,
+            });
+            const assignment_value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+                .assign = assignment_index,
+            });
+            try post.append(analyzer.allocator, assignment_value_index);
         }
 
         const reaches_end = switch (analyzer.module.values.array.get(for_loop_body_index).*) {
@@ -1104,9 +1238,11 @@ const Analyzer = struct {
             else => |t| @panic(@tagName(t)),
         };
 
+        assert(!condition_index.invalid);
+
         const loop_index = try analyzer.module.values.loops.append(analyzer.allocator, .{
             .pre = pre,
-            .condition = for_condition,
+            .condition = condition_index,
             .body = for_loop_body_index,
             .reaches_end = reaches_end,
             .post = post,
@@ -1422,7 +1558,9 @@ const Analyzer = struct {
                         .operation = switch (node.id) {
                             .assign => .none,
                             .add_assign => .add,
-                            else => unreachable,
+                            .sub_assign => .sub,
+                            .div_assign => .div,
+                            else => |t| @panic(@tagName(t)),
                         },
                     });
 
@@ -1464,6 +1602,7 @@ const Analyzer = struct {
             .bit_or => .bit_or,
             .multiply => .multiply,
             .divide => .divide,
+            .modulus => .modulus,
             .shift_left => .shift_left,
             .shift_right => .shift_right,
             .compare_equal => .compare_equal,
@@ -1494,6 +1633,7 @@ const Analyzer = struct {
             .bit_or,
             .multiply,
             .divide,
+            .modulus,
             => expect_type,
             .shift_left,
             .shift_right,
@@ -1520,8 +1660,11 @@ const Analyzer = struct {
                 .none => switch (binary_operation_id) {
                     .bit_and,
                     .shift_right,
+                    .add,
                     .sub,
                     .multiply,
+                    .divide,
+                    .modulus,
                     => left_type,
                     else => |t| @panic(@tagName(t)),
                 },
@@ -1665,170 +1808,153 @@ const Analyzer = struct {
         return value;
     }
 
+    fn referenceDeclaration(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, declaration_index: Declaration.Index) !Value.Index {
+        const declaration = analyzer.module.values.declarations.get(declaration_index);
+
+        switch (declaration.init_value.invalid) {
+            false => {
+                // logln(.sema, .identifier, "Declaration found: {}", .{init_value});
+                switch (analyzer.module.values.array.get(declaration.init_value).*) {
+                    .unresolved => |unresolved| {
+                        const previous_declaration = analyzer.current_declaration;
+                        analyzer.current_declaration = declaration_index;
+
+                        switch (declaration.type) {
+                            .inferred => |inferred_type_index| assert(inferred_type_index.invalid),
+                            .unresolved => |node_index| {
+                                declaration.type = .{
+                                    .resolved = try analyzer.resolveType(.{
+                                        .scope_index = declaration.scope,
+                                        .node_index = node_index,
+                                    }),
+                                };
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+
+                        try analyzer.resolveNode(declaration.init_value, scope_index, expect_type, unresolved.node_index);
+                        analyzer.current_declaration = previous_declaration;
+
+                        switch (analyzer.module.values.array.get(declaration.init_value).*) {
+                            .function_definition => |function_index| {
+                                const function_definition = analyzer.module.types.function_definitions.get(function_index);
+                                const function_prototype = analyzer.module.types.array.get(function_definition.prototype);
+                                const return_type_index = analyzer.functionPrototypeReturnType(function_prototype.function);
+                                logln(.sema, .fn_return_type, "Function {s} has return type #{}", .{ analyzer.module.getName(declaration.name).?, return_type_index.uniqueInteger() });
+                                try analyzer.module.map.function_definitions.put(analyzer.allocator, function_index, declaration_index);
+                            },
+                            .function_declaration => |function_index| {
+                                try analyzer.module.map.function_declarations.put(analyzer.allocator, function_index, declaration_index);
+                            },
+                            .type => |type_index| {
+                                try analyzer.module.map.types.put(analyzer.allocator, type_index, declaration_index);
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
+                }
+            },
+            true => {
+                switch (declaration.type) {
+                    .resolved => {},
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+        }
+
+        switch (declaration.type) {
+            .inferred => |*inferred_type_index| {
+                const declaration_value_type = analyzer.module.values.array.get(declaration.init_value).getType(analyzer.module);
+                switch (inferred_type_index.invalid) {
+                    true => inferred_type_index.* = declaration_value_type,
+                    false => {},
+                }
+            },
+            .resolved => {},
+            else => |t| @panic(@tagName(t)),
+        }
+
+        const declaration_type_index = declaration.getType();
+        const typecheck_result = try analyzer.typeCheck(expect_type, declaration_type_index);
+
+        assert(!declaration_type_index.invalid);
+        assert(!declaration_type_index.eq(pointer_to_any_type));
+        assert(!declaration_type_index.eq(optional_pointer_to_any_type));
+        assert(!declaration_type_index.eq(optional_any));
+
+        if (!declaration.init_value.invalid and analyzer.module.values.array.get(declaration.init_value).isComptime(analyzer.module) and declaration.mutability == .@"const") {
+            assert(!declaration.init_value.invalid);
+            assert(typecheck_result == .success);
+            return declaration.init_value;
+        } else {
+            const declaration_reference = try analyzer.module.values.array.append(analyzer.allocator, .{
+                .declaration_reference = .{
+                    .value = declaration_index,
+                },
+            });
+
+            const result: Value.Index = switch (typecheck_result) {
+                .success,
+                .take_source,
+                => declaration_reference,
+                .optional_wrap => blk: {
+                    const cast_type = switch (expect_type) {
+                        .type_index => |type_index| type_index,
+                        else => |t| @panic(@tagName(t)),
+                    };
+                    const intrinsic_index = try analyzer.module.values.intrinsics.append(analyzer.allocator, .{
+                        .kind = .{
+                            .optional_wrap = declaration_reference,
+                        },
+                        .type = cast_type,
+                    });
+
+                    const value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+                        .intrinsic = intrinsic_index,
+                    });
+                    break :blk value_index;
+                },
+                inline .zero_extend, .sign_extend => |extension_type| blk: {
+                    const intrinsic = try analyzer.module.values.intrinsics.append(analyzer.allocator, .{
+                        .kind = @unionInit(Intrinsic.Kind, @tagName(extension_type), declaration_reference),
+                        .type = switch (expect_type) {
+                            .flexible_integer => |flexible_integer| t: {
+                                const cast_type = Type.Integer.getIndex(.{
+                                    .signedness = switch (extension_type) {
+                                        .zero_extend => .unsigned,
+                                        .sign_extend => .signed,
+                                        else => unreachable,
+                                    },
+                                    .bit_count = flexible_integer.byte_count << 3,
+                                });
+                                break :t cast_type;
+                            },
+                            .type_index => |type_index| type_index,
+                            else => |t| @panic(@tagName(t)),
+                        },
+                    });
+
+                    const value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
+                        .intrinsic = intrinsic,
+                    });
+                    break :blk value_index;
+                },
+                else => |t| @panic(@tagName(t)),
+            };
+            return result;
+        }
+    }
+
     fn doIdentifierString(analyzer: *Analyzer, from_scope_index: Scope.Index, expect_type: ExpectType, identifier: []const u8, in_scope_index: Scope.Index) !Value.Index {
         logln(.sema, .identifier, "Referencing identifier: \"{s}\" from scope #{} in scope #{}", .{ identifier, from_scope_index.uniqueInteger(), in_scope_index.uniqueInteger() });
         const identifier_hash = try analyzer.processIdentifier(identifier);
 
         if (analyzer.lookupDeclarationInCurrentAndParentScopes(from_scope_index, identifier_hash)) |lookup| {
             const declaration_index = lookup.declaration;
-            const declaration = analyzer.module.values.declarations.get(declaration_index);
-
-            switch (declaration.init_value.invalid) {
-                false => {
-                    // logln(.sema, .identifier, "Declaration found: {}", .{init_value});
-                    switch (analyzer.module.values.array.get(declaration.init_value).*) {
-                        .unresolved => |unresolved| {
-                            const previous_declaration = analyzer.current_declaration;
-                            analyzer.current_declaration = declaration_index;
-
-                            switch (declaration.type) {
-                                .inferred => |inferred_type_index| assert(inferred_type_index.invalid),
-                                .unresolved => |node_index| {
-                                    declaration.type = .{
-                                        .resolved = try analyzer.resolveType(.{
-                                            .scope_index = declaration.scope,
-                                            .node_index = node_index,
-                                        }),
-                                    };
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            }
-
-                            try analyzer.resolveNode(declaration.init_value, lookup.scope, expect_type, unresolved.node_index);
-                            analyzer.current_declaration = previous_declaration;
-
-                            switch (analyzer.module.values.array.get(declaration.init_value).*) {
-                                .function_definition => |function_index| {
-                                    const function_definition = analyzer.module.types.function_definitions.get(function_index);
-                                    const function_prototype = analyzer.module.types.array.get(function_definition.prototype);
-                                    const return_type_index = analyzer.functionPrototypeReturnType(function_prototype.function);
-                                    logln(.sema, .fn_return_type, "Function {s} has return type #{}", .{ analyzer.module.getName(declaration.name).?, return_type_index.uniqueInteger() });
-                                    try analyzer.module.map.function_definitions.put(analyzer.allocator, function_index, declaration_index);
-                                },
-                                .function_declaration => |function_index| {
-                                    try analyzer.module.map.function_declarations.put(analyzer.allocator, function_index, declaration_index);
-                                },
-                                .type => |type_index| {
-                                    try analyzer.module.map.types.put(analyzer.allocator, type_index, declaration_index);
-                                },
-                                else => {},
-                            }
-                        },
-                        else => {},
-                    }
-                },
-                true => {
-                    switch (declaration.type) {
-                        .resolved => {},
-                        else => |t| @panic(@tagName(t)),
-                    }
-                },
-            }
-
-            switch (declaration.type) {
-                .inferred => |*inferred_type_index| {
-                    const declaration_value_type = analyzer.module.values.array.get(declaration.init_value).getType(analyzer.module);
-                    switch (inferred_type_index.invalid) {
-                        true => inferred_type_index.* = declaration_value_type,
-                        false => {},
-                    }
-                },
-                .resolved => {},
-                else => |t| @panic(@tagName(t)),
-            }
-
-            const declaration_type_index = declaration.getType();
-            const typecheck_result = try analyzer.typeCheck(expect_type, declaration_type_index);
-
-            assert(!declaration_type_index.invalid);
-            assert(!declaration_type_index.eq(pointer_to_any_type));
-            assert(!declaration_type_index.eq(optional_pointer_to_any_type));
-            assert(!declaration_type_index.eq(optional_any));
-
-            if (!declaration.init_value.invalid and analyzer.module.values.array.get(declaration.init_value).isComptime(analyzer.module) and declaration.mutability == .@"const") {
-                assert(!declaration.init_value.invalid);
-                assert(typecheck_result == .success);
-                return declaration.init_value;
-            } else {
-                const declaration_reference = try analyzer.module.values.array.append(analyzer.allocator, .{
-                    .declaration_reference = .{
-                        .value = declaration_index,
-                    },
-                });
-
-                const result: Value.Index = switch (typecheck_result) {
-                    .success,
-                    .take_source,
-                    => declaration_reference,
-                    .optional_wrap => blk: {
-                        const cast_type = switch (expect_type) {
-                            .type_index => |type_index| type_index,
-                            else => |t| @panic(@tagName(t)),
-                        };
-                        const intrinsic_index = try analyzer.module.values.intrinsics.append(analyzer.allocator, .{
-                            .kind = .{
-                                .optional_wrap = declaration_reference,
-                            },
-                            .type = cast_type,
-                        });
-
-                        const value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-                            .intrinsic = intrinsic_index,
-                        });
-                        break :blk value_index;
-                    },
-                    inline .zero_extend, .sign_extend => |extension_type| blk: {
-                        const intrinsic = try analyzer.module.values.intrinsics.append(analyzer.allocator, .{
-                            .kind = @unionInit(Intrinsic.Kind, @tagName(extension_type), declaration_reference),
-                            .type = switch (expect_type) {
-                                .flexible_integer => |flexible_integer| t: {
-                                    const cast_type = Type.Integer.getIndex(.{
-                                        .signedness = switch (extension_type) {
-                                            .zero_extend => .unsigned,
-                                            .sign_extend => .signed,
-                                            else => unreachable,
-                                        },
-                                        .bit_count = flexible_integer.byte_count << 3,
-                                    });
-                                    break :t cast_type;
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            },
-                        });
-
-                        const value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-                            .intrinsic = intrinsic,
-                        });
-                        break :blk value_index;
-                    },
-                    else => |t| @panic(@tagName(t)),
-                };
-                return result;
-            }
-
-            // return switch (typecheck_result) {
-            //     .success,
-            //     .take_source,
-            //     => reference_index,
-            //     .array_coerce_to_slice => {
-            //         const cast_type = switch (expect_type) {
-            //             .type_index => |type_index| type_index,
-            //             else => |t| @panic(@tagName(t)),
-            //         };
-            //         _ = cast_type;
-            //         unreachable;
-            //         // const cast_index = try analyzer.module.values.casts.append(analyzer.allocator, .{
-            //         //     .value = reference_index,
-            //         //     .type = cast_type,
-            //         // });
-            //         //
-            //         // const value_index = try analyzer.module.values.array.append(analyzer.allocator, .{
-            //         //     .array_coerce_to_slice = cast_index,
-            //         // });
-            //         //
-            //         // break :blk value_index;
-            //     },
-            // };
+            const scope_index = lookup.scope;
+            const declaration_value = try analyzer.referenceDeclaration(scope_index, expect_type, declaration_index);
+            return declaration_value;
         } else {
             panic("Identifier \"{s}\" not found as a declaration from scope #{} referenced in scope #{}", .{ identifier, from_scope_index.uniqueInteger(), in_scope_index.uniqueInteger() });
         }
@@ -1959,6 +2085,7 @@ const Analyzer = struct {
                                     break :a switch (type_info.*) {
                                         .integer => type_index,
                                         .optional => |optional_type| optional_type.element_type,
+                                        .comptime_int => type_index, // TODO: fix?
                                         else => |t| @panic(@tagName(t)),
                                     };
                                 },
@@ -2087,6 +2214,19 @@ const Analyzer = struct {
                                             break :blk value_ref.*;
                                         }
                                     },
+                                    .array => |array| {
+                                        assert(equal(u8, identifier, "len"));
+                                        break :blk Value{
+                                            .integer = .{
+                                                .value = array.element_count,
+                                                .type = switch (expect_type) {
+                                                    .type_index => |type_index| type_index,
+                                                    else => Type.comptime_int,
+                                                },
+                                                .signedness = .unsigned,
+                                            },
+                                        };
+                                    },
                                     else => |t| @panic(@tagName(t)),
                                 }
 
@@ -2124,12 +2264,23 @@ const Analyzer = struct {
                                     .slice_access = field_access_index,
                                 };
                             },
-                            .array => |array| break :blk Value{
-                                .integer = .{
-                                    .value = array.element_count,
-                                    .type = expect_type.type_index,
-                                    .signedness = .unsigned,
-                                },
+                            .array => |array| {
+                                assert(equal(u8, identifier, "len"));
+                                break :blk Value{
+                                    .integer = .{
+                                        .value = array.element_count,
+                                        .type = switch (expect_type) {
+                                            .type_index => |type_index| type_index,
+                                            else => Type.comptime_int,
+                                        },
+                                        .signedness = .unsigned,
+                                    },
+                                };
+                            },
+                            .integer => {
+                                const declaration = analyzer.module.values.declarations.get(declaration_reference.value);
+                                std.debug.print("Declaration: {s}\n", .{analyzer.module.getName(declaration.name).?});
+                                unreachable;
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -2312,6 +2463,7 @@ const Analyzer = struct {
             .bit_or,
             .multiply,
             .divide,
+            .modulus,
             .shift_left,
             .shift_right,
             .compare_equal,
@@ -2402,13 +2554,10 @@ const Analyzer = struct {
 
                 const slice_index = try analyzer.module.values.slices.append(analyzer.allocator, .{
                     .sliceable = expression_to_slice_index,
-                    .range = try analyzer.range(scope_index, node.right),
+                    .range = try analyzer.processRange(scope_index, node.right),
                     .type = try analyzer.getSliceType(switch (analyzer.module.types.array.get(expression_to_slice_type).*) {
                         .pointer => |pointer| .{
-                            .@"const" = constblk: {
-                                assert(pointer.many);
-                                break :constblk pointer.@"const";
-                            },
+                            .@"const" = pointer.@"const",
                             .element_type = pointer.element_type,
                             .termination = pointer.termination,
                         },
@@ -2449,7 +2598,10 @@ const Analyzer = struct {
                     .pointer => |pointer| {
                         switch (pointer.many) {
                             true => {},
-                            false => unreachable, // TODO: pointer to array?
+                            false => switch (analyzer.module.types.array.get(pointer.element_type).*) {
+                                .array => {},
+                                else => unreachable,
+                            },
                         }
                     },
                     else => |t| @panic(@tagName(t)),
@@ -2632,6 +2784,23 @@ const Analyzer = struct {
                         };
                     },
                     .expression => |expression_value_index| break :blk analyzer.module.values.array.get(expression_value_index).*,
+                }
+            },
+            .range => .{
+                .range = try analyzer.processRange(scope_index, node_index),
+            },
+            .character_literal => blk: {
+                const token = analyzer.getScopeToken(scope_index, node.token);
+                const source_file = analyzer.getScopeSourceFile(scope_index);
+                const token_bytes = tokenBytes(token, source_file);
+                switch (token_bytes.len) {
+                    3 => {
+                        assert(token_bytes[1] != '\\');
+                        break :blk .{
+                            .character_literal = token_bytes[1],
+                        };
+                    },
+                    else => std.debug.panic("Token bytes: {}", .{token_bytes.len}),
                 }
             },
             else => |t| @panic(@tagName(t)),
@@ -2996,6 +3165,7 @@ const Analyzer = struct {
                         .simple_function_prototype,
                         .identifier,
                         .unsigned_integer_type,
+                        .slice_type,
                         => {
                             if (!type_index.invalid) {
                                 unreachable;
@@ -3782,7 +3952,11 @@ const Analyzer = struct {
                             if (dst_size < src_size) {
                                 @panic("Destination integer type is smaller than source");
                             } else if (dst_size > src_size) {
-                                unreachable;
+                                assert(destination_int.signedness == source_int.signedness);
+                                return switch (destination_int.signedness) {
+                                    .unsigned => .zero_extend,
+                                    .signed => .sign_extend,
+                                };
                             } else {
                                 return TypeCheckResult.success;
                             }

@@ -21,6 +21,38 @@ const print = fn(bytes: []const u8) void {
     _ = file_writer.writeAll(bytes);
 }
 
+const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
+    var index: usize = buffer.len;
+    var absolute = n;
+
+    while (true) {
+        const digit: u8 = #cast(absolute % 10);
+        index -= 1;
+        buffer[index] = '0' + digit;
+        absolute /= 10;
+
+        if (absolute == 0) {
+            break;
+        }
+    }
+
+    return buffer[index..];
+}
+
+const print_usize = fn(n: usize) void {
+    var buffer: [65]u8 = undefined;
+    const bytes = format_usize(n, buffer = buffer.&);
+    const file_descriptor = os.StdFileDescriptor.get(descriptor = .stdout);
+    const file_writer = FileWriter{
+        .descriptor = file_descriptor,
+    };
+    _ = file_writer.writeAll(bytes);
+}
+
+const print_u8 = fn(n: u8) void {
+    print_usize(n);
+}
+
 const Allocator = struct {
     handler: &const fn(allocator: &Allocator, old_ptr: ?[&]const u8, old_size: usize, new_size: usize, alignment: u16) ?[&]u8,
 
@@ -132,6 +164,25 @@ const copy_bytes = fn(destination: []u8, source: []const u8) void {
     assert(ok = destination.len == source.len);
     for (0..destination.len) |i| {
         destination[i] = source[i];
+    }
+}
+
+const concatenate_bytes = fn(allocator: &Allocator, slices: []const []const u8) ?[]u8 {
+    var total_byte_count: usize = 0;
+    for (slices) |slice| {
+        total_byte_count += slice.len;
+    }
+
+    if (allocator.allocate(total_byte_count, 1)) |bytes| {
+        var offset: usize = 0;
+        for (slice) |slice| {
+            copy_bytes(bytes[offset..][0..slice.len], slice);
+            offset += slice.len;
+        }
+
+        return bytes;
+    } else {
+        return null;
     }
 }
 

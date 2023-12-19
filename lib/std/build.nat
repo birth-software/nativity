@@ -12,7 +12,7 @@ const Executable = struct{
     const compile = fn(executable: Executable) bool {
         const argument_count = std.start.argument_count;
         const argument_values = std.start.argument_values;
-        assert(ok = argument_count == 3);
+        assert(ok = argument_count >= 3);
         const compiler_path = argument_values[2];
         
         const result = executable.compile_with_compiler_path(compiler_path);

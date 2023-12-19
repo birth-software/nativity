@@ -188,6 +188,8 @@ pub const Node = struct {
         for_condition,
         for_loop,
         add_assign,
+        sub_assign,
+        div_assign,
         undefined,
         zero_terminated,
         null_terminated,
@@ -198,6 +200,8 @@ pub const Node = struct {
         empty_container_literal_guess,
         discarded_assign,
         break_expression,
+        modulus,
+        character_literal,
     };
 };
 
@@ -691,38 +695,50 @@ const Analyzer = struct {
     fn forExpression(analyzer: *Analyzer) !Node.Index {
         const token = try analyzer.expectToken(.fixed_keyword_for);
         _ = try analyzer.expectToken(.left_parenthesis);
-        const expression_token = analyzer.token_i;
-        const first = try analyzer.expression();
-        const ForExpression = struct {
-            node_index: Node.Index,
-            expected_payload_count: usize,
-        };
-        const for_expression = switch (analyzer.tokens[analyzer.token_i].id) {
-            .period => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .period => blk: {
-                    analyzer.consumeTokens(2);
-                    const second = try analyzer.expression();
 
-                    break :blk ForExpression{
-                        .node_index = try analyzer.addNode(.{
+        var for_expression_list = ArrayList(Node.Index){};
+
+        while (analyzer.peekToken().id != .right_parenthesis) {
+            const expression_token = analyzer.token_i;
+            const first = try analyzer.expression();
+
+            const node_index = switch (analyzer.tokens[analyzer.token_i].id) {
+                .period => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                    .period => blk: {
+                        analyzer.consumeTokens(2);
+
+                        break :blk try analyzer.addNode(.{
                             .id = .range,
                             .token = expression_token,
                             .left = first,
-                            .right = second,
-                        }),
-                        .expected_payload_count = 1,
-                    };
+                            .right = switch (analyzer.peekToken().id) {
+                                .right_parenthesis, .comma => Node.Index.invalid,
+                                else => try analyzer.expression(),
+                            },
+                        });
+                    },
+                    else => |t| @panic(@tagName(t)),
                 },
+                .right_parenthesis => first,
+                .comma => first,
                 else => |t| @panic(@tagName(t)),
-            },
-            else => |t| @panic(@tagName(t)),
-        };
+            };
+
+            try for_expression_list.append(analyzer.allocator, node_index);
+
+            switch (analyzer.tokens[analyzer.token_i].id) {
+                .comma => analyzer.consumeToken(),
+                .right_parenthesis => {},
+                else => |t| @panic(@tagName(t)),
+            }
+        }
 
         _ = try analyzer.expectToken(.right_parenthesis);
 
         _ = try analyzer.expectToken(.vertical_bar);
 
         var payload_nodes = ArrayList(Node.Index){};
+
         while (analyzer.tokens[analyzer.token_i].id != .vertical_bar) {
             const payload_token = analyzer.token_i;
             const id: Node.Id = switch (analyzer.tokens[payload_token].id) {
@@ -749,14 +765,14 @@ const Analyzer = struct {
 
         _ = try analyzer.expectToken(.vertical_bar);
 
-        if (payload_nodes.items.len != for_expression.expected_payload_count) {
+        if (payload_nodes.items.len != for_expression_list.items.len) {
             unreachable;
         }
 
         const for_condition_node = try analyzer.addNode(.{
             .id = .for_condition,
             .token = token,
-            .left = for_expression.node_index,
+            .left = try analyzer.nodeList(for_expression_list),
             .right = try analyzer.nodeList(payload_nodes),
         });
 
@@ -802,6 +818,20 @@ const Analyzer = struct {
                 .equal => blk: {
                     analyzer.consumeToken();
                     break :blk .add_assign;
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .minus => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                .equal => blk: {
+                    analyzer.consumeToken();
+                    break :blk .sub_assign;
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .slash => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+                .equal => blk: {
+                    analyzer.consumeToken();
+                    break :blk .div_assign;
                 },
                 else => |t| @panic(@tagName(t)),
             },
@@ -934,6 +964,7 @@ const Analyzer = struct {
         compare_greater_or_equal,
         add,
         sub,
+        modulus,
         bit_and,
         bit_xor,
         bit_or,
@@ -957,6 +988,7 @@ const Analyzer = struct {
         .bit_or = 40,
         .multiply = 70,
         .divide = 70,
+        .modulus = 70,
         .shift_left = 50,
         .shift_right = 50,
     });
@@ -975,6 +1007,7 @@ const Analyzer = struct {
         .bit_or = .left,
         .multiply = .left,
         .divide = .left,
+        .modulus = .left,
         .shift_left = .left,
         .shift_right = .left,
     });
@@ -993,6 +1026,7 @@ const Analyzer = struct {
         .bit_or = .bit_or,
         .multiply = .multiply,
         .divide = .divide,
+        .modulus = .modulus,
         .shift_left = .shift_left,
         .shift_right = .shift_right,
     });
@@ -1046,8 +1080,12 @@ const Analyzer = struct {
                             },
                             .minus => switch (next_token_id) {
                                 .minus => unreachable,
-                                .equal => unreachable,
+                                .equal => break,
                                 else => .sub,
+                            },
+                            .modulus => switch (next_token_id) {
+                                .equal => unreachable,
+                                else => .modulus,
                             },
                             .ampersand => switch (next_token_id) {
                                 .equal => unreachable,
@@ -1066,7 +1104,7 @@ const Analyzer = struct {
                                 else => .multiply,
                             },
                             .slash => switch (next_token_id) {
-                                .equal => unreachable,
+                                .equal => break,
                                 else => .divide,
                             },
                             .less => switch (next_token_id) {
@@ -1115,6 +1153,7 @@ const Analyzer = struct {
                 .bit_or,
                 .multiply,
                 .divide,
+                .modulus,
                 .compare_less_than,
                 .compare_greater_than,
                 => 0,
@@ -1186,6 +1225,7 @@ const Analyzer = struct {
                 else => try analyzer.curlySuffixExpression(),
             },
             .string_literal,
+            .character_literal,
             .number_literal,
             .fixed_keyword_true,
             .fixed_keyword_false,
@@ -1634,6 +1674,15 @@ const Analyzer = struct {
                 analyzer.consumeToken();
                 break :blk analyzer.addNode(.{
                     .id = .string_literal,
+                    .token = token_i,
+                    .left = Node.Index.invalid,
+                    .right = Node.Index.invalid,
+                });
+            },
+            .character_literal => blk: {
+                analyzer.consumeToken();
+                break :blk analyzer.addNode(.{
+                    .id = .character_literal,
                     .token = token_i,
                     .left = Node.Index.invalid,
                     .right = Node.Index.invalid,

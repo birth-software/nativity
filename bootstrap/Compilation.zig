@@ -636,10 +636,10 @@ pub const Block = struct {
 };
 
 pub const Loop = struct {
-    pre: Value.Index,
+    pre: ArrayList(Value.Index),
     condition: Value.Index,
     body: Value.Index,
-    post: Value.Index,
+    post: ArrayList(Value.Index),
     reaches_end: bool,
 
     pub const List = BlockList(@This());
@@ -658,6 +658,8 @@ pub const Assignment = struct {
     const Operation = enum {
         none,
         add,
+        sub,
+        div,
     };
 
     pub const List = BlockList(@This());
@@ -723,6 +725,7 @@ pub const BinaryOperation = struct {
         bit_or,
         multiply,
         divide,
+        modulus,
         shift_left,
         shift_right,
         compare_equal,
@@ -903,6 +906,7 @@ pub const Value = union(enum) {
     @"return": Return.Index,
     argument: Declaration.Index,
     string_literal: StringLiteral,
+    character_literal: u8,
     enum_field: Type.Enum.Field.Index,
     extern_function: Function.Prototype.Index,
     binary_operation: BinaryOperation.Index,
@@ -919,6 +923,7 @@ pub const Value = union(enum) {
     slice: Slice.Index,
     assembly_block: Assembly.Block.Index,
     switch_expression: Switch.Index,
+    range: Range,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -1004,7 +1009,10 @@ pub const Value = union(enum) {
                     .array => |array| array.element_type,
                     .pointer => |pointer| switch (pointer.many) {
                         true => pointer.element_type,
-                        false => unreachable,
+                        false => switch (module.types.array.get(pointer.element_type).*) {
+                            .array => |array| array.element_type,
+                            else => unreachable,
+                        },
                     },
                     else => |t| @panic(@tagName(t)),
                 };
@@ -1031,6 +1039,7 @@ pub const Value = union(enum) {
                 _ = not_taken_type;
                 return taken_type;
             },
+            .character_literal => Type.u8,
             else => |t| @panic(@tagName(t)),
         };
 
