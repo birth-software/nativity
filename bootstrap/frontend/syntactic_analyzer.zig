@@ -230,7 +230,7 @@ const Analyzer = struct {
             const result = token_i;
             return result;
         } else {
-            logln(.parser, .token_errors, "Unexpected token {s} when expected {s}\n| |\n v \n```\n{s}\n```", .{ @tagName(token.id), @tagName(token_id), analyzer.source_file[token.start..] });
+            std.debug.print("Unexpected token {s} when expected {s}\n| |\n v \n```\n{s}\n```", .{ @tagName(token.id), @tagName(token_id), analyzer.source_file[token.start..] });
             @breakpoint();
             return error.unexpected_token;
         }
@@ -253,8 +253,8 @@ const Analyzer = struct {
         log(.parser, .consume_token, "Consuming {} {s}: ", .{ token_count, if (token_count == 1) "token" else "tokens" });
 
         for (0..token_count) |i| {
-            const id = analyzer.peekTokenAhead(i).id;
-            log(.parser, .consume_token, "{s}, ", .{@tagName(id)});
+            const token = analyzer.peekTokenAhead(i);
+            log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token.id), analyzer.source_file[token.start..][0..token.len] });
         }
         log(.parser, .consume_token, "\n", .{});
         analyzer.token_i += token_count;

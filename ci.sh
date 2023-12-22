@@ -2,7 +2,7 @@
 
 echo -e "\e[90mCompiling Nativity with Zig...\e[0m"
 nativity_use_llvm=true
-zig build -Duse_llvm=$nativity_use_llvm
+zig build -Duse_llvm=$nativity_use_llvm -Dllvm_debug=true
 if [[ "$?" != 0 ]]; then
     exit 1
 fi

@@ -122,7 +122,8 @@ pub fn BlockList(comptime T: type) type {
 
         pub fn get(list: *List, index: Index) *T {
             assert(!index.invalid);
-            return &list.blocks.items[index.block].items[index.element];
+            const result = &list.blocks.items[index.block].items[index.element];
+            return result;
         }
 
         pub fn append(list: *List, allocator: Allocator, element: T) !Index {

@@ -21,7 +21,8 @@ const Token = lexical_analyzer.Token;
 const syntactic_analyzer = @import("frontend/syntactic_analyzer.zig");
 const Node = syntactic_analyzer.Node;
 const semantic_analyzer = @import("frontend/semantic_analyzer.zig");
-const c_transpiler = @import("backend/c_transpiler.zig");
+// const c_transpiler = @import("backend/c_transpiler.zig");
+const llvm = @import("backend/llvm.zig");
 
 test {
     _ = lexical_analyzer;
@@ -192,8 +193,8 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
     }
 
     const cross_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = target_triplet });
-    const target = cross_target.toTarget();
-    const transpile_to_c = should_transpile_to_c orelse true;
+    const target = try std.zig.system.resolveTargetQuery(cross_target);
+    const transpile_to_c = should_transpile_to_c orelse false;
     const only_parse = maybe_only_parse orelse false;
 
     var is_build = false;
@@ -211,13 +212,14 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
         break :blk build_file;
     };
 
+    const executable_name = if (is_build) b: {
+        assert(maybe_executable_name == null);
+        break :b "build";
+    } else b: {
+        break :b if (maybe_executable_name) |name| name else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
+    };
+
     const executable_path = maybe_executable_path orelse blk: {
-        const executable_name = if (is_build) b: {
-            assert(maybe_executable_name == null);
-            break :b "build";
-        } else b: {
-            break :b if (maybe_executable_name) |name| name else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
-        };
         assert(executable_name.len > 0);
         const result = try std.mem.concat(allocator, u8, &.{ "nat/", executable_name });
         break :blk result;
@@ -231,6 +233,7 @@ fn parseArguments(compilation: *const Compilation) !Compilation.Module.Descripto
         .is_build = is_build,
         .only_parse = only_parse,
         .link_libc = link_libc,
+        .name = executable_name,
     };
 }
 
@@ -268,6 +271,7 @@ pub const ContainerField = struct {
     name: u32,
     type: Type.Index,
     default_value: Value.Index,
+    index: u32,
     parent: Type.Index,
 
     pub const List = BlockList(@This());
@@ -277,6 +281,7 @@ pub const ContainerField = struct {
 pub const ContainerInitialization = struct {
     field_initializations: ArrayList(Value.Index),
     type: Type.Index,
+    is_comptime: bool,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -336,8 +341,8 @@ pub const Type = union(enum) {
         backing_type: Type.Index,
 
         pub const Field = struct {
+            value: usize,
             name: u32,
-            value: Value.Index,
             parent: Type.Index,
 
             pub const List = BlockList(@This());
@@ -391,17 +396,39 @@ pub const Type = union(enum) {
         };
     }
 
-    pub fn getBitSize(type_info: Type) u64 {
+    pub fn getBitSize(type_info: Type, module: *Module) u64 {
         return switch (type_info) {
             .integer => |integer| integer.bit_count,
             .pointer => 8,
             .bool => 1,
             .comptime_int => @panic("This call should never happen"),
+            .@"struct" => |struct_index| b: {
+                const struct_type = module.types.structs.get(struct_index);
+                if (!struct_type.backing_type.invalid) {
+                    break :b module.types.array.get(struct_type.backing_type).getBitSize(module);
+                } else {
+                    var bitsize: usize = 0;
+                    for (struct_type.fields.items) |field_index| {
+                        const field = module.types.container_fields.get(field_index);
+                        const field_bitsize = module.types.array.get(field.type).getBitSize(module);
+                        bitsize += field_bitsize;
+                    }
+
+                    return bitsize;
+                }
+            },
+            .optional => |optional| {
+                const element_bitsize = module.types.array.get(optional.element_type).getBitSize(module);
+                const element_alignment = module.types.array.get(optional.element_type).getAlignment(module);
+                return std.mem.alignForward(usize, element_bitsize + 1, element_alignment);
+            },
             else => |t| @panic(@tagName(t)),
         };
     }
 
-    pub fn getAlignment(type_info: Type) u64 {
+    pub fn getAlignment(type_info: Type, module: *Module) u64 {
+        _ = module;
+
         return switch (type_info) {
             .integer => |integer| @min(16, integer.getSize()),
             .pointer => 8,
@@ -433,6 +460,22 @@ pub const Type = union(enum) {
     pub const @"u64" = Type.Integer.getIndex(.{
         .bit_count = 64,
         .signedness = .unsigned,
+    });
+    pub const s8 = Type.Integer.getIndex(.{
+        .bit_count = 8,
+        .signedness = .signed,
+    });
+    pub const s16 = Type.Integer.getIndex(.{
+        .bit_count = 16,
+        .signedness = .signed,
+    });
+    pub const s32 = Type.Integer.getIndex(.{
+        .bit_count = 32,
+        .signedness = .signed,
+    });
+    pub const s64 = Type.Integer.getIndex(.{
+        .bit_count = 64,
+        .signedness = .signed,
     });
 };
 
@@ -532,7 +575,7 @@ pub const extra_common_type_data = blk: {
 
 /// A scope contains a bunch of declarations
 pub const Scope = struct {
-    declarations: data_structures.AutoArrayHashMap(u32, Declaration.Index) = .{},
+    declarations: data_structures.AutoArrayHashMap(u32, Declaration.Reference) = .{},
     parent: Scope.Index,
     file: File.Index,
     token: Token.Index,
@@ -542,9 +585,10 @@ pub const Scope = struct {
     pub const Index = List.Index;
 };
 
-pub const ScopeType = enum(u1) {
+pub const ScopeType = enum(u2) {
     local = 0,
     global = 1,
+    argument = 2,
 };
 
 pub const Mutability = enum(u1) {
@@ -558,12 +602,15 @@ pub const Declaration = struct {
     init_value: Value.Index,
     name: u32,
     argument_index: ?u32,
+    line: u32,
+    column: u32,
     // A union is needed here because of global lazy declarations
     type: Declaration.Type,
     scope: Scope.Index,
 
     pub const Reference = struct {
         value: Declaration.Index,
+        kind: ScopeType,
 
         pub fn getType(reference: Reference, module: *Module) Compilation.Type.Index {
             return module.values.declarations.get(reference.value).getType();
@@ -592,6 +639,10 @@ pub const Declaration = struct {
     pub const Index = List.Index;
 };
 
+pub const DebugInformation = struct {
+    line_number: u32,
+};
+
 pub const Function = struct {
     body: Block.Index,
     prototype: Type.Index,
@@ -609,7 +660,7 @@ pub const Function = struct {
             @"extern": bool = false,
             @"export": bool = false,
             @"inline": Inline = .none,
-            calling_convention: CallingConvention = .system_v,
+            calling_convention: CallingConvention = .auto,
 
             pub const Inline = enum {
                 none,
@@ -620,26 +671,34 @@ pub const Function = struct {
         };
     };
 
-    pub fn getBodyBlock(function: Function, module: *Module) *Block {
-        return module.blocks.get(function.body);
-    }
-
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
 
 pub const Block = struct {
-    statements: ArrayList(Value.Index) = .{},
+    statements: ArrayList(Statement.Index) = .{},
+    line: u32,
+    column: u32,
     reaches_end: bool,
+
+    pub const List = BlockList(@This());
+    pub const Index = List.Index;
+};
+
+pub const Statement = struct {
+    value: Value.Index,
+    line: u32,
+    column: u32,
+
     pub const List = BlockList(@This());
     pub const Index = List.Index;
 };
 
 pub const Loop = struct {
-    pre: ArrayList(Value.Index),
+    pre: ArrayList(Statement.Index),
     condition: Value.Index,
-    body: Value.Index,
-    post: ArrayList(Value.Index),
+    body: Statement.Index,
+    post: ArrayList(Statement.Index),
     reaches_end: bool,
 
     pub const List = BlockList(@This());
@@ -653,14 +712,7 @@ const Unresolved = struct {
 pub const Assignment = struct {
     destination: Value.Index,
     source: Value.Index,
-    operation: Operation,
-
-    const Operation = enum {
-        none,
-        add,
-        sub,
-        div,
-    };
+    operation: ?BinaryOperation.Id,
 
     pub const List = BlockList(@This());
     pub const Index = List.Index;
@@ -723,9 +775,9 @@ pub const BinaryOperation = struct {
         bit_and,
         bit_xor,
         bit_or,
-        multiply,
-        divide,
-        modulus,
+        mul,
+        div,
+        mod,
         shift_left,
         shift_right,
         compare_equal,
@@ -754,8 +806,10 @@ pub const UnaryOperation = struct {
 };
 
 pub const CallingConvention = enum {
-    system_v,
+    auto,
+    c,
     naked,
+    system_v,
 };
 
 pub const Branch = struct {
@@ -888,8 +942,8 @@ pub const Value = union(enum) {
     undefined,
     @"unreachable",
     bool: bool,
-    pointer_null_literal,
-    optional_null_literal,
+    pointer_null_literal: Type.Index,
+    optional_null_literal: Type.Index,
     unresolved: Unresolved,
     intrinsic: Intrinsic.Index,
     declaration: Declaration.Index,
@@ -932,15 +986,9 @@ pub const Value = union(enum) {
         value: u64,
         type: Type.Index,
         signedness: Type.Integer.Signedness,
-
-        pub fn getBitCount(integer: Integer, module: *Module) u16 {
-            return module.types.get(integer.type).integer.bit_count;
-        }
     };
 
     pub fn isComptime(value: *Value, module: *Module) bool {
-        _ = module;
-
         return switch (value.*) {
             .bool,
             .void,
@@ -949,22 +997,44 @@ pub const Value = union(enum) {
             .type,
             .enum_field,
             .string_literal,
+            .integer,
             => true,
-            .integer => |integer| integer.type.eq(Type.comptime_int),
-            .declaration_reference => false,
-            // TODO:
+            .container_initialization, .array_initialization => |initialization_index| b: {
+                const initialization = module.values.container_initializations.get(initialization_index);
+                break :b initialization.is_comptime;
+            },
+            .intrinsic => |intrinsic_index| b: {
+                const intrinsic = module.values.intrinsics.get(intrinsic_index);
+                break :b switch (intrinsic.kind) {
+                    .array_coerce_to_slice,
+                    .cast,
+                    .zero_extend,
+                    => |sema_value| module.values.array.get(sema_value).isComptime(module),
+                    .min => |values| module.values.array.get(values.left).isComptime(module) and module.values.array.get(values.right).isComptime(module),
+                    .syscall => false,
+                    else => |t| @panic(@tagName(t)),
+                };
+            },
+            .slice_access => |slice_access_index| b: {
+                const slice_acccess = module.values.slice_accesses.get(slice_access_index);
+                break :b module.values.array.get(slice_acccess.value).isComptime(module);
+            },
+            .unary_operation => |unary_operation_index| b: {
+                const unary_operation = module.values.unary_operations.get(unary_operation_index);
+                break :b switch (unary_operation.id) {
+                    .address_of => false,
+                    else => |t| @panic(@tagName(t)),
+                };
+            },
+            .declaration_reference,
             .call,
-            // .syscall,
             .binary_operation,
-            .container_initialization,
             // .cast,
             .optional_unwrap,
             .pointer_null_literal,
             .indexed_access,
             .slice,
-            .array_initialization,
             .undefined,
-            .intrinsic,
             .field_access,
             => false,
             // TODO:
@@ -990,8 +1060,8 @@ pub const Value = union(enum) {
             => |initialization| module.values.container_initializations.get(initialization).type,
             .intrinsic => |intrinsic_index| module.values.intrinsics.get(intrinsic_index).type,
             .unary_operation => |unary_operation_index| module.values.unary_operations.get(unary_operation_index).type,
-            .pointer_null_literal => semantic_analyzer.optional_pointer_to_any_type,
-            .optional_null_literal => semantic_analyzer.optional_any,
+            .pointer_null_literal => |type_index| type_index,
+            .optional_null_literal => |type_index| type_index,
             .field_access => |field_access_index| module.types.container_fields.get(module.values.field_accesses.get(field_access_index).field).type,
             // .cast,
             // .optional_cast,
@@ -1055,8 +1125,9 @@ pub const Value = union(enum) {
 
 pub const Module = struct {
     values: struct {
-        field_accesses: BlockList(FieldAccess) = .{},
         array: BlockList(Value) = .{},
+        statements: BlockList(Statement) = .{},
+        field_accesses: BlockList(FieldAccess) = .{},
         declarations: BlockList(Declaration) = .{},
         scopes: BlockList(Scope) = .{},
         files: BlockList(File) = .{},
@@ -1101,6 +1172,7 @@ pub const Module = struct {
         non_primitive_integer: data_structures.AutoArrayHashMap(Type.Integer, Type.Index) = .{},
         slices: data_structures.AutoArrayHashMap(Type.Slice, Type.Index) = .{},
         pointers: data_structures.AutoArrayHashMap(Type.Pointer, Type.Index) = .{},
+        integers: data_structures.AutoArrayHashMap(Type.Integer, Type.Index) = .{},
         optionals: data_structures.AutoArrayHashMap(Type.Index, Type.Index) = .{},
         arrays: data_structures.AutoArrayHashMap(Type.Array, Type.Index) = .{},
         libraries: data_structures.StringArrayHashMap(void) = .{},
@@ -1117,6 +1189,7 @@ pub const Module = struct {
         is_build: bool,
         only_parse: bool,
         link_libc: bool,
+        name: []const u8,
     };
 
     const ImportFileResult = struct {
@@ -1410,8 +1483,6 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
         });
 
         semantic_analyzer.unreachable_index = try module.values.array.append(compilation.base_allocator, .@"unreachable");
-        semantic_analyzer.pointer_null_index = try module.values.array.append(compilation.base_allocator, .pointer_null_literal);
-        semantic_analyzer.optional_null_index = try module.values.array.append(compilation.base_allocator, .optional_null_literal);
         semantic_analyzer.undefined_index = try module.values.array.append(compilation.base_allocator, .undefined);
         semantic_analyzer.boolean_false = try module.values.array.append(compilation.base_allocator, .{
             .bool = false,
@@ -1429,36 +1500,31 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
         try semantic_analyzer.initialize(compilation, module, packages[0], value_index);
 
         if (module.descriptor.transpile_to_c) {
-            try c_transpiler.initialize(compilation, module);
-            if (module.descriptor.is_build) {
-                const argv = [_][]const u8{ module.descriptor.executable_path, "--compiler", compilation.executable_absolute_path };
-                const process_result = try std.ChildProcess.run(.{
-                    .allocator = compilation.base_allocator,
-                    .argv = &argv,
-                });
-
-                switch (process_result.term) {
-                    .Exited => |exit_code| {
-                        if (exit_code != 0) {
-                            for (argv) |arg| {
-                                std.debug.print("{s} ", .{arg});
-                            }
-                            std.debug.print("exited with failure: {}\n", .{exit_code});
-                            std.debug.print("STDOUT:\n```\n{s}\n```\n", .{process_result.stdout});
-                            std.debug.print("STDERR:\n```\n{s}\n```\n", .{process_result.stderr});
-                            @panic("Internal error");
-                        }
-                    },
-                    else => @panic("Unexpected program state"),
-                }
-            }
-        } else {
-            unreachable;
-            // const ir = try intermediate_representation.initialize(compilation, module);
+            // try c_transpiler.initialize(compilation, module);
+            // if (module.descriptor.is_build) {
+            //     const argv = [_][]const u8{ module.descriptor.executable_path, "--compiler", compilation.executable_absolute_path };
+            //     const process_result = try std.ChildProcess.run(.{
+            //         .allocator = compilation.base_allocator,
+            //         .argv = &argv,
+            //     });
             //
-            // switch (descriptor.target.cpu.arch) {
-            //     inline else => |arch| try emit.get(arch).initialize(compilation.base_allocator, ir, descriptor),
+            //     switch (process_result.term) {
+            //         .Exited => |exit_code| {
+            //             if (exit_code != 0) {
+            //                 for (argv) |arg| {
+            //                     std.debug.print("{s} ", .{arg});
+            //                 }
+            //                 std.debug.print("exited with failure: {}\n", .{exit_code});
+            //                 std.debug.print("STDOUT:\n```\n{s}\n```\n", .{process_result.stdout});
+            //                 std.debug.print("STDERR:\n```\n{s}\n```\n", .{process_result.stderr});
+            //                 @panic("Internal error");
+            //             }
+            //         },
+            //         else => @panic("Unexpected program state"),
+            //     }
             // }
+        } else {
+            try llvm.initialize(compilation, module);
         }
     }
 }
@@ -1521,9 +1587,6 @@ pub const File = struct {
     fn lex(file: *File, allocator: Allocator, file_index: File.Index) !void {
         assert(file.status == .loaded_into_memory);
         file.lexical_analyzer_result = try lexical_analyzer.analyze(allocator, file.source_code, file_index);
-        // if (!@import("builtin").is_test) {
-        // print("[LEXICAL ANALYSIS] {} ns\n", .{file.lexical_analyzer_result.time});
-        // }
         file.status = .lexed;
     }
 
@@ -1531,12 +1594,6 @@ pub const File = struct {
         assert(file.status == .lexed);
         file.syntactic_analyzer_result = try syntactic_analyzer.analyze(allocator, file.lexical_analyzer_result.tokens.items, file.source_code, file_index);
 
-        // if (file_index.uniqueInteger() == 5) {
-        //     assert(file.syntactic_analyzer_result.nodes.items[1356].id != .node_list);
-        // }
-        // if (!@import("builtin").is_test) {
-        //     print("[SYNTACTIC ANALYSIS] {} ns\n", .{file.syntactic_analyzer_result.time});
-        // }
         file.status = .parsed;
     }
 };
@@ -1546,7 +1603,7 @@ const LoggerScope = enum {
     lexer,
     parser,
     sema,
-    c,
+    // c,
 };
 
 const Logger = enum {
@@ -1563,7 +1620,7 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
             .lexer => lexical_analyzer,
             .parser => syntactic_analyzer,
             .sema => semantic_analyzer,
-            .c => c_transpiler,
+            // .c => c_transpiler,
         };
     }
 }
