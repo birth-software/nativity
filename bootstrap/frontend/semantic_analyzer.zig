@@ -138,9 +138,14 @@ const Analyzer = struct {
     maybe_count: usize = 0,
     for_count: usize = 0,
 
-    fn getScopeSourceFile(analyzer: *Analyzer, scope_index: Scope.Index) []const u8 {
+    fn getScopeFile(analyzer: *Analyzer, scope_index: Scope.Index) *File {
         const scope = analyzer.module.values.scopes.get(scope_index);
         const file = analyzer.module.values.files.get(scope.file);
+        return file;
+    }
+
+    fn getScopeSourceFile(analyzer: *Analyzer, scope_index: Scope.Index) []const u8 {
+        const file = analyzer.getScopeFile(scope_index);
         return file.source_code;
     }
 
@@ -152,13 +157,13 @@ const Analyzer = struct {
         return result.*;
     }
 
-    fn getScopeToken(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) Token {
-        const scope = analyzer.module.values.scopes.get(scope_index);
-        const file = analyzer.module.values.files.get(scope.file);
-        const result = file.lexical_analyzer_result.tokens.items[token_index];
-
-        return result;
-    }
+    // fn getScopeToken(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) Token {
+    //     const scope = analyzer.module.values.scopes.get(scope_index);
+    //     const file = analyzer.module.values.files.get(scope.file);
+    //     const result = file.lexical_analyzer_result.tokens.items[token_index];
+    //
+    //     return result;
+    // }
 
     fn getScopeNodeList(analyzer: *Analyzer, scope_index: Scope.Index, node: Node) ArrayList(Node.Index) {
         const scope = analyzer.module.values.scopes.get(scope_index);
@@ -173,9 +178,14 @@ const Analyzer = struct {
     }
 
     fn getFileToken(analyzer: *Analyzer, file_index: File.Index, token: Token.Index) Token {
-        const file = analyzer.module.values.files.get(file_index);
-        const result = file.lexical_analyzer_result.tokens.items[token];
-        return result;
+        _ = analyzer;
+        _ = file_index;
+        _ = token;
+
+        unreachable;
+        // const file = analyzer.module.values.files.get(file_index);
+        // const result = file.lexical_analyzer_result.tokens.items[token];
+        // return result;
     }
 
     fn getFileNode(analyzer: *Analyzer, file_index: File.Index, node_index: Node.Index) Node {
@@ -209,21 +219,12 @@ const Analyzer = struct {
         line: u32,
         column: u32,
     } {
-        const token = analyzer.getScopeToken(scope_index, token_index);
-        const source = analyzer.getScopeSourceFile(scope_index);
-        const source_slice = source[0..token.start];
-        var line: u32 = 0;
-        var last_line: usize = 0;
+        const file = analyzer.getScopeFile(scope_index);
+        const file_offset = file.lexical_analyzer_result.token_offsets.items[token_index];
+        const line = file.lexical_analyzer_result.token_lines.items[token_index];
+        const line_offset = file.lexical_analyzer_result.file_line_offsets.items[line];
+        const column = file_offset - line_offset;
 
-        for (source_slice, 0..) |ch, i| {
-            const is_line = ch == '\n';
-            line += @intFromBool(is_line);
-            if (is_line) {
-                last_line = i;
-            }
-        }
-
-        const column: u32 = @intCast(token.start - last_line);
         return .{
             .line = line,
             .column = column,
@@ -307,8 +308,14 @@ const Analyzer = struct {
                     logln(.sema, .reaches_end, "Not reaching end because of unreachable", .{});
                     break :blk unreachable_index;
                 },
-                .simple_symbol_declaration => blk: {
-                    const declaration_index = try analyzer.symbolDeclaration(scope_index, statement_node_index, .local);
+                .constant_symbol_declaration,
+                .variable_symbol_declaration,
+                => |nid| blk: {
+                    const declaration_index = try analyzer.symbolDeclaration(scope_index, statement_node_index, .local, switch (nid) {
+                        .constant_symbol_declaration => .@"const",
+                        .variable_symbol_declaration => .@"var",
+                        else => unreachable,
+                    });
                     const declaration = analyzer.module.values.declarations.get(declaration_index);
                     const init_value = analyzer.module.values.array.get(declaration.init_value);
 
@@ -829,17 +836,16 @@ const Analyzer = struct {
     }
 
     fn typeCheckEnumLiteral(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index, enum_type: Enum) !?Enum.Field.Index {
-        const enum_name = tokenBytes(analyzer.getScopeToken(scope_index, token_index), analyzer.getScopeSourceFile(scope_index));
+        const enum_name = analyzer.tokenIdentifier(scope_index, token_index);
         const enum_name_hash = try analyzer.processIdentifier(enum_name);
-
         for (enum_type.fields.items) |enum_field_index| {
             const enum_field = analyzer.module.types.enum_fields.get(enum_field_index);
-            const existing = analyzer.module.getName(enum_field.name).?;
+            // const existing = analyzer.module.getName(enum_field.name).?;
             if (enum_field.name == enum_name_hash) {
                 return enum_field_index;
             }
 
-            logln(.sema, .typecheck, "Existing enum field \"{s}\" != enum literal \"{s}\"", .{ existing, enum_name });
+            // std.debug.panic("Existing enum field \"{s}\" != enum literal \"{s}\"", .{ existing, enum_name });
         } else {
             return null;
         }
@@ -1221,7 +1227,7 @@ const Analyzer = struct {
         }, index_declaration);
 
         const binary_operation = Compilation.BinaryOperation{
-            .id = .compare_less_than,
+            .id = .compare_less,
             .type = Type.boolean,
             .left = index_reference,
             .right = len_expression,
@@ -1707,27 +1713,27 @@ const Analyzer = struct {
             .bit_and => .bit_and,
             .bit_xor => .bit_xor,
             .bit_or => .bit_or,
-            .multiply => .mul,
-            .divide => .div,
-            .modulus => .mod,
+            .mul => .mul,
+            .div => .div,
+            .mod => .mod,
             .shift_left => .shift_left,
             .shift_right => .shift_right,
             .compare_equal => .compare_equal,
             .compare_not_equal => .compare_not_equal,
-            .compare_greater_than => .compare_greater_than,
-            .compare_greater_or_equal => .compare_greater_or_equal,
-            .compare_less_than => .compare_less_than,
-            .compare_less_or_equal => .compare_less_or_equal,
+            .compare_greater => .compare_greater,
+            .compare_greater_equal => .compare_greater_equal,
+            .compare_less => .compare_less,
+            .compare_less_equal => .compare_less_equal,
             else => |t| @panic(@tagName(t)),
         };
 
         const left_expect_type: ExpectType = switch (binary_operation_id) {
             .compare_equal,
             .compare_not_equal,
-            .compare_less_or_equal,
-            .compare_less_than,
-            .compare_greater_than,
-            .compare_greater_or_equal,
+            .compare_less,
+            .compare_less_equal,
+            .compare_greater,
+            .compare_greater_equal,
             => ExpectType.none,
             else => expect_type,
         };
@@ -1756,11 +1762,11 @@ const Analyzer = struct {
                 //     .type_index = Type.u8,
                 // },
                 .compare_equal,
-                .compare_less_than,
-                .compare_greater_or_equal,
-                .compare_greater_than,
-                .compare_less_or_equal,
                 .compare_not_equal,
+                .compare_less,
+                .compare_greater,
+                .compare_greater_equal,
+                .compare_less_equal,
                 => ExpectType{
                     .type_index = left_type,
                 },
@@ -1808,10 +1814,15 @@ const Analyzer = struct {
     }
 
     fn getScopeSliceCustomToken(analyzer: *Analyzer, scope_index: Scope.Index, custom_token_index: Token.Index) []const u8 {
-        const scope = analyzer.module.values.scopes.get(scope_index);
-        const token = analyzer.getFileToken(scope.file, custom_token_index);
-        const scope_slice = analyzer.module.values.files.get(scope.file).source_code[token.start..];
-        return scope_slice;
+        _ = analyzer;
+        _ = scope_index;
+        _ = custom_token_index;
+
+        unreachable;
+        // const scope = analyzer.module.values.scopes.get(scope_index);
+        // const token = analyzer.getFileToken(scope.file, custom_token_index);
+        // const scope_slice = analyzer.module.values.files.get(scope.file).source_code[token.start..];
+        // return scope_slice;
     }
 
     fn lookupDeclarationInCurrentAndParentScopes(analyzer: *Analyzer, scope_index: Scope.Index, identifier_hash: u32) ?DeclarationLookup {
@@ -2107,7 +2118,8 @@ const Analyzer = struct {
 
     fn doIdentifier(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_token: Token.Index, node_scope_index: Scope.Index) !Value.Index {
         const identifier = analyzer.tokenIdentifier(node_scope_index, node_token);
-        return try analyzer.doIdentifierString(scope_index, expect_type, identifier, node_scope_index);
+        const value = try analyzer.doIdentifierString(scope_index, expect_type, identifier, node_scope_index);
+        return value;
     }
 
     fn resolveInteger(analyzer: *Analyzer, scope_index: Scope.Index, value_index: Value.Index) usize {
@@ -2254,11 +2266,13 @@ const Analyzer = struct {
             },
             .field_access => blk: {
                 logln(.sema, .node, "Field access", .{});
-                const identifier = analyzer.tokenIdentifier(scope_index, node.right.value);
+                const left_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
+                const identifier_node = analyzer.getScopeNode(scope_index, node.right);
+                assert(identifier_node.id == .identifier);
+                const identifier = analyzer.tokenIdentifier(scope_index, identifier_node.token);
                 const identifier_hash = try analyzer.processIdentifier(identifier);
                 logln(.sema, .node, "Field access identifier for RHS: \"{s}\"", .{identifier});
                 // analyzer.debugNode(scope_index, node_index);
-                const left_value_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, node.left);
 
                 switch (analyzer.module.values.array.get(left_value_index).*) {
                     .type => |type_index| {
@@ -2267,7 +2281,7 @@ const Analyzer = struct {
                             switch (left_type.*) {
                                 .@"struct" => |struct_index| {
                                     const struct_type = analyzer.module.types.structs.get(struct_index);
-                                    const right_index = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, node.right.value, scope_index);
+                                    const right_index = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, identifier_node.token, scope_index);
                                     const right_value = analyzer.module.values.array.get(right_index);
 
                                     break :blk right_value.*;
@@ -2281,7 +2295,7 @@ const Analyzer = struct {
                                             break enum_field_index;
                                         }
                                     } else {
-                                        const right_index = try analyzer.doIdentifier(enum_type.scope, ExpectType.none, node.right.value, scope_index);
+                                        const right_index = try analyzer.doIdentifier(enum_type.scope, ExpectType.none, identifier_node.token, scope_index);
                                         const right_value = analyzer.module.values.array.get(right_index);
 
                                         switch (right_value.*) {
@@ -2337,7 +2351,7 @@ const Analyzer = struct {
                                         };
                                     }
                                 } else {
-                                    const declaration_value = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, node.right.value, scope_index);
+                                    const declaration_value = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, identifier_node.token, scope_index);
                                     const value_ref = analyzer.module.values.array.get(declaration_value);
                                     break :blk value_ref.*;
                                 }
@@ -2360,7 +2374,7 @@ const Analyzer = struct {
                                                 };
                                             }
                                         } else {
-                                            const declaration_value = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, node.right.value, scope_index);
+                                            const declaration_value = try analyzer.doIdentifier(struct_type.scope, ExpectType.none, identifier_node.token, scope_index);
                                             const value_ref = analyzer.module.values.array.get(declaration_value);
                                             break :blk value_ref.*;
                                         }
@@ -2461,7 +2475,7 @@ const Analyzer = struct {
                                 } else {
                                     const scope1 = struct_type.scope;
                                     const scope2 = scope_index;
-                                    const declaration_value = try analyzer.doIdentifier(scope1, ExpectType.none, node.right.value, scope2);
+                                    const declaration_value = try analyzer.doIdentifier(scope1, ExpectType.none, identifier_node.token, scope2);
 
                                     const value_ref = analyzer.module.values.array.get(declaration_value);
                                     break :blk value_ref.*;
@@ -2527,7 +2541,7 @@ const Analyzer = struct {
                                 } else {
                                     const scope1 = struct_type.scope;
                                     const scope2 = scope_index;
-                                    const declaration_value = try analyzer.doIdentifier(scope1, ExpectType.none, node.right.value, scope2);
+                                    const declaration_value = try analyzer.doIdentifier(scope1, ExpectType.none, identifier_node.token, scope2);
 
                                     const value_ref = analyzer.module.values.array.get(declaration_value);
                                     break :blk value_ref.*;
@@ -2567,7 +2581,7 @@ const Analyzer = struct {
                                 } else {
                                     const scope1 = struct_type.scope;
                                     const scope2 = scope_index;
-                                    const declaration_value = try analyzer.doIdentifier(scope1, ExpectType.none, node.right.value, scope2);
+                                    const declaration_value = try analyzer.doIdentifier(scope1, ExpectType.none, identifier_node.token, scope2);
 
                                     const value_ref = analyzer.module.values.array.get(declaration_value);
                                     break :blk value_ref.*;
@@ -2665,17 +2679,17 @@ const Analyzer = struct {
             .bit_and,
             .bit_xor,
             .bit_or,
-            .multiply,
-            .divide,
-            .modulus,
+            .mul,
+            .div,
+            .mod,
             .shift_left,
             .shift_right,
             .compare_equal,
-            .compare_greater_than,
-            .compare_greater_or_equal,
-            .compare_less_than,
-            .compare_less_or_equal,
             .compare_not_equal,
+            .compare_less,
+            .compare_less_equal,
+            .compare_greater,
+            .compare_greater_equal,
             => try analyzer.processBinaryOperation(scope_index, expect_type, node_index),
             .expression_group => return try analyzer.resolveNode(value_index, scope_index, expect_type, node.left), //unreachable,
             .struct_type => blk: {
@@ -3015,19 +3029,20 @@ const Analyzer = struct {
             .range => .{
                 .range = try analyzer.processRange(scope_index, node_index),
             },
-            .character_literal => blk: {
-                const token = analyzer.getScopeToken(scope_index, node.token);
-                const source_file = analyzer.getScopeSourceFile(scope_index);
-                const token_bytes = tokenBytes(token, source_file);
-                switch (token_bytes.len) {
-                    3 => {
-                        assert(token_bytes[1] != '\\');
-                        break :blk .{
-                            .character_literal = token_bytes[1],
-                        };
-                    },
-                    else => std.debug.panic("Token bytes: {}", .{token_bytes.len}),
-                }
+            .character_literal => {
+                unreachable;
+                // const token = analyzer.getScopeToken(scope_index, node.token);
+                // const source_file = analyzer.getScopeSourceFile(scope_index);
+                // const token_bytes = tokenBytes(token, source_file);
+                // switch (token_bytes.len) {
+                //     3 => {
+                //         assert(token_bytes[1] != '\\');
+                //         break :blk .{
+                //             .character_literal = token_bytes[1],
+                //         };
+                //     },
+                //     else => std.debug.panic("Token bytes: {}", .{token_bytes.len}),
+                // }
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -3187,9 +3202,13 @@ const Analyzer = struct {
     }
 
     fn debugToken(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) void {
+        _ = token_index;
+
         const source_file = analyzer.getScopeSourceFile(scope_index);
-        const token = analyzer.getScopeToken(scope_index, token_index);
-        logln(.sema, .debug, "Debugging:\n\n```\n{s}\n```", .{source_file[token.start..]});
+        _ = source_file;
+        unreachable;
+        // const token = analyzer.getScopeToken(scope_index, token_index);
+        // logln(.sema, .debug, "Debugging:\n\n```\n{s}\n```", .{source_file[token.start..]});
     }
 
     fn processStringLiteral(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index) !StringLiteral {
@@ -3723,17 +3742,22 @@ const Analyzer = struct {
         const is_file = parent_scope_index.invalid;
         const backing_type = blk: {
             if (!is_file) {
-                if (analyzer.getScopeToken(parent_scope_index, container_node.token + 1).id == .left_parenthesis) {
-                    const backing_type_token = analyzer.getScopeToken(parent_scope_index, container_node.token + 2);
-                    const source_file = analyzer.getScopeSourceFile(parent_scope_index);
-                    const token_bytes = tokenBytes(backing_type_token, source_file);
-
-                    break :blk switch (backing_type_token.id) {
-                        .keyword_unsigned_integer => if (equal(u8, token_bytes, "u8")) Type.u8 else if (equal(u8, token_bytes, "u16")) Type.u16 else if (equal(u8, token_bytes, "u32")) Type.u32 else if (equal(u8, token_bytes, "u64")) Type.u64 else if (equal(u8, token_bytes, "usize")) Type.usize else unreachable,
-                        .fixed_keyword_usize => Type.usize,
+                if (!container_node.right.invalid) {
+                    const result_type = try analyzer.resolveType(.{
+                        .scope_index = scope_index,
+                        .node_index = container_node.right,
+                        .allow_non_primitive_size = container_type == .@"enum",
+                    });
+                    switch (analyzer.module.types.array.get(result_type).*) {
+                        .integer => |integer| {
+                            _ = integer;
+                            unreachable;
+                        },
                         else => |t| @panic(@tagName(t)),
-                    };
+                    }
                 }
+            } else {
+                assert(container_node.right.invalid);
             }
 
             break :blk Type.Index.invalid;
@@ -3832,7 +3856,13 @@ const Analyzer = struct {
             const declaration_node = analyzer.getFileNode(file_index, declaration_node_index);
             switch (declaration_node.id) {
                 .@"comptime" => {},
-                .simple_symbol_declaration => _ = try analyzer.symbolDeclaration(scope_index, declaration_node_index, .global),
+                .constant_symbol_declaration,
+                .variable_symbol_declaration,
+                => |node_id| _ = try analyzer.symbolDeclaration(scope_index, declaration_node_index, .global, switch (node_id) {
+                    .constant_symbol_declaration => .@"const",
+                    .variable_symbol_declaration => .@"var",
+                    else => unreachable,
+                }),
                 else => unreachable,
             }
         }
@@ -3956,7 +3986,9 @@ const Analyzer = struct {
             const declaration_node = analyzer.getFileNode(file_index, declaration_node_index);
             switch (declaration_node.id) {
                 .@"comptime" => _ = try analyzer.comptimeBlock(scope_index, declaration_node_index),
-                .simple_symbol_declaration => {},
+                .constant_symbol_declaration,
+                .variable_symbol_declaration,
+                => {},
                 else => |t| @panic(@tagName(t)),
             }
         }
@@ -3997,9 +4029,9 @@ const Analyzer = struct {
         return declaration_index;
     }
 
-    fn symbolDeclaration(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index, scope_type: ScopeType) !Declaration.Index {
+    fn symbolDeclaration(analyzer: *Analyzer, scope_index: Scope.Index, node_index: Node.Index, scope_type: ScopeType, mutability: Compilation.Mutability) !Declaration.Index {
         const declaration_node = analyzer.getScopeNode(scope_index, node_index);
-        assert(declaration_node.id == .simple_symbol_declaration);
+        assert(declaration_node.id == .constant_symbol_declaration or declaration_node.id == .variable_symbol_declaration);
         const expected_identifier_token_index = declaration_node.token + 1;
         const identifier = analyzer.tokenIdentifier(scope_index, expected_identifier_token_index);
         logln(.sema, .type, "Analyzing '{s}' declaration in {s} scope #{}", .{ identifier, @tagName(scope_type), scope_index.uniqueInteger() });
@@ -4018,18 +4050,6 @@ const Analyzer = struct {
             },
             true => ExpectType.none,
         };
-
-        const mutability: Compilation.Mutability = switch (analyzer.getScopeToken(scope_index, declaration_node.token).id) {
-            .fixed_keyword_const => .@"const",
-            .fixed_keyword_var => .@"var",
-            else => |t| @panic(@tagName(t)),
-        };
-        const expected_identifier_token = analyzer.getScopeToken(scope_index, expected_identifier_token_index);
-        if (expected_identifier_token.id != .identifier) {
-            logln(.sema, .symbol_declaration, "Error: found: {}", .{expected_identifier_token.id});
-            @panic("Expected identifier");
-        }
-        // TODO: Check if it is a keyword
 
         assert(!declaration_node.right.invalid);
 
@@ -4085,7 +4105,8 @@ const Analyzer = struct {
     fn getContainerMemberType(member_id: Node.Id) MemberType {
         return switch (member_id) {
             .@"comptime",
-            .simple_symbol_declaration,
+            .constant_symbol_declaration,
+            .variable_symbol_declaration,
             => .declaration,
             .enum_field,
             .container_field,
@@ -4099,36 +4120,45 @@ const Analyzer = struct {
     }
 
     fn tokenIdentifier(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) []const u8 {
-        const token = analyzer.getScopeToken(scope_index, token_index);
-        // logln(.sema, .identifier, "trying to get identifier from token of id {s}", .{@tagName(token.id)});
-        assert(token.id == .identifier);
-        const source_file = analyzer.getScopeSourceFile(scope_index);
-        const identifier = tokenBytes(token, source_file);
-
-        return identifier;
-    }
-
-    fn tokenBytes(token: Token, source_code: []const u8) []const u8 {
-        return source_code[token.start..][0..token.len];
-    }
-
-    fn numberBytes(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) []const u8 {
-        const token = analyzer.getScopeToken(scope_index, token_index);
-        assert(token.id == .number_literal);
-        const source_file = analyzer.getScopeSourceFile(scope_index);
-        const bytes = tokenBytes(token, source_file);
-
+        const file = analyzer.getScopeFile(scope_index);
+        const id = file.lexical_analyzer_result.ids.items[token_index];
+        logln(.sema, .identifier, "trying to get identifier from token of id {s}", .{@tagName(id)});
+        assert(id == .identifier);
+        const bytes = file.getTokenBytes(token_index);
         return bytes;
     }
 
     fn tokenStringLiteral(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) []const u8 {
-        const token = analyzer.getScopeToken(scope_index, token_index);
-        assert(token.id == .string_literal);
-        const source_file = analyzer.getScopeSourceFile(scope_index);
-        // Eat double quotes
-        const string_literal = tokenBytes(token, source_file)[1..][0 .. token.len - 2];
+        const file = analyzer.getScopeFile(scope_index);
+        const id = file.lexical_analyzer_result.ids.items[token_index];
+        assert(id == .string_literal);
+        const bytes = file.getTokenBytes(token_index);
+        // // Eat double quotes
+        const string_literal_bytes = bytes[1..][0 .. bytes.len - 2];
+        return string_literal_bytes;
+    }
 
-        return string_literal;
+    fn tokenBytes(scope_index: Scope.Index, token_index: Token.Index) []const u8 {
+        _ = token_index;
+
+        _ = scope_index;
+
+        unreachable;
+        // return source_code[token.start..][0..token.len];
+    }
+
+    fn numberBytes(analyzer: *Analyzer, scope_index: Scope.Index, token_index: Token.Index) []const u8 {
+        _ = analyzer;
+        _ = scope_index;
+        _ = token_index;
+
+        unreachable;
+        // const token = analyzer.getScopeToken(scope_index, token_index);
+        // assert(token.id == .number_literal);
+        // const source_file = analyzer.getScopeSourceFile(scope_index);
+        // const bytes = tokenBytes(token, source_file);
+        //
+        // return bytes;
     }
 
     const TypeCheckResult = enum {
@@ -4710,12 +4740,13 @@ const Analyzer = struct {
     fn compilerIntrinsic(analyzer: *Analyzer, scope_index: Scope.Index, expect_type: ExpectType, node_index: Node.Index) !Value {
         const intrinsic_node = analyzer.getScopeNode(scope_index, node_index);
 
-        const intrinsic_name = analyzer.tokenIdentifier(scope_index, intrinsic_node.token + 1);
-        logln(.sema, .node, "Intrinsic: {s}", .{intrinsic_name});
-        const intrinsic = data_structures.enumFromString(ValidIntrinsic, intrinsic_name) orelse panic("Unknown intrinsic: {s}", .{intrinsic_name});
+        const intrinsic: Compilation.ValidIntrinsic = @enumFromInt(intrinsic_node.right.unwrap());
+        logln(.sema, .node, "Intrinsic: {s}", .{@tagName(intrinsic)});
+
         const intrinsic_argument_node_list = analyzer.getScopeNodeList(scope_index, analyzer.getScopeNode(scope_index, intrinsic_node.left));
 
         const result = switch (intrinsic) {
+            .@"asm" => unreachable,
             .cast => b: {
                 assert(intrinsic_argument_node_list.items.len == 1);
                 const value_to_cast_index = try analyzer.unresolvedAllocate(scope_index, ExpectType.none, intrinsic_argument_node_list.items[0]);

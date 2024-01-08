@@ -16,118 +16,168 @@ const fs = @import("../fs.zig");
 
 // TODO: switch to packed struct when speed is important
 pub const Token = struct {
-    start: u32,
-    len: u24,
-    id: Id,
+    pub const Id = enum {
+        keyword_unsigned_integer,
+        keyword_signed_integer,
+        identifier,
+        number_literal,
+        string_literal,
+        character_literal,
+        intrinsic,
+        discard,
+        // Operators
+        operator_left_parenthesis,
+        operator_right_parenthesis,
+        operator_left_brace,
+        operator_right_brace,
+        operator_left_bracket,
+        operator_right_bracket,
+        operator_semicolon,
+        operator_at,
+        operator_comma,
+        operator_dot,
+        operator_colon,
+        operator_bang,
+        operator_optional,
+        operator_dollar,
+        operator_switch_case,
+        // Binary
+        operator_assign,
+        operator_add,
+        operator_minus,
+        operator_asterisk,
+        operator_div,
+        operator_mod,
+        operator_bar,
+        operator_ampersand,
+        operator_xor,
+        operator_add_assign,
+        operator_sub_assign,
+        operator_mul_assign,
+        operator_div_assign,
+        operator_mod_assign,
+        operator_or_assign,
+        operator_and_assign,
+        operator_xor_assign,
+        operator_compare_equal,
+        operator_compare_not_equal,
+        operator_compare_less,
+        operator_compare_less_equal,
+        operator_compare_greater,
+        operator_compare_greater_equal,
+        // Fixed keywords
+        fixed_keyword_function,
+        fixed_keyword_const,
+        fixed_keyword_var,
+        fixed_keyword_void,
+        fixed_keyword_noreturn,
+        fixed_keyword_comptime,
+        fixed_keyword_while,
+        fixed_keyword_bool,
+        fixed_keyword_true,
+        fixed_keyword_false,
+        fixed_keyword_fn,
+        fixed_keyword_unreachable,
+        fixed_keyword_return,
+        fixed_keyword_ssize,
+        fixed_keyword_usize,
+        fixed_keyword_switch,
+        fixed_keyword_if,
+        fixed_keyword_else,
+        fixed_keyword_struct,
+        fixed_keyword_enum,
+        fixed_keyword_union,
+        fixed_keyword_extern,
+        fixed_keyword_null,
+        fixed_keyword_align,
+        fixed_keyword_export,
+        fixed_keyword_cc,
+        fixed_keyword_for,
+        fixed_keyword_undefined,
+        fixed_keyword_break,
+        anon0,
+        anon1,
+        anon2,
+        anon3,
+        anon4,
+        anon5,
+        anon6,
+        anon7,
+        anon8,
+        anon9,
+        anon20,
+        anon21,
+        anon22,
+        anon23,
+        anon24,
+        anon25,
+        anon26,
+        anon27,
+        anon28,
+        anon29,
+        anon30,
+        anon31,
+        anon32,
+        anon33,
+        anon34,
+        anon35,
+        anon36,
+        anon37,
+        anon38,
+        anon39,
+        anon40,
+        anon41,
+        anon42,
+        anon43,
+        anon44,
+        anon45,
+        anon46,
+        anon47,
+        anon48,
+        anon49,
+        anon50,
+        anon51,
+        anon52,
+        anon53,
+        anon54,
+        anon55,
+        anon56,
+        anon57,
+        anon58,
+        anon59,
+        anon60,
+        anon61,
+        anon62,
+        anon63,
+        anon64,
+        anon65,
+        anon66,
+        anon67,
+        anon68,
+        anon69,
 
-    pub const Id = enum(u8) {
-        eof = 0x00,
-        keyword_unsigned_integer = 0x01,
-        keyword_signed_integer = 0x02,
-        identifier = 0x03,
-        number_literal = 0x04,
-        string_literal = 0x05,
-        character_literal = 0x06,
-        discard = 0x07,
-        bang = '!', // 0x21
-        hash = '#', // 0x23
-        dollar_sign = '$', // 0x24
-        modulus = '%', // 0x25
-        ampersand = '&', // 0x26
-        left_parenthesis = '(', // 0x28
-        right_parenthesis = ')', // 0x29
-        asterisk = '*', // 0x2a
-        plus = '+', // 0x2b
-        comma = ',', // 0x2c
-        minus = '-', // 0x2d
-        period = '.', // 0x2e
-        slash = '/', // 0x2f
-        colon = ':', // 0x3a
-        semicolon = ';', // 0x3b
-        less = '<', // 0x3c
-        equal = '=', // 0x3d
-        greater = '>', // 0x3e
-        question_mark = '?', // 0x3f
-        at = '@', // 0x40
-        left_bracket = '[', // 0x5b
-        backlash = '\\', // 0x5c
-        right_bracket = ']', // 0x5d
-        caret = '^', // 0x5e
-        underscore = '_', // 0x5f
-        grave = '`', // 0x60
-        left_brace = '{', // 0x7b
-        vertical_bar = '|', // 0x7c
-        right_brace = '}', // 0x7d
-        tilde = '~', // 0x7e
-        fixed_keyword_function = 0x7f,
-        fixed_keyword_const = 0x80,
-        fixed_keyword_var = 0x81,
-        fixed_keyword_void = 0x82,
-        fixed_keyword_noreturn = 0x83,
-        fixed_keyword_comptime = 0x84,
-        fixed_keyword_while = 0x85,
-        fixed_keyword_bool = 0x86,
-        fixed_keyword_true = 0x87,
-        fixed_keyword_false = 0x88,
-        fixed_keyword_fn = 0x89,
-        fixed_keyword_unreachable = 0x8a,
-        fixed_keyword_return = 0x8b,
-        fixed_keyword_ssize = 0x8c,
-        fixed_keyword_usize = 0x8d,
-        fixed_keyword_switch = 0x8e,
-        fixed_keyword_if = 0x8f,
-        fixed_keyword_else = 0x90,
-        fixed_keyword_struct = 0x91,
-        fixed_keyword_enum = 0x92,
-        fixed_keyword_union = 0x93,
-        fixed_keyword_extern = 0x94,
-        fixed_keyword_null = 0x95,
-        fixed_keyword_align = 0x96,
-        fixed_keyword_export = 0x97,
-        fixed_keyword_cc = 0x98,
-        fixed_keyword_for = 0x99,
-        fixed_keyword_undefined = 0x9a,
-        fixed_keyword_break = 0x9b,
+        comptime {
+            assert(@bitSizeOf(@This()) == @bitSizeOf(u8));
+        }
     };
 
     pub const Index = u32;
 };
 
-pub const FixedKeyword = enum {
-    @"comptime",
-    @"const",
-    @"var",
-    void,
-    noreturn,
-    function,
-    @"while",
-    bool,
-    true,
-    false,
-    @"fn",
-    @"unreachable",
-    @"return",
-    ssize,
-    usize,
-    @"switch",
-    @"if",
-    @"else",
-    @"struct",
-    @"enum",
-    @"union",
-    @"extern",
-    null,
-    @"align",
-    @"export",
-    cc,
-    @"for",
-    undefined,
-    @"break",
-};
+// Needed information
+// Token: u8
+// line: u32
+// column: u16
+// offset: u32
+// len: u24
 
 pub const Result = struct {
-    tokens: ArrayList(Token),
-    time: u64,
+    ids: ArrayList(Token.Id) = .{},
+    token_lines: ArrayList(u32) = .{},
+    file_line_offsets: ArrayList(u32) = .{},
+    token_offsets: ArrayList(u32) = .{},
+    token_lengths: ArrayList(u32) = .{},
+    time: u64 = 0,
 };
 
 pub const Logger = enum {
@@ -141,15 +191,29 @@ pub const Logger = enum {
     });
 };
 
-pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !Result {
-    _ = file_index;
+pub fn analyze(allocator: Allocator, text: []const u8) !Result {
+    assert(text.len <= std.math.maxInt(u32));
+    var lexer = Result{};
     const time_start = std.time.Instant.now() catch unreachable;
-    var tokens = try ArrayList(Token).initCapacity(allocator, text.len / 8);
-    var index: usize = 0;
 
-    while (index < text.len) {
+    try lexer.file_line_offsets.append(allocator, 0);
+
+    for (text, 0..) |byte, index| {
+        if (byte == '\n') {
+            try lexer.file_line_offsets.append(allocator, @intCast(index));
+        }
+    }
+
+    var index: u32 = 0;
+    var line_index: u32 = 0;
+    const len: u32 = @intCast(text.len);
+
+    lexer.ids = try ArrayList(Token.Id).initCapacity(allocator, text.len / 4);
+
+    while (index < len) {
         const start_index = index;
         const start_character = text[index];
+
         const token_id: Token.Id = switch (start_character) {
             'a'...'z', 'A'...'Z', '_' => blk: {
                 while (true) {
@@ -165,7 +229,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                 // const identifier = text[start_index..][0 .. index - start_index];
                 // logln("Identifier: {s}", .{identifier});
 
-                if (start_character == 'u' or start_character == 's') {
+                if (start_character == 'u' or start_character == 's' and text[start_index + 1] >= '0' and text[start_index + 1] <= '9') {
                     var index_integer = start_index + 1;
                     while (text[index_integer] >= '0' and text[index_integer] <= '9') {
                         index_integer += 1;
@@ -183,7 +247,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
                 }
 
                 const string = text[start_index..][0 .. index - start_index];
-                break :blk if (enumFromString(FixedKeyword, string)) |fixed_keyword| switch (fixed_keyword) {
+                break :blk if (enumFromString(Compilation.FixedKeyword, string)) |fixed_keyword| switch (fixed_keyword) {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
                 } else if (equal(u8, string, "_")) .discard else .identifier;
             },
@@ -234,13 +298,209 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
 
                 break :blk .string_literal;
             },
-            ' ', '\n', '\r', '\t' => {
+            '#' => blk: {
+                index += 1;
+                // const start_intrinsic = index;
+
+                while (true) {
+                    const ch = text[index];
+                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_') {
+                        index += 1;
+                    } else break;
+                }
+
+                // const end_intrinsic = index;
+                // const intrinsic_identifier = text[start_intrinsic..][0 .. end_intrinsic - start_intrinsic];
+                // _ = intrinsic_identifier;
+
+                break :blk .intrinsic;
+            },
+            '\n' => {
+                index += 1;
+                line_index += 1;
+                continue;
+            },
+            ' ', '\r', '\t' => {
                 index += 1;
                 continue;
             },
-            '(', ')', '{', '}', '[', ']', '=', ';', '#', '@', ',', '.', ':', '>', '<', '!', '+', '-', '*', '\\', '/', '&', '|', '^', '?', '$', '%' => |operator| blk: {
+            '(' => blk: {
                 index += 1;
-                break :blk @enumFromInt(operator);
+                break :blk .operator_left_parenthesis;
+            },
+            ')' => blk: {
+                index += 1;
+                break :blk .operator_right_parenthesis;
+            },
+            '{' => blk: {
+                index += 1;
+                break :blk .operator_left_brace;
+            },
+            '}' => blk: {
+                index += 1;
+                break :blk .operator_right_brace;
+            },
+            '[' => blk: {
+                index += 1;
+                break :blk .operator_left_bracket;
+            },
+            ']' => blk: {
+                index += 1;
+                break :blk .operator_right_bracket;
+            },
+            '<' => blk: {
+                index += 1;
+                break :blk .operator_compare_less;
+            },
+            '>' => blk: {
+                index += 1;
+                break :blk .operator_compare_greater;
+            },
+            ';' => blk: {
+                index += 1;
+                break :blk .operator_semicolon;
+            },
+            '@' => blk: {
+                index += 1;
+                break :blk .operator_at;
+            },
+            ',' => blk: {
+                index += 1;
+                break :blk .operator_comma;
+            },
+            '.' => blk: {
+                index += 1;
+                break :blk .operator_dot;
+            },
+            ':' => blk: {
+                index += 1;
+                break :blk .operator_colon;
+            },
+            '!' => blk: {
+                index += 1;
+                break :blk .operator_bang;
+            },
+            '=' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_compare_equal;
+                    },
+                    '>' => b: {
+                        index += 1;
+                        break :b .operator_switch_case;
+                    },
+                    else => .operator_assign,
+                };
+
+                break :blk token_id;
+            },
+            '+' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_add_assign;
+                    },
+                    else => .operator_add,
+                };
+
+                break :blk token_id;
+            },
+            '-' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_sub_assign;
+                    },
+                    else => .operator_minus,
+                };
+
+                break :blk token_id;
+            },
+            '*' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_mul_assign;
+                    },
+                    else => .operator_asterisk,
+                };
+
+                break :blk token_id;
+            },
+            '/' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_div_assign;
+                    },
+                    else => .operator_div,
+                };
+
+                break :blk token_id;
+            },
+            '%' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_mod_assign;
+                    },
+                    else => .operator_mod,
+                };
+
+                break :blk token_id;
+            },
+            '|' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_or_assign;
+                    },
+                    else => .operator_bar,
+                };
+
+                break :blk token_id;
+            },
+            '&' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_and_assign;
+                    },
+                    else => .operator_ampersand,
+                };
+
+                break :blk token_id;
+            },
+            '^' => blk: {
+                index += 1;
+                const token_id: Token.Id = switch (text[index]) {
+                    '=' => b: {
+                        index += 1;
+                        break :b .operator_xor_assign;
+                    },
+                    else => .operator_xor,
+                };
+
+                break :blk token_id;
+            },
+            '?' => blk: {
+                index += 1;
+
+                break :blk .operator_optional;
+            },
+            '$' => blk: {
+                index += 1;
+
+                break :blk .operator_dollar;
             },
             else => |ch| {
                 std.debug.panic("NI: '{c}'", .{ch});
@@ -248,26 +508,15 @@ pub fn analyze(allocator: Allocator, text: []const u8, file_index: File.Index) !
         };
 
         const end_index = index;
-        const token = Token{
-            .start = @intCast(start_index),
-            .len = @intCast(end_index - start_index),
-            .id = token_id,
-        };
+        const token_length = end_index - start_index;
 
-        logln(.lexer, .new_token, "New token {s} added: {s}", .{ @tagName(token.id), text[token.start..][0..token.len] });
-
-        try tokens.append(allocator, token);
-    }
-
-    for (tokens.items, 0..) |token, i| {
-        logln(.lexer, .main, "#{} {s}\n", .{ i, @tagName(token.id) });
+        try lexer.ids.append(allocator, token_id);
+        try lexer.token_offsets.append(allocator, start_index);
+        try lexer.token_lengths.append(allocator, token_length);
+        try lexer.token_lines.append(allocator, line_index);
     }
 
     const time_end = std.time.Instant.now() catch unreachable;
-    const time = time_end.since(time_start);
-
-    return .{
-        .tokens = tokens,
-        .time = time,
-    };
+    lexer.time = time_end.since(time_start);
+    return lexer;
 }

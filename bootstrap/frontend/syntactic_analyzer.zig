@@ -28,6 +28,7 @@ pub const Options = packed struct {
 };
 
 pub const Logger = enum {
+    file,
     token_errors,
     symbol_declaration,
     node_creation,
@@ -44,6 +45,7 @@ pub const Logger = enum {
     consume_token,
 
     pub var bitset = std.EnumSet(Logger).initMany(&.{
+        .file,
         .token_errors,
         .symbol_declaration,
         .node_creation,
@@ -107,7 +109,8 @@ pub const Node = struct {
         function_declaration_no_arguments,
         container_declaration,
         string_literal,
-        simple_symbol_declaration,
+        constant_symbol_declaration,
+        variable_symbol_declaration,
         assign,
         @"comptime",
         node_list,
@@ -127,6 +130,7 @@ pub const Node = struct {
         array_type,
         argument_declaration,
         compiler_intrinsic,
+        compiler_intrinsic_id,
         ssize_type,
         usize_type,
         void_type,
@@ -138,10 +142,10 @@ pub const Node = struct {
         keyword_false,
         compare_equal,
         compare_not_equal,
-        compare_less_than,
-        compare_greater_than,
-        compare_less_or_equal,
-        compare_greater_or_equal,
+        compare_less,
+        compare_greater,
+        compare_less_equal,
+        compare_greater_equal,
         @"if",
         if_else,
         @"switch",
@@ -153,14 +157,21 @@ pub const Node = struct {
         function_prototype,
         add,
         sub,
+        mul,
+        div,
+        mod,
         bit_and,
         bit_xor,
         expression_group,
         bit_or,
-        multiply,
-        divide,
         shift_left,
         shift_right,
+        add_assign,
+        sub_assign,
+        mul_assign,
+        div_assign,
+        mod_assign,
+        discarded_assign,
         bool_type,
         named_argument,
         optional_type,
@@ -187,9 +198,6 @@ pub const Node = struct {
         assembly_block,
         for_condition,
         for_loop,
-        add_assign,
-        sub_assign,
-        div_assign,
         undefined,
         zero_terminated,
         null_terminated,
@@ -198,9 +206,7 @@ pub const Node = struct {
         optional_unwrap,
         anonymous_empty_literal,
         empty_container_literal_guess,
-        discarded_assign,
         break_expression,
-        modulus,
         character_literal,
     };
 };
@@ -212,7 +218,7 @@ const Error = error{
 };
 
 const Analyzer = struct {
-    tokens: []const Token,
+    lexer: lexical_analyzer.Result,
     token_i: u32 = 0,
     nodes: ArrayList(Node) = .{},
     source_file: []const u8,
@@ -221,27 +227,41 @@ const Analyzer = struct {
     node_lists: ArrayList(Node.List) = .{},
     suffix_depth: usize = 0,
 
-    fn expectToken(analyzer: *Analyzer, token_id: Token.Id) !u32 {
+    fn expectToken(analyzer: *Analyzer, expected_token_id: Token.Id) !u32 {
         const token_i = analyzer.token_i;
-        const token = analyzer.tokens[token_i];
-        const is_expected_token = token.id == token_id;
+        const token_id = analyzer.peekToken();
+        const is_expected_token = token_id == expected_token_id;
         if (is_expected_token) {
             analyzer.consumeToken();
             const result = token_i;
             return result;
         } else {
-            std.debug.print("Unexpected token {s} when expected {s}\n| |\n v \n```\n{s}\n```", .{ @tagName(token.id), @tagName(token_id), analyzer.source_file[token.start..] });
+            const file_offset = analyzer.getTokenOffset(token_i);
+            const file_chunk = analyzer.source_file[file_offset..];
+            std.debug.print("Unexpected token {s} when expected {s}\n| |\n v \n```\n{s}\n```", .{ @tagName(token_id), @tagName(expected_token_id), file_chunk });
             @breakpoint();
             return error.unexpected_token;
         }
     }
 
-    fn peekTokenAhead(analyzer: *Analyzer, ahead_offset: usize) Token {
-        return analyzer.tokens[analyzer.token_i + ahead_offset];
+    fn getTokenOffset(analyzer: *Analyzer, token_index: Token.Index) u32 {
+        const offset = analyzer.lexer.token_offsets.items[token_index];
+        return offset;
     }
 
-    fn peekToken(analyzer: *Analyzer) Token {
-        return analyzer.peekTokenAhead(0);
+    fn peekTokenAhead(analyzer: *Analyzer, ahead_offset: usize) Token.Id {
+        const token_index = analyzer.token_i + ahead_offset;
+        const token = analyzer.lexer.ids.items[token_index];
+        return token;
+    }
+
+    fn peekToken(analyzer: *Analyzer) Token.Id {
+        const token = analyzer.peekTokenAhead(0);
+        return token;
+    }
+
+    fn hasTokens(analyzer: *Analyzer) bool {
+        return analyzer.token_i < analyzer.lexer.ids.items.len;
     }
 
     fn consumeToken(analyzer: *Analyzer) void {
@@ -249,53 +269,61 @@ const Analyzer = struct {
     }
 
     fn consumeTokens(analyzer: *Analyzer, token_count: u32) void {
-        assert(analyzer.token_i + token_count <= analyzer.tokens.len);
+        assert(analyzer.token_i + token_count <= analyzer.lexer.ids.items.len);
         log(.parser, .consume_token, "Consuming {} {s}: ", .{ token_count, if (token_count == 1) "token" else "tokens" });
 
         for (0..token_count) |i| {
             const token = analyzer.peekTokenAhead(i);
-            log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token.id), analyzer.source_file[token.start..][0..token.len] });
+            const token_bytes = analyzer.bytes(@intCast(analyzer.token_i + i));
+            log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token), token_bytes });
         }
+
         log(.parser, .consume_token, "\n", .{});
         analyzer.token_i += token_count;
     }
 
     fn bytes(analyzer: *const Analyzer, token_index: Token.Index) []const u8 {
-        const token = analyzer.tokens[token_index];
-        return analyzer.source_file[token.start..][0..token.len];
+        const offset = analyzer.lexer.token_offsets.items[token_index];
+        const len = analyzer.lexer.token_lengths.items[token_index];
+        const slice = analyzer.source_file[offset..][0..len];
+        return slice;
     }
 
     fn symbolDeclaration(analyzer: *Analyzer) anyerror!Node.Index {
         const first = analyzer.token_i;
-        assert(analyzer.tokens[first].id == .fixed_keyword_var or analyzer.tokens[first].id == .fixed_keyword_const);
+        const mutability_node_id: Node.Id = switch (analyzer.peekToken()) {
+            .fixed_keyword_var => .variable_symbol_declaration,
+            .fixed_keyword_const => .constant_symbol_declaration,
+            else => |t| @panic(@tagName(t)),
+        };
         analyzer.consumeToken();
         const declaration_name_token = try analyzer.expectToken(.identifier);
         const declaration_name = analyzer.bytes(declaration_name_token);
         logln(.parser, .symbol_declaration, "Starting parsing declaration \"{s}\"", .{declaration_name});
 
-        logln(.parser, .symbol_declaration, "Current token: {}", .{analyzer.tokens[analyzer.token_i].id});
+        logln(.parser, .symbol_declaration, "Current token: {}", .{analyzer.peekToken()});
 
-        const type_node_index = switch (analyzer.tokens[analyzer.token_i].id) {
-            .colon => blk: {
+        const type_node_index = switch (analyzer.peekToken()) {
+            .operator_colon => blk: {
                 analyzer.consumeToken();
                 break :blk try analyzer.typeExpression();
             },
             else => Node.Index.invalid,
         };
 
-        _ = try analyzer.expectToken(.equal);
+        _ = try analyzer.expectToken(.operator_assign);
 
         const init_node_index = try analyzer.expression();
 
         const init_node = analyzer.nodes.items[init_node_index.unwrap()];
         switch (init_node.id) {
             .function_definition => {},
-            else => _ = try analyzer.expectToken(.semicolon),
+            else => _ = try analyzer.expectToken(.operator_semicolon),
         }
 
         // TODO:
         const declaration = Node{
-            .id = .simple_symbol_declaration,
+            .id = mutability_node_id,
             .token = first,
             .left = type_node_index,
             .right = init_node_index,
@@ -343,27 +371,27 @@ const Analyzer = struct {
 
     fn function(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
-        assert(analyzer.tokens[token].id == .fixed_keyword_fn);
+        assert(analyzer.peekToken() == .fixed_keyword_fn);
         analyzer.consumeToken();
         const function_prototype = try analyzer.functionPrototype();
         const is_comptime = false;
         _ = is_comptime;
-        return switch (analyzer.tokens[analyzer.token_i].id) {
-            .left_brace => try analyzer.addNode(.{
+        return switch (analyzer.peekToken()) {
+            .operator_left_brace => try analyzer.addNode(.{
                 .id = .function_definition,
                 .token = token,
                 .left = function_prototype,
                 .right = try analyzer.block(.{ .is_comptime = false }),
             }),
-            .semicolon => function_prototype,
+            .operator_semicolon => function_prototype,
             else => |t| @panic(@tagName(t)),
         };
     }
 
     fn functionPrototype(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
-        assert(analyzer.tokens[token].id == .left_parenthesis);
-        const arguments = try analyzer.argumentList(.left_parenthesis, .right_parenthesis);
+        assert(analyzer.peekToken() == .operator_left_parenthesis);
+        const arguments = try analyzer.argumentList(.operator_left_parenthesis, .operator_right_parenthesis);
         const return_type = try analyzer.typeExpression();
 
         const simple_function_prototype = try analyzer.addNode(.{
@@ -373,30 +401,30 @@ const Analyzer = struct {
             .right = return_type,
         });
 
-        return switch (analyzer.tokens[analyzer.token_i].id) {
-            .semicolon,
-            .left_brace,
-            .comma,
+        return switch (analyzer.peekToken()) {
+            .operator_semicolon,
+            .operator_left_brace,
+            .operator_comma,
             => simple_function_prototype,
             else => blk: {
                 var list = Node.List{};
 
                 while (true) {
                     const attribute_token = analyzer.token_i;
-                    const attribute = switch (analyzer.tokens[attribute_token].id) {
-                        .semicolon,
-                        .left_brace,
+                    const attribute = switch (analyzer.peekToken()) {
+                        .operator_semicolon,
+                        .operator_left_brace,
                         => break,
                         .fixed_keyword_extern => b: {
                             analyzer.consumeToken();
-                            _ = try analyzer.expectToken(.left_parenthesis);
+                            _ = try analyzer.expectToken(.operator_left_parenthesis);
                             const string_literal = try analyzer.addNode(.{
                                 .id = .string_literal,
                                 .token = try analyzer.expectToken(.string_literal),
                                 .left = Node.Index.invalid,
                                 .right = Node.Index.invalid,
                             });
-                            _ = try analyzer.expectToken(.right_parenthesis);
+                            _ = try analyzer.expectToken(.operator_right_parenthesis);
 
                             const result = try analyzer.addNode(.{
                                 .id = .extern_qualifier,
@@ -418,9 +446,9 @@ const Analyzer = struct {
                         },
                         .fixed_keyword_cc => b: {
                             analyzer.consumeToken();
-                            _ = try analyzer.expectToken(.left_parenthesis);
+                            _ = try analyzer.expectToken(.operator_left_parenthesis);
                             const calling_conv_expression = try analyzer.expression();
-                            _ = try analyzer.expectToken(.right_parenthesis);
+                            _ = try analyzer.expectToken(.operator_right_parenthesis);
 
                             const result = try analyzer.addNode(.{
                                 .id = .calling_convention,
@@ -453,12 +481,12 @@ const Analyzer = struct {
 
         var list = ArrayList(Node.Index){};
 
-        while (analyzer.tokens[analyzer.token_i].id != end_token) {
+        while (analyzer.peekToken() != end_token) {
             const identifier = try analyzer.expectToken(.identifier);
-            _ = try analyzer.expectToken(.colon);
+            _ = try analyzer.expectToken(.operator_colon);
             const type_expression = try analyzer.typeExpression();
 
-            if (analyzer.tokens[analyzer.token_i].id == .comma) {
+            if (analyzer.peekToken() == .operator_comma) {
                 analyzer.consumeToken();
             }
 
@@ -481,20 +509,20 @@ const Analyzer = struct {
 
     fn assignExpressionStatement(analyzer: *Analyzer) !Node.Index {
         const result = try analyzer.assignExpression();
-        _ = try analyzer.expectToken(.semicolon);
+        _ = try analyzer.expectToken(.operator_semicolon);
         return result;
     }
 
     fn block(analyzer: *Analyzer, options: Options) anyerror!Node.Index {
-        const left_brace = try analyzer.expectToken(.left_brace);
+        const left_brace = try analyzer.expectToken(.operator_left_brace);
         var list = ArrayList(Node.Index){};
 
-        while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
-            const first_statement_token = analyzer.tokens[analyzer.token_i];
-            logln(.parser, .block, "First statement token: {s}", .{@tagName(first_statement_token.id)});
-            const statement_index = switch (first_statement_token.id) {
-                .identifier => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                    .colon => {
+        while (analyzer.peekToken() != .operator_right_brace) {
+            const first_statement_token = analyzer.peekToken();
+            logln(.parser, .block, "First statement token: {s}", .{@tagName(first_statement_token)});
+            const statement_index = switch (first_statement_token) {
+                .identifier => switch (analyzer.peekTokenAhead(1)) {
+                    .operator_colon => {
                         unreachable;
                     },
                     else => try analyzer.assignExpressionStatement(),
@@ -511,15 +539,15 @@ const Analyzer = struct {
                 .fixed_keyword_const,
                 .fixed_keyword_var,
                 => try analyzer.symbolDeclaration(),
-                .hash => blk: {
-                    const intrinsic = try analyzer.compilerIntrinsic();
-                    _ = try analyzer.expectToken(.semicolon);
-                    break :blk intrinsic;
-                },
                 .fixed_keyword_break => b: {
                     const node_index = try analyzer.breakExpression();
-                    _ = try analyzer.expectToken(.semicolon);
+                    _ = try analyzer.expectToken(.operator_semicolon);
                     break :b node_index;
+                },
+                .intrinsic => blk: {
+                    const intrinsic = try analyzer.compilerIntrinsic();
+                    _ = try analyzer.expectToken(.operator_semicolon);
+                    break :blk intrinsic;
                 },
                 else => |t| @panic(@tagName(t)),
             };
@@ -530,7 +558,7 @@ const Analyzer = struct {
             try list.append(analyzer.allocator, statement_index);
         }
 
-        _ = try analyzer.expectToken(.right_brace);
+        _ = try analyzer.expectToken(.operator_right_brace);
 
         return try analyzer.addNode(.{
             .id = switch (options.is_comptime) {
@@ -546,10 +574,10 @@ const Analyzer = struct {
     fn whileExpression(analyzer: *Analyzer, options: Options) anyerror!Node.Index {
         const while_identifier_index = try analyzer.expectToken(.fixed_keyword_while);
 
-        _ = try analyzer.expectToken(.left_parenthesis);
+        _ = try analyzer.expectToken(.operator_left_parenthesis);
         // TODO:
         const while_condition = try analyzer.expression();
-        _ = try analyzer.expectToken(.right_parenthesis);
+        _ = try analyzer.expectToken(.operator_right_parenthesis);
 
         const while_block = try analyzer.block(options);
 
@@ -565,18 +593,18 @@ const Analyzer = struct {
         logln(.parser, .@"switch", "Parsing switch...", .{});
         const switch_token = analyzer.token_i;
         analyzer.consumeToken();
-        _ = try analyzer.expectToken(.left_parenthesis);
+        _ = try analyzer.expectToken(.operator_left_parenthesis);
         const switch_expression = try analyzer.expression();
-        _ = try analyzer.expectToken(.right_parenthesis);
+        _ = try analyzer.expectToken(.operator_right_parenthesis);
         logln(.parser, .@"switch", "Parsed switch expression...", .{});
-        _ = try analyzer.expectToken(.left_brace);
+        _ = try analyzer.expectToken(.operator_left_brace);
 
         var list = Node.List{};
 
-        while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
+        while (analyzer.peekToken() != .operator_right_brace) {
             const case_token = analyzer.token_i;
             logln(.parser, .@"switch", "Parsing switch case...", .{});
-            const case_node = switch (analyzer.tokens[case_token].id) {
+            const case_node = switch (analyzer.peekToken()) {
                 .fixed_keyword_else => blk: {
                     analyzer.consumeToken();
                     break :blk Node.Index.invalid;
@@ -584,13 +612,11 @@ const Analyzer = struct {
                 else => blk: {
                     var array_list = Node.List{};
                     while (true) {
-                        try array_list.append(analyzer.allocator, try analyzer.expression());
-                        switch (analyzer.tokens[analyzer.token_i].id) {
-                            .comma => analyzer.consumeToken(),
-                            .equal => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                                .greater => break,
-                                else => {},
-                            },
+                        const switch_case_node = try analyzer.expression();
+                        try array_list.append(analyzer.allocator, switch_case_node);
+                        switch (analyzer.peekToken()) {
+                            .operator_comma => analyzer.consumeToken(),
+                            .operator_switch_case => break,
                             else => {},
                         }
                     }
@@ -602,9 +628,8 @@ const Analyzer = struct {
                     };
                 },
             };
-            _ = try analyzer.expectToken(.equal);
-            _ = try analyzer.expectToken(.greater);
-            const is_left_brace = analyzer.tokens[analyzer.token_i].id == .left_brace;
+            _ = try analyzer.expectToken(.operator_switch_case);
+            const is_left_brace = analyzer.peekToken() == .operator_left_brace;
             const expr = switch (is_left_brace) {
                 true => try analyzer.block(.{
                     .is_comptime = false,
@@ -612,8 +637,8 @@ const Analyzer = struct {
                 false => try analyzer.assignExpression(),
             };
 
-            logln(.parser, .switch_case, "Comma token: \n```\n{s}\n```\n", .{analyzer.source_file[analyzer.tokens[analyzer.token_i].start..]});
-            _ = try analyzer.expectToken(.comma);
+            // logln(.parser, .switch_case, "Comma token: \n```\n{s}\n```\n", .{analyzer.source_file[analyzer.tokens[analyzer.token_i].start..]});
+            _ = try analyzer.expectToken(.operator_comma);
 
             const node = try analyzer.addNode(.{
                 .id = .switch_case,
@@ -625,7 +650,7 @@ const Analyzer = struct {
             try list.append(analyzer.allocator, node);
         }
 
-        _ = try analyzer.expectToken(.right_brace);
+        _ = try analyzer.expectToken(.operator_right_brace);
 
         return try analyzer.addNode(.{
             .id = .@"switch",
@@ -639,18 +664,18 @@ const Analyzer = struct {
         const if_token = analyzer.token_i;
         analyzer.consumeToken();
 
-        _ = try analyzer.expectToken(.left_parenthesis);
+        _ = try analyzer.expectToken(.operator_left_parenthesis);
         const if_condition = try analyzer.expression();
-        _ = try analyzer.expectToken(.right_parenthesis);
+        _ = try analyzer.expectToken(.operator_right_parenthesis);
 
-        const payload = if (analyzer.tokens[analyzer.token_i].id == .vertical_bar) blk: {
+        const payload = if (analyzer.peekToken() == .operator_bar) blk: {
             analyzer.consumeToken();
-            const payload_node = switch (analyzer.tokens[analyzer.token_i].id) {
+            const payload_node = switch (analyzer.peekToken()) {
                 .identifier => try analyzer.identifierNode(),
                 .discard => try analyzer.discardNode(),
                 else => unreachable,
             };
-            _ = try analyzer.expectToken(.vertical_bar);
+            _ = try analyzer.expectToken(.operator_bar);
             break :blk payload_node;
         } else Node.Index.invalid;
 
@@ -663,7 +688,7 @@ const Analyzer = struct {
             .right = if_taken_expression,
         });
 
-        const result = switch (analyzer.tokens[analyzer.token_i].id) {
+        const result = switch (analyzer.peekToken()) {
             .fixed_keyword_else => blk: {
                 analyzer.consumeToken();
 
@@ -694,54 +719,55 @@ const Analyzer = struct {
 
     fn forExpression(analyzer: *Analyzer) !Node.Index {
         const token = try analyzer.expectToken(.fixed_keyword_for);
-        _ = try analyzer.expectToken(.left_parenthesis);
+        _ = try analyzer.expectToken(.operator_left_parenthesis);
 
         var for_expression_list = ArrayList(Node.Index){};
 
-        while (analyzer.peekToken().id != .right_parenthesis) {
+        while (analyzer.peekToken() != .operator_right_parenthesis) {
             const expression_token = analyzer.token_i;
             const first = try analyzer.expression();
 
-            const node_index = switch (analyzer.tokens[analyzer.token_i].id) {
-                .period => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                    .period => blk: {
+            const node_index = switch (analyzer.peekToken()) {
+                .operator_dot => switch (analyzer.peekTokenAhead(1)) {
+                    .operator_dot => blk: {
                         analyzer.consumeTokens(2);
 
                         break :blk try analyzer.addNode(.{
                             .id = .range,
                             .token = expression_token,
                             .left = first,
-                            .right = switch (analyzer.peekToken().id) {
-                                .right_parenthesis, .comma => Node.Index.invalid,
+                            .right = switch (analyzer.peekToken()) {
+                                .operator_right_parenthesis, .operator_comma => Node.Index.invalid,
                                 else => try analyzer.expression(),
                             },
                         });
                     },
                     else => |t| @panic(@tagName(t)),
                 },
-                .right_parenthesis => first,
-                .comma => first,
+                .operator_right_parenthesis,
+                .operator_comma,
+                => first,
                 else => |t| @panic(@tagName(t)),
             };
 
             try for_expression_list.append(analyzer.allocator, node_index);
 
-            switch (analyzer.tokens[analyzer.token_i].id) {
-                .comma => analyzer.consumeToken(),
-                .right_parenthesis => {},
+            switch (analyzer.peekToken()) {
+                .operator_comma => analyzer.consumeToken(),
+                .operator_right_parenthesis => {},
                 else => |t| @panic(@tagName(t)),
             }
         }
 
-        _ = try analyzer.expectToken(.right_parenthesis);
+        _ = try analyzer.expectToken(.operator_right_parenthesis);
 
-        _ = try analyzer.expectToken(.vertical_bar);
+        _ = try analyzer.expectToken(.operator_bar);
 
         var payload_nodes = ArrayList(Node.Index){};
 
-        while (analyzer.tokens[analyzer.token_i].id != .vertical_bar) {
+        while (analyzer.peekToken() != .operator_bar) {
             const payload_token = analyzer.token_i;
-            const id: Node.Id = switch (analyzer.tokens[payload_token].id) {
+            const id: Node.Id = switch (analyzer.peekToken()) {
                 .identifier => .identifier,
                 .discard => .discard,
                 else => |t| @panic(@tagName(t)),
@@ -749,9 +775,9 @@ const Analyzer = struct {
 
             analyzer.consumeToken();
 
-            switch (analyzer.tokens[analyzer.token_i].id) {
-                .vertical_bar => {},
-                .comma => analyzer.consumeToken(),
+            switch (analyzer.peekToken()) {
+                .operator_bar => {},
+                .operator_comma => analyzer.consumeToken(),
                 else => |t| @panic(@tagName(t)),
             }
 
@@ -763,7 +789,7 @@ const Analyzer = struct {
             }));
         }
 
-        _ = try analyzer.expectToken(.vertical_bar);
+        _ = try analyzer.expectToken(.operator_bar);
 
         if (payload_nodes.items.len != for_expression_list.items.len) {
             unreachable;
@@ -776,13 +802,13 @@ const Analyzer = struct {
             .right = try analyzer.nodeList(payload_nodes),
         });
 
-        const for_content_node = switch (analyzer.tokens[analyzer.token_i].id) {
-            .left_brace => try analyzer.block(.{
+        const for_content_node = switch (analyzer.peekToken()) {
+            .operator_left_brace => try analyzer.block(.{
                 .is_comptime = false,
             }),
             else => blk: {
                 const for_content_expression = try analyzer.expression();
-                _ = try analyzer.expectToken(.semicolon);
+                _ = try analyzer.expectToken(.operator_semicolon);
                 break :blk for_content_expression;
             },
         };
@@ -811,35 +837,17 @@ const Analyzer = struct {
     fn assignExpression(analyzer: *Analyzer) !Node.Index {
         const left = try analyzer.expression();
         const expression_token = analyzer.token_i;
-        const expression_id: Node.Id = switch (analyzer.tokens[expression_token].id) {
-            .semicolon, .comma => return left,
-            .equal => .assign,
-            .plus => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .equal => blk: {
-                    analyzer.consumeToken();
-                    break :blk .add_assign;
-                },
-                else => |t| @panic(@tagName(t)),
-            },
-            .minus => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .equal => blk: {
-                    analyzer.consumeToken();
-                    break :blk .sub_assign;
-                },
-                else => |t| @panic(@tagName(t)),
-            },
-            .slash => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .equal => blk: {
-                    analyzer.consumeToken();
-                    break :blk .div_assign;
-                },
-                else => |t| @panic(@tagName(t)),
-            },
+        const expression_id: Node.Id = switch (analyzer.peekToken()) {
+            .operator_semicolon, .operator_comma => return left,
+            .operator_assign => .assign,
+            .operator_add_assign => .add_assign,
+            .operator_sub_assign => .sub_assign,
+            .operator_mul_assign => .mul_assign,
+            .operator_div_assign => .div_assign,
+            .operator_mod_assign => .mod_assign,
             else => |t| @panic(@tagName(t)),
         };
-
         analyzer.consumeToken();
-
         const right = try analyzer.expression();
 
         const node = Node{
@@ -851,11 +859,37 @@ const Analyzer = struct {
 
         logln(.parser, .assign, "assign:\nleft: {}.\nright: {}", .{ node.left, node.right });
         return try analyzer.addNode(node);
+        //     .operator_equal => .operator_assign,
+        //     .operator_add => switch (analyzer.peekTokenAhead(1)) {
+        //         .operator_equal => blk: {
+        //             analyzer.consumeToken();
+        //             break :blk .operator_add_assign;
+        //         },
+        //         else => |t| @panic(@tagName(t)),
+        //     },
+        //     .operator_sub => switch (analyzer.peekTokenAhead(1)) {
+        //         .equal => blk: {
+        //             analyzer.consumeToken();
+        //             break :blk .operator_sub_assign;
+        //         },
+        //         else => |t| @panic(@tagName(t)),
+        //     },
+        //     .operator_div => switch (analyzer.peekTokenAhead(1)) {
+        //         .operator_equal => blk: {
+        //             analyzer.consumeToken();
+        //             break :blk .operator_div_assign;
+        //         },
+        //         else => |t| @panic(@tagName(t)),
+        //     },
+        //     else => |t| @panic(@tagName(t)),
+        // };
+        //
+        //
     }
 
     fn parseAsmOperand(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
-        const result = switch (analyzer.tokens[token].id) {
+        const result = switch (analyzer.peekToken()) {
             .identifier => try analyzer.addNode(.{
                 .id = .assembly_register,
                 .token = blk: {
@@ -874,10 +908,10 @@ const Analyzer = struct {
                     .right = Node.Index.invalid,
                 });
             },
-            .left_brace => blk: {
+            .operator_left_brace => blk: {
                 analyzer.consumeToken();
                 const result = try analyzer.expression();
-                _ = try analyzer.expectToken(.right_brace);
+                _ = try analyzer.expectToken(.operator_right_brace);
                 break :blk result;
             },
             else => |t| @panic(@tagName(t)),
@@ -886,69 +920,71 @@ const Analyzer = struct {
     }
 
     fn compilerIntrinsic(analyzer: *Analyzer) !Node.Index {
-        const hash = try analyzer.expectToken(.hash);
-        const intrinsic_token = try analyzer.expectToken(.identifier);
-        _ = try analyzer.expectToken(.left_parenthesis);
+        const intrinsic_token = try analyzer.expectToken(.intrinsic);
+        _ = try analyzer.expectToken(.operator_left_parenthesis);
+        const intrinsic_name = analyzer.bytes(intrinsic_token)[1..];
 
-        if (equal(u8, analyzer.bytes(intrinsic_token), "asm")) {
-            _ = try analyzer.expectToken(.left_brace);
-            var statements = ArrayList(Node.Index){};
+        const intrinsic_id = inline for (@typeInfo(Compilation.ValidIntrinsic).Enum.fields) |enum_field| {
+            if (equal(u8, enum_field.name, intrinsic_name)) {
+                break @field(Compilation.ValidIntrinsic, enum_field.name);
+            }
+        } else @panic(intrinsic_name);
 
-            while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
+        var list = ArrayList(Node.Index){};
+
+        if (intrinsic_id == .@"asm") {
+            _ = try analyzer.expectToken(.operator_left_brace);
+
+            while (analyzer.peekToken() != .operator_right_brace) {
                 const instruction_token = try analyzer.expectToken(.identifier);
                 var operand_list = ArrayList(Node.Index){};
 
-                while (analyzer.tokens[analyzer.token_i].id != .semicolon) {
+                while (analyzer.peekToken() != .operator_semicolon) {
                     const asm_operand = try analyzer.parseAsmOperand();
-                    switch (analyzer.tokens[analyzer.token_i].id) {
-                        .semicolon => {},
-                        .comma => analyzer.consumeToken(),
+                    switch (analyzer.peekToken()) {
+                        .operator_semicolon => {},
+                        .operator_comma => analyzer.consumeToken(),
                         else => |t| @panic(@tagName(t)),
                     }
                     try operand_list.append(analyzer.allocator, asm_operand);
                 }
 
-                _ = try analyzer.expectToken(.semicolon);
+                _ = try analyzer.expectToken(.operator_semicolon);
 
-                try statements.append(analyzer.allocator, try analyzer.addNode(.{
+                try list.append(analyzer.allocator, try analyzer.addNode(.{
                     .id = .assembly_statement,
                     .token = instruction_token,
                     .left = try analyzer.nodeList(operand_list),
                     .right = Node.Index.invalid,
                 }));
             }
-            _ = try analyzer.expectToken(.right_brace);
-            _ = try analyzer.expectToken(.right_parenthesis);
 
-            return try analyzer.addNode(.{
-                .id = .assembly_block,
-                .token = hash,
-                .left = try analyzer.nodeList(statements),
-                .right = Node.Index.invalid,
-            });
+            _ = try analyzer.expectToken(.operator_right_brace);
+            _ = try analyzer.expectToken(.operator_right_parenthesis);
         } else {
-            var list = ArrayList(Node.Index){};
-            while (analyzer.tokens[analyzer.token_i].id != .right_parenthesis) {
+            while (analyzer.peekToken() != .operator_right_parenthesis) {
                 const parameter = try analyzer.expression();
                 try list.append(analyzer.allocator, parameter);
 
-                switch (analyzer.tokens[analyzer.token_i].id) {
-                    .comma => analyzer.consumeToken(),
-                    .right_parenthesis => continue,
+                switch (analyzer.peekToken()) {
+                    .operator_comma => analyzer.consumeToken(),
+                    .operator_right_parenthesis => continue,
                     else => |t| @panic(@tagName(t)),
                 }
             }
 
             // Consume the right parenthesis
             analyzer.consumeToken();
-
-            return try analyzer.addNode(.{
-                .id = .compiler_intrinsic,
-                .token = hash,
-                .left = try analyzer.nodeList(list),
-                .right = Node.Index.invalid,
-            });
         }
+
+        return try analyzer.addNode(.{
+            .id = .compiler_intrinsic,
+            .token = intrinsic_token,
+            .left = try analyzer.nodeList(list),
+            .right = .{
+                .value = @intFromEnum(intrinsic_id),
+            },
+        });
     }
 
     fn expression(analyzer: *Analyzer) anyerror!Node.Index {
@@ -958,18 +994,18 @@ const Analyzer = struct {
     const PrecedenceOperator = enum {
         compare_equal,
         compare_not_equal,
-        compare_less_than,
-        compare_greater_than,
-        compare_less_or_equal,
-        compare_greater_or_equal,
+        compare_less,
+        compare_greater,
+        compare_less_equal,
+        compare_greater_equal,
         add,
         sub,
-        modulus,
+        mul,
+        div,
+        mod,
         bit_and,
         bit_xor,
         bit_or,
-        multiply,
-        divide,
         shift_left,
         shift_right,
     };
@@ -977,18 +1013,18 @@ const Analyzer = struct {
     const operator_precedence = std.EnumArray(PrecedenceOperator, i32).init(.{
         .compare_equal = 30,
         .compare_not_equal = 30,
-        .compare_less_than = 30,
-        .compare_greater_than = 30,
-        .compare_less_or_equal = 30,
-        .compare_greater_or_equal = 30,
+        .compare_less = 30,
+        .compare_greater = 30,
+        .compare_less_equal = 30,
+        .compare_greater_equal = 30,
         .add = 60,
         .sub = 60,
+        .mul = 70,
+        .div = 70,
+        .mod = 70,
         .bit_and = 40,
         .bit_xor = 40,
         .bit_or = 40,
-        .multiply = 70,
-        .divide = 70,
-        .modulus = 70,
         .shift_left = 50,
         .shift_right = 50,
     });
@@ -996,18 +1032,18 @@ const Analyzer = struct {
     const operator_associativity = std.EnumArray(PrecedenceOperator, Associativity).init(.{
         .compare_equal = .none,
         .compare_not_equal = .none,
-        .compare_less_than = .none,
-        .compare_greater_than = .none,
-        .compare_less_or_equal = .none,
-        .compare_greater_or_equal = .none,
+        .compare_less = .none,
+        .compare_greater = .none,
+        .compare_less_equal = .none,
+        .compare_greater_equal = .none,
         .add = .left,
         .sub = .left,
         .bit_and = .left,
         .bit_xor = .left,
         .bit_or = .left,
-        .multiply = .left,
-        .divide = .left,
-        .modulus = .left,
+        .mul = .left,
+        .div = .left,
+        .mod = .left,
         .shift_left = .left,
         .shift_right = .left,
     });
@@ -1015,18 +1051,18 @@ const Analyzer = struct {
     const operator_node_id = std.EnumArray(PrecedenceOperator, Node.Id).init(.{
         .compare_equal = .compare_equal,
         .compare_not_equal = .compare_not_equal,
-        .compare_greater_than = .compare_greater_than,
-        .compare_less_than = .compare_less_than,
-        .compare_greater_or_equal = .compare_greater_or_equal,
-        .compare_less_or_equal = .compare_less_or_equal,
+        .compare_greater = .compare_greater,
+        .compare_less = .compare_less,
+        .compare_greater_equal = .compare_greater_equal,
+        .compare_less_equal = .compare_less_equal,
         .add = .add,
         .sub = .sub,
         .bit_and = .bit_and,
         .bit_xor = .bit_xor,
         .bit_or = .bit_or,
-        .multiply = .multiply,
-        .divide = .divide,
-        .modulus = .modulus,
+        .mul = .mul,
+        .div = .div,
+        .mod = .mod,
         .shift_left = .shift_left,
         .shift_right = .shift_right,
     });
@@ -1041,96 +1077,48 @@ const Analyzer = struct {
 
         var banned_precedence: i32 = -1;
 
-        while (analyzer.token_i < analyzer.tokens.len) {
-            const token = analyzer.tokens[analyzer.token_i];
+        while (analyzer.hasTokens()) {
+            const token = analyzer.peekToken();
             // logln("Looping in expression precedence with token {}", .{token});
-            const operator: PrecedenceOperator = switch (token.id) {
-                .semicolon,
-                .right_parenthesis,
-                .right_brace,
-                .right_bracket,
-                .comma,
+            const operator: PrecedenceOperator = switch (token) {
+                .operator_semicolon,
+                .operator_right_parenthesis,
+                .operator_right_brace,
+                .operator_right_bracket,
+                .operator_comma,
+                .operator_colon,
+                .operator_assign,
+                .operator_add_assign,
+                .operator_sub_assign,
+                .operator_mul_assign,
+                .operator_div_assign,
+                .operator_mod_assign,
+                .operator_dot,
                 .fixed_keyword_const,
                 .fixed_keyword_var,
                 .fixed_keyword_return,
-                .identifier,
-                .colon,
                 .fixed_keyword_if,
                 .fixed_keyword_else,
+                .identifier,
                 .discard,
                 => break,
-                else => blk: {
-                    const next_token_index = analyzer.token_i + 1;
-                    if (next_token_index < analyzer.tokens.len) {
-                        const next_token_id = analyzer.tokens[next_token_index].id;
-                        const next_to_next_token_id = analyzer.tokens[next_token_index + 1].id;
-                        break :blk switch (token.id) {
-                            .equal => switch (next_token_id) {
-                                .equal => .compare_equal,
-                                else => break,
-                            },
-                            .bang => switch (next_token_id) {
-                                .equal => .compare_not_equal,
-                                else => unreachable,
-                            },
-                            .plus => switch (next_token_id) {
-                                .plus => unreachable,
-                                .equal => break,
-                                else => .add,
-                            },
-                            .minus => switch (next_token_id) {
-                                .minus => unreachable,
-                                .equal => break,
-                                else => .sub,
-                            },
-                            .modulus => switch (next_token_id) {
-                                .equal => unreachable,
-                                else => .modulus,
-                            },
-                            .ampersand => switch (next_token_id) {
-                                .equal => unreachable,
-                                else => .bit_and,
-                            },
-                            .caret => switch (next_token_id) {
-                                .equal => unreachable,
-                                else => .bit_xor,
-                            },
-                            .vertical_bar => switch (next_token_id) {
-                                .equal => unreachable,
-                                else => .bit_or,
-                            },
-                            .asterisk => switch (next_token_id) {
-                                .equal => unreachable,
-                                else => .multiply,
-                            },
-                            .slash => switch (next_token_id) {
-                                .equal => break,
-                                else => .divide,
-                            },
-                            .less => switch (next_token_id) {
-                                .less => switch (next_to_next_token_id) {
-                                    .equal => unreachable,
-                                    else => .shift_left,
-                                },
-                                .equal => .compare_less_or_equal,
-                                else => .compare_less_than,
-                            },
-                            .greater => switch (next_token_id) {
-                                .greater => .shift_right,
-                                .equal => .compare_greater_or_equal,
-                                else => .compare_greater_than,
-                            },
-                            .period => switch (next_token_id) {
-                                .period => break,
-                                else => break,
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        };
-                    } else {
-                        unreachable;
-                    }
-                },
+                .operator_compare_equal => .compare_equal,
+                .operator_compare_not_equal => .compare_not_equal,
+                .operator_compare_less => .compare_less,
+                .operator_compare_greater => .compare_greater,
+                .operator_compare_less_equal => .compare_less_equal,
+                .operator_compare_greater_equal => .compare_greater_equal,
+                .operator_add => .add,
+                .operator_minus => .sub,
+                .operator_asterisk => .mul,
+                .operator_div => .div,
+                .operator_mod => .mod,
+                .operator_ampersand => .bit_and,
+                .operator_bar => .bit_or,
+                .operator_xor => .bit_xor,
+                else => |t| @panic(@tagName(t)),
             };
+
             logln(.parser, .precedence, "Precedence operator: {s}", .{@tagName(operator)});
 
             const precedence = operator_precedence.get(operator);
@@ -1145,28 +1133,7 @@ const Analyzer = struct {
             }
 
             const operator_token = analyzer.token_i;
-            const extra_tokens: u32 = switch (operator) {
-                .add,
-                .sub,
-                .bit_and,
-                .bit_xor,
-                .bit_or,
-                .multiply,
-                .divide,
-                .modulus,
-                .compare_less_than,
-                .compare_greater_than,
-                => 0,
-                .compare_equal,
-                .compare_not_equal,
-                .compare_less_or_equal,
-                .compare_greater_or_equal,
-                .shift_right,
-                .shift_left,
-                => 1,
-                // else => |t| @panic(@tagName(t)),
-            };
-            analyzer.consumeTokens(@as(u32, 1) + extra_tokens);
+            analyzer.consumeToken();
 
             // TODO: fix this
             logln(.parser, .precedence, "Going for right in expressionPrecedence with operator {s}", .{@tagName(operator)});
@@ -1194,17 +1161,14 @@ const Analyzer = struct {
     fn prefixExpression(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
         // logln("Prefix...", .{});
-        const node_id: Node.Id = switch (analyzer.tokens[token].id) {
+        const node_id: Node.Id = switch (analyzer.peekToken()) {
             else => |pref| {
                 _ = pref;
                 return try analyzer.primaryExpression();
             },
-            .bang => switch (analyzer.tokens[token + 1].id) {
-                .equal => return try analyzer.primaryExpression(),
-                else => .boolean_not,
-            },
-            .minus => .negation,
-            .tilde => |t| @panic(@tagName(t)),
+            .operator_bang => .boolean_not,
+            .operator_minus => .negation,
+            // .tilde => |t| @panic(@tagName(t)),
         };
 
         return try analyzer.addNode(.{
@@ -1219,22 +1183,22 @@ const Analyzer = struct {
     }
 
     fn primaryExpression(analyzer: *Analyzer) !Node.Index {
-        const result = switch (analyzer.tokens[analyzer.token_i].id) {
-            .identifier => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .colon => unreachable,
+        const result = switch (analyzer.peekToken()) {
+            .identifier => switch (analyzer.peekTokenAhead(1)) {
+                .operator_colon => unreachable,
                 else => try analyzer.curlySuffixExpression(),
             },
             .string_literal,
             .character_literal,
             .number_literal,
+            .intrinsic,
             .fixed_keyword_true,
             .fixed_keyword_false,
             .fixed_keyword_unreachable,
             .fixed_keyword_null,
             .fixed_keyword_switch,
-            .hash,
-            .period,
-            .left_parenthesis,
+            .operator_dot,
+            .operator_left_parenthesis,
             .keyword_signed_integer,
             .keyword_unsigned_integer,
             .fixed_keyword_ssize,
@@ -1243,7 +1207,7 @@ const Analyzer = struct {
             .fixed_keyword_struct,
             .discard,
             .fixed_keyword_undefined,
-            .left_bracket,
+            .operator_left_bracket,
             => try analyzer.curlySuffixExpression(),
             .fixed_keyword_fn => try analyzer.function(),
             .fixed_keyword_return => try analyzer.addNode(.{
@@ -1257,7 +1221,7 @@ const Analyzer = struct {
                 .right = Node.Index.invalid,
             }),
             // todo:?
-            .left_brace => try analyzer.block(.{ .is_comptime = false }),
+            .operator_left_brace => try analyzer.block(.{ .is_comptime = false }),
             .fixed_keyword_if => try analyzer.ifExpression(),
             else => |id| std.debug.panic("WARN: By default, calling curlySuffixExpression with {s}", .{@tagName(id)}),
         };
@@ -1268,15 +1232,15 @@ const Analyzer = struct {
     fn curlySuffixExpression(analyzer: *Analyzer) !Node.Index {
         const left = try analyzer.typeExpression();
 
-        return switch (analyzer.tokens[analyzer.token_i].id) {
-            .left_brace => try analyzer.containerLiteral(left),
+        return switch (analyzer.peekToken()) {
+            .operator_left_brace => try analyzer.containerLiteral(left),
             else => left,
         };
     }
 
     fn noReturn(analyzer: *Analyzer) !Node.Index {
         const token_i = analyzer.token_i;
-        assert(analyzer.tokens[token_i].id == .fixed_keyword_noreturn);
+        assert(analyzer.peekToken() == .fixed_keyword_noreturn);
         analyzer.consumeToken();
         return try analyzer.addNode(.{
             .id = .keyword_noreturn,
@@ -1287,15 +1251,17 @@ const Analyzer = struct {
     }
 
     fn boolLiteral(analyzer: *Analyzer) !Node.Index {
-        const token_i = analyzer.token_i;
-        analyzer.consumeToken();
         return try analyzer.addNode(.{
-            .id = switch (analyzer.tokens[token_i].id) {
+            .id = switch (analyzer.peekToken()) {
                 .fixed_keyword_true => .keyword_true,
                 .fixed_keyword_false => .keyword_false,
                 else => unreachable,
             },
-            .token = token_i,
+            .token = blk: {
+                const token_i = analyzer.token_i;
+                analyzer.consumeToken();
+                break :blk token_i;
+            },
             .left = Node.Index.invalid,
             .right = Node.Index.invalid,
         });
@@ -1308,11 +1274,12 @@ const Analyzer = struct {
     };
 
     fn parseTermination(analyzer: *Analyzer) !Node.Index {
-        _ = try analyzer.expectToken(.colon);
-        const token = analyzer.tokens[analyzer.token_i];
-        const termination_id: Node.Id = switch (token.id) {
+        _ = try analyzer.expectToken(.operator_colon);
+        const token_i = analyzer.token_i;
+        const token = analyzer.peekToken();
+        const termination_id: Node.Id = switch (token) {
             .fixed_keyword_null => .null_terminated,
-            .number_literal => switch (std.zig.parseNumberLiteral(analyzer.source_file[token.start..][0..token.len])) {
+            .number_literal => switch (std.zig.parseNumberLiteral(analyzer.bytes(token_i))) {
                 .int => |integer| switch (integer) {
                     0 => .zero_terminated,
                     else => @panic("Invalid number literal terminator"),
@@ -1324,7 +1291,7 @@ const Analyzer = struct {
 
         const termination_node_index = try analyzer.addNode(.{
             .id = termination_id,
-            .token = analyzer.token_i,
+            .token = token_i,
             .left = Node.Index.invalid,
             .right = Node.Index.invalid,
         });
@@ -1334,7 +1301,6 @@ const Analyzer = struct {
     }
 
     fn pointerOrArrayTypeExpression(analyzer: *Analyzer, expected: PointerOrArrayTypeExpectedExpression) !Node.Index {
-        logln(.parser, .pointer_like_type_expression, "Pointer start", .{});
         const first = analyzer.token_i;
 
         var list = Node.List{};
@@ -1352,40 +1318,40 @@ const Analyzer = struct {
                     .left = Node.Index.invalid,
                     .right = Node.Index.invalid,
                 }));
-                _ = try analyzer.expectToken(.left_bracket);
-                _ = try analyzer.expectToken(.ampersand);
-                switch (analyzer.tokens[analyzer.token_i].id) {
-                    .right_bracket => {},
-                    .colon => try list.append(analyzer.allocator, try analyzer.parseTermination()),
+                _ = try analyzer.expectToken(.operator_left_bracket);
+                _ = try analyzer.expectToken(.operator_ampersand);
+                switch (analyzer.peekToken()) {
+                    .operator_right_bracket => {},
+                    .operator_colon => try list.append(analyzer.allocator, try analyzer.parseTermination()),
                     else => |t| @panic(@tagName(t)),
                 }
-                _ = try analyzer.expectToken(.right_bracket);
+                _ = try analyzer.expectToken(.operator_right_bracket);
 
                 break :blk .pointer_type;
             },
             .array_or_slice_type => blk: {
-                _ = try analyzer.expectToken(.left_bracket);
-                switch (analyzer.tokens[analyzer.token_i].id) {
-                    .right_bracket => {
+                _ = try analyzer.expectToken(.operator_left_bracket);
+                switch (analyzer.peekToken()) {
+                    .operator_right_bracket => {
                         analyzer.consumeToken();
                         break :blk .slice_type;
                     },
-                    .colon => {
+                    .operator_colon => {
                         try list.append(analyzer.allocator, try analyzer.parseTermination());
-                        _ = try analyzer.expectToken(.right_bracket);
+                        _ = try analyzer.expectToken(.operator_right_bracket);
                         break :blk .slice_type;
                     },
                     else => {
                         const length_expression = try analyzer.expression();
                         try list.append(analyzer.allocator, length_expression);
 
-                        switch (analyzer.tokens[analyzer.token_i].id) {
-                            .right_bracket => {},
-                            .colon => try list.append(analyzer.allocator, try analyzer.parseTermination()),
+                        switch (analyzer.peekToken()) {
+                            .operator_right_bracket => {},
+                            .operator_colon => try list.append(analyzer.allocator, try analyzer.parseTermination()),
                             else => |t| @panic(@tagName(t)),
                         }
 
-                        _ = try analyzer.expectToken(.right_bracket);
+                        _ = try analyzer.expectToken(.operator_right_bracket);
 
                         break :blk .array_type;
                     },
@@ -1394,7 +1360,7 @@ const Analyzer = struct {
         };
 
         if (expression_type != .array_type) {
-            const const_node = switch (analyzer.tokens[analyzer.token_i].id) {
+            const const_node = switch (analyzer.peekToken()) {
                 .fixed_keyword_const => try analyzer.addNode(.{
                     .id = .const_expression,
                     .token = analyzer.token_i,
@@ -1403,7 +1369,7 @@ const Analyzer = struct {
                 }),
                 else => Node.Index.invalid,
             };
-            analyzer.consumeTokens(@intFromBool(analyzer.tokens[analyzer.token_i].id == .fixed_keyword_const));
+            analyzer.consumeTokens(@intFromBool(analyzer.peekToken() == .fixed_keyword_const));
 
             if (!const_node.invalid) {
                 try list.append(analyzer.allocator, const_node);
@@ -1435,11 +1401,11 @@ const Analyzer = struct {
         const node_index = try analyzer.addNode(node);
         logln(.parser, .pointer_like_type_expression, "Pointer end", .{});
 
-        switch (analyzer.tokens[analyzer.token_i].id) {
-            .comma,
-            .right_parenthesis,
-            .left_brace,
-            .equal,
+        switch (analyzer.peekToken()) {
+            .operator_comma,
+            .operator_right_parenthesis,
+            .operator_left_brace,
+            .operator_assign,
             .fixed_keyword_extern,
             => return node_index,
             else => |t| @panic(@tagName(t)),
@@ -1450,9 +1416,9 @@ const Analyzer = struct {
 
     fn typeExpression(analyzer: *Analyzer) anyerror!Node.Index {
         const first = analyzer.token_i;
-        return switch (analyzer.tokens[first].id) {
+        return switch (analyzer.peekToken()) {
             else => try analyzer.errorUnionExpression(),
-            .question_mark => blk: {
+            .operator_optional => blk: {
                 analyzer.consumeToken();
                 break :blk try analyzer.addNode(.{
                     .id = .optional_type,
@@ -1461,11 +1427,11 @@ const Analyzer = struct {
                     .right = Node.Index.invalid,
                 });
             },
-            .ampersand => try analyzer.pointerOrArrayTypeExpression(.single_pointer_type),
-            .bang => unreachable, // error
-            .left_bracket => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .ampersand => try analyzer.pointerOrArrayTypeExpression(.many_pointer_type),
-                .asterisk => @panic("Meant to use ampersand?"),
+            .operator_ampersand => try analyzer.pointerOrArrayTypeExpression(.single_pointer_type),
+            .operator_bang => unreachable, // error
+            .operator_left_bracket => switch (analyzer.peekTokenAhead(1)) {
+                .operator_ampersand => try analyzer.pointerOrArrayTypeExpression(.many_pointer_type),
+                .operator_asterisk => @panic("Meant to use ampersand?"),
                 else => try analyzer.pointerOrArrayTypeExpression(.array_or_slice_type),
             },
         };
@@ -1474,11 +1440,8 @@ const Analyzer = struct {
     fn errorUnionExpression(analyzer: *Analyzer) !Node.Index {
         const suffix_expression = try analyzer.suffixExpression();
 
-        return switch (analyzer.tokens[analyzer.token_i].id) {
-            .bang => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                .equal => suffix_expression,
-                else => unreachable,
-            },
+        return switch (analyzer.peekToken()) {
+            .operator_bang => unreachable,
             else => suffix_expression,
         };
     }
@@ -1493,19 +1456,19 @@ const Analyzer = struct {
             if (!suffix_operator.invalid) {
                 result = suffix_operator;
             } else {
-                if (analyzer.tokens[analyzer.token_i].id == .left_parenthesis) {
+                if (analyzer.peekToken() == .operator_left_parenthesis) {
                     const left_parenthesis = analyzer.token_i;
                     analyzer.consumeToken();
 
                     var expression_list = ArrayList(Node.Index){};
                     logln(.parser, .suffix, "[DEPTH={}] Initializating suffix call-like expression", .{analyzer.suffix_depth});
-                    while (analyzer.tokens[analyzer.token_i].id != .right_parenthesis) {
+                    while (analyzer.peekToken() != .operator_right_parenthesis) {
                         const current_token = analyzer.token_i;
-                        logln(.parser, .suffix, "[DEPTH={}] First token: {s}", .{ analyzer.suffix_depth, @tagName(analyzer.tokens[current_token].id) });
+                        // logln(.parser, .suffix, "[DEPTH={}] First token: {s}", .{ analyzer.suffix_depth, @tagName(analyzer.tokens[current_token].id) });
                         var parameter = try analyzer.expression();
-                        const parameter_node = analyzer.nodes.items[parameter.unwrap()];
-                        logln(.parser, .suffix, "[DEPTH={}] Parameter node: {s}", .{ analyzer.suffix_depth, @tagName(parameter_node.id) });
-                        if (analyzer.tokens[analyzer.token_i].id == .equal) {
+                        // const parameter_node = analyzer.nodes.items[parameter.unwrap()];
+                        // logln(.parser, .suffix, "[DEPTH={}] Parameter node: {s}", .{ analyzer.suffix_depth, @tagName(parameter_node.id) });
+                        if (analyzer.peekToken() == .operator_assign) {
                             analyzer.consumeToken();
 
                             parameter = try analyzer.addNode(.{
@@ -1515,19 +1478,21 @@ const Analyzer = struct {
                                 .right = try analyzer.expression(),
                             });
                         }
+
                         try expression_list.append(analyzer.allocator, parameter);
-                        switch (analyzer.tokens[analyzer.token_i].id) {
-                            .comma => analyzer.consumeToken(),
-                            .right_parenthesis => {},
-                            .colon, .right_brace, .right_bracket => unreachable,
-                            .period => panic("[DEPTH={}] Unexpected period", .{analyzer.suffix_depth}),
+
+                        switch (analyzer.peekToken()) {
+                            .operator_right_parenthesis => {},
+                            .operator_comma => analyzer.consumeToken(),
+                            .operator_colon, .operator_right_brace, .operator_right_bracket => unreachable,
+                            .operator_dot => panic("[DEPTH={}] Unexpected period", .{analyzer.suffix_depth}),
                             else => |t| @panic(@tagName(t)),
                         }
                     }
 
                     logln(.parser, .suffix, "[DEPTH={}] Ending suffix call-like expression", .{analyzer.suffix_depth});
 
-                    _ = try analyzer.expectToken(.right_parenthesis);
+                    _ = try analyzer.expectToken(.operator_right_parenthesis);
                     // const is_comma = analyzer.tokens[analyzer.token_i].id == .comma;
                     result = try analyzer.addNode(.{
                         .id = .call,
@@ -1545,7 +1510,7 @@ const Analyzer = struct {
     }
 
     fn containerLiteral(analyzer: *Analyzer, type_node: Node.Index) anyerror!Node.Index {
-        const token = try analyzer.expectToken(.left_brace);
+        const token = try analyzer.expectToken(.operator_left_brace);
 
         var list = ArrayList(Node.Index){};
 
@@ -1560,12 +1525,12 @@ const Analyzer = struct {
 
         var current_initialization: ?InitializationType = null;
 
-        while (analyzer.tokens[analyzer.token_i].id != .right_brace) {
+        while (analyzer.peekToken() != .operator_right_brace) {
             const start_token = analyzer.token_i;
-            const iteration_initialization_type: InitializationType = switch (analyzer.tokens[start_token].id) {
-                .period => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                    .identifier => switch (analyzer.tokens[analyzer.token_i + 2].id) {
-                        .equal => blk: {
+            const iteration_initialization_type: InitializationType = switch (analyzer.peekToken()) {
+                .operator_dot => switch (analyzer.peekTokenAhead(1)) {
+                    .identifier => switch (analyzer.peekTokenAhead(2)) {
+                        .operator_assign => blk: {
                             analyzer.consumeTokens(3);
                             const field_expression_initializer = try analyzer.expression();
 
@@ -1577,7 +1542,7 @@ const Analyzer = struct {
                             });
 
                             try list.append(analyzer.allocator, field_initialization);
-                            _ = try analyzer.expectToken(.comma);
+                            _ = try analyzer.expectToken(.operator_comma);
 
                             break :blk .container_field_names;
                         },
@@ -1585,19 +1550,19 @@ const Analyzer = struct {
                     },
                     else => blk: {
                         try list.append(analyzer.allocator, try analyzer.anonymousExpression());
-                        _ = try analyzer.expectToken(.comma);
+                        _ = try analyzer.expectToken(.operator_comma);
                         break :blk .anonymous;
                     },
                 },
                 .string_literal,
                 .identifier,
                 .number_literal,
-                .hash,
+                .intrinsic,
                 .fixed_keyword_if,
                 => blk: {
                     const field_expression_initializer = try analyzer.expression();
-                    switch (analyzer.tokens[analyzer.token_i].id) {
-                        .comma => analyzer.consumeToken(),
+                    switch (analyzer.peekToken()) {
+                        .operator_comma => analyzer.consumeToken(),
                         else => {},
                     }
 
@@ -1616,7 +1581,7 @@ const Analyzer = struct {
             current_initialization = iteration_initialization_type;
         }
 
-        _ = try analyzer.expectToken(.right_brace);
+        _ = try analyzer.expectToken(.operator_right_brace);
 
         const initialization: InitializationType = current_initialization orelse switch (type_node.invalid) {
             true => .empty_literal,
@@ -1651,7 +1616,7 @@ const Analyzer = struct {
 
     fn discardNode(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
-        assert(analyzer.tokens[token].id == .discard);
+        assert(analyzer.peekToken() == .discard);
         analyzer.consumeToken();
         return try analyzer.addNode(.{
             .id = .discard,
@@ -1663,9 +1628,9 @@ const Analyzer = struct {
 
     fn primaryTypeExpression(analyzer: *Analyzer) anyerror!Node.Index {
         const token_i = analyzer.token_i;
-        const token = analyzer.tokens[token_i];
+        const token = analyzer.peekToken();
 
-        return try switch (token.id) {
+        return try switch (token) {
             .fixed_keyword_fn => blk: {
                 analyzer.consumeToken();
                 break :blk analyzer.functionPrototype();
@@ -1728,7 +1693,7 @@ const Analyzer = struct {
                 .left = Node.Index.invalid,
                 .right = Node.Index.invalid,
             }),
-            .hash => analyzer.compilerIntrinsic(),
+            .intrinsic => analyzer.compilerIntrinsic(),
             .fixed_keyword_bool => analyzer.addNode(.{
                 .id = .bool_type,
                 .token = blk: {
@@ -1778,53 +1743,53 @@ const Analyzer = struct {
                 .right = Node.Index.invalid,
             }),
             .fixed_keyword_switch => try analyzer.switchExpression(),
-            .period => try analyzer.anonymousExpression(),
+            .operator_dot => try analyzer.anonymousExpression(),
             .fixed_keyword_enum => blk: {
                 analyzer.consumeToken();
 
-                // TODO: is this the best way?
-                if (analyzer.tokens[analyzer.token_i].id == .left_parenthesis) {
+                const type_node = if (analyzer.peekToken() == .operator_left_parenthesis) b: {
                     analyzer.consumeToken();
-                    assert(analyzer.tokens[analyzer.token_i + 1].id == .right_parenthesis);
-                    analyzer.consumeTokens(2);
-                }
+                    const result = try analyzer.typeExpression();
+                    _ = try analyzer.expectToken(.operator_right_parenthesis);
+                    break :b result;
+                } else Node.Index.invalid;
 
-                _ = try analyzer.expectToken(.left_brace);
+                _ = try analyzer.expectToken(.operator_left_brace);
                 const node_list = try analyzer.containerMembers(.@"enum");
-                _ = try analyzer.expectToken(.right_brace);
+                _ = try analyzer.expectToken(.operator_right_brace);
 
                 break :blk try analyzer.addNode(.{
                     .id = .enum_type,
                     .token = token_i,
                     .left = try analyzer.nodeList(node_list),
-                    .right = Node.Index.invalid,
+                    .right = type_node,
                 });
             },
             .fixed_keyword_struct => blk: {
                 analyzer.consumeToken();
 
-                // TODO: is this the best way?
-                if (analyzer.tokens[analyzer.token_i].id == .left_parenthesis) {
+                const type_node = if (analyzer.peekToken() == .operator_left_parenthesis) b: {
                     analyzer.consumeToken();
-                    assert(analyzer.tokens[analyzer.token_i + 1].id == .right_parenthesis);
-                    analyzer.consumeTokens(2);
-                }
+                    const result = try analyzer.typeExpression();
+                    _ = try analyzer.expectToken(.operator_right_parenthesis);
+                    break :b result;
+                } else Node.Index.invalid;
 
-                _ = try analyzer.expectToken(.left_brace);
+                _ = try analyzer.expectToken(.operator_left_brace);
                 const node_list = try analyzer.containerMembers(.@"struct");
-                _ = try analyzer.expectToken(.right_brace);
+                _ = try analyzer.expectToken(.operator_right_brace);
 
                 break :blk try analyzer.addNode(.{
                     .id = .struct_type,
                     .token = token_i,
                     .left = try analyzer.nodeList(node_list),
-                    .right = Node.Index.invalid,
+                    .right = type_node,
                 });
             },
-            .left_parenthesis => blk: {
+            .operator_left_parenthesis => blk: {
                 analyzer.consumeToken();
                 const expr = try analyzer.expression();
-                _ = try analyzer.expectToken(.right_parenthesis);
+                _ = try analyzer.expectToken(.operator_right_parenthesis);
                 break :blk try analyzer.addNode(.{
                     .id = .expression_group,
                     .token = token_i,
@@ -1841,8 +1806,8 @@ const Analyzer = struct {
 
     fn anonymousExpression(analyzer: *Analyzer) !Node.Index {
         const token_i = analyzer.token_i;
-        _ = try analyzer.expectToken(.period);
-        return switch (analyzer.tokens[analyzer.token_i].id) {
+        _ = try analyzer.expectToken(.operator_dot);
+        return switch (analyzer.peekToken()) {
             .identifier => try analyzer.addNode(.{
                 .id = .enum_literal,
                 .token = blk: {
@@ -1852,7 +1817,7 @@ const Analyzer = struct {
                 .left = Node.Index.invalid,
                 .right = Node.Index.invalid,
             }),
-            .left_brace => try analyzer.containerLiteral(Node.Index.invalid),
+            .operator_left_brace => try analyzer.containerLiteral(Node.Index.invalid),
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -1860,19 +1825,19 @@ const Analyzer = struct {
     // TODO:
     fn suffixOperator(analyzer: *Analyzer, left: Node.Index) !Node.Index {
         const token = analyzer.token_i;
-        const result: Node.Index = switch (analyzer.tokens[token].id) {
-            .left_bracket => blk: {
+        const result: Node.Index = switch (analyzer.peekToken()) {
+            .operator_left_bracket => blk: {
                 analyzer.consumeToken();
                 const index_expression = try analyzer.expression();
 
-                if (analyzer.tokens[analyzer.token_i].id == .period and analyzer.token_i + 1 < analyzer.tokens.len and analyzer.tokens[analyzer.token_i + 1].id == .period) {
+                if (analyzer.peekToken() == .operator_dot and analyzer.peekTokenAhead(1) == .operator_dot) {
                     analyzer.consumeTokens(2);
-                    const range_end_expression = switch (analyzer.tokens[analyzer.token_i].id) {
-                        .right_bracket => Node.Index.invalid,
+                    const range_end_expression = switch (analyzer.peekToken()) {
+                        .operator_right_bracket => Node.Index.invalid,
                         else => try analyzer.expression(),
                     };
 
-                    _ = try analyzer.expectToken(.right_bracket);
+                    _ = try analyzer.expectToken(.operator_right_bracket);
 
                     break :blk try analyzer.addNode(.{
                         .id = .slice,
@@ -1886,7 +1851,7 @@ const Analyzer = struct {
                         }),
                     });
                 } else {
-                    _ = try analyzer.expectToken(.right_bracket);
+                    _ = try analyzer.expectToken(.operator_right_bracket);
                     break :blk try analyzer.addNode(.{
                         .id = .indexed_access,
                         .token = token,
@@ -1895,7 +1860,7 @@ const Analyzer = struct {
                     });
                 }
             },
-            .period => switch (analyzer.tokens[analyzer.token_i + 1].id) {
+            .operator_dot => switch (analyzer.peekTokenAhead(1)) {
                 .identifier => try analyzer.addNode(.{
                     .id = .field_access,
                     .token = blk: {
@@ -1903,16 +1868,19 @@ const Analyzer = struct {
                         break :blk token;
                     },
                     .left = left,
-                    .right = blk: {
-                        //TODO ???
-                        const result: Node.Index = @bitCast(analyzer.token_i);
-                        analyzer.consumeToken();
-                        logln(.parser, .suffix, "WARNING: rhs has node index {} but it's token #{}", .{ result, token });
-                        break :blk result;
-                    },
+                    .right = try analyzer.addNode(.{
+                        .id = .identifier,
+                        .token = blk: {
+                            const t = analyzer.token_i;
+                            analyzer.consumeToken();
+                            break :blk t;
+                        },
+                        .left = Node.Index.invalid,
+                        .right = Node.Index.invalid,
+                    }),
                 }),
-                .period => Node.Index.invalid,
-                .ampersand => try analyzer.addNode(.{
+                .operator_dot => Node.Index.invalid,
+                .operator_ampersand => try analyzer.addNode(.{
                     .id = .address_of,
                     .token = blk: {
                         analyzer.consumeTokens(2);
@@ -1921,7 +1889,7 @@ const Analyzer = struct {
                     .left = left,
                     .right = Node.Index.invalid,
                 }),
-                .at => try analyzer.addNode(.{
+                .operator_at => try analyzer.addNode(.{
                     .id = .pointer_dereference,
                     .token = blk: {
                         analyzer.consumeTokens(2);
@@ -1930,7 +1898,7 @@ const Analyzer = struct {
                     .left = left,
                     .right = Node.Index.invalid,
                 }),
-                .question_mark => try analyzer.addNode(.{
+                .operator_optional => try analyzer.addNode(.{
                     .id = .optional_unwrap,
                     .token = blk: {
                         analyzer.consumeToken();
@@ -1959,14 +1927,15 @@ const Analyzer = struct {
         // if (index == 38 or index == 37) {
         //     @breakpoint();
         // }
-        logln(.parser, .node_creation, "Adding node #{} (0x{x}) {s} to file #{}", .{ index, @intFromPtr(&analyzer.nodes.items[index]), @tagName(node.id), analyzer.file_index.uniqueInteger() });
-        if (Logger.bitset.contains(.node_creation_detailed)) {
-            const chunk_start = analyzer.tokens[node.token].start;
-            const chunk_from_start = analyzer.source_file[chunk_start..];
-            const chunk_end = @min(200, chunk_from_start.len);
-            const chunk = chunk_from_start[0..chunk_end];
-            logln(.parser, .node_creation, "[SOURCE]: ```\n{s}\n```\n", .{chunk});
-        }
+        logln(.parser, .node_creation, "Adding node #{} {s} to file #{}", .{ index, @tagName(node.id), analyzer.file_index.uniqueInteger() });
+        // if (Logger.bitset.contains(.node_creation_detailed)) {
+        //     const chunk_start = analyzer.lexer.offsets.items[node.token];
+        //     const chunk_end = analyzer.lexer.offsets.items[node.token + 1];
+        //     const chunk_from_start = analyzer.source_file[chunk_start..];
+        //     const end = @min(200, chunk_end - chunk_start);
+        //     const chunk = chunk_from_start[0..end];
+        //     logln(.parser, .node_creation, "[SOURCE]: ```\n{s}\n```\n", .{chunk});
+        // }
 
         // if (node.id == .identifier) {
         //     logln("Node identifier: {s}", .{analyzer.bytes(node.token)});
@@ -1989,7 +1958,7 @@ const Analyzer = struct {
 
     fn identifierNode(analyzer: *Analyzer) !Node.Index {
         const identifier_token = analyzer.token_i;
-        assert(analyzer.tokens[identifier_token].id == .identifier);
+        assert(analyzer.peekToken() == .identifier);
         analyzer.consumeToken();
         return try analyzer.addNode(.{
             .id = .identifier,
@@ -2001,13 +1970,14 @@ const Analyzer = struct {
 
     fn containerMembers(analyzer: *Analyzer, comptime container_type: Compilation.ContainerType) !ArrayList(Node.Index) {
         var list = ArrayList(Node.Index){};
-        while (analyzer.token_i < analyzer.tokens.len and analyzer.tokens[analyzer.token_i].id != .right_brace) {
-            const first = analyzer.token_i;
-            logln(.parser, .container_members, "First token for container member: {s}", .{@tagName(analyzer.tokens[first].id)});
 
-            const member_node_index: Node.Index = switch (analyzer.tokens[first].id) {
-                .fixed_keyword_comptime => switch (analyzer.tokens[analyzer.token_i + 1].id) {
-                    .left_brace => blk: {
+        while (analyzer.hasTokens() and analyzer.peekToken() != .operator_right_brace) {
+            const first = analyzer.token_i;
+            logln(.parser, .container_members, "First token for container member: {s}", .{@tagName(analyzer.peekToken())});
+
+            const member_node_index: Node.Index = switch (analyzer.peekToken()) {
+                .fixed_keyword_comptime => switch (analyzer.peekTokenAhead(1)) {
+                    .operator_left_brace => blk: {
                         analyzer.consumeToken();
                         const comptime_block = try analyzer.block(.{ .is_comptime = true });
 
@@ -2024,11 +1994,11 @@ const Analyzer = struct {
                     analyzer.consumeToken();
                     switch (container_type) {
                         .@"struct" => {
-                            _ = try analyzer.expectToken(.colon);
+                            _ = try analyzer.expectToken(.operator_colon);
 
                             const field_type = try analyzer.typeExpression();
 
-                            const field_default_node = if (analyzer.tokens[analyzer.token_i].id == .equal) b: {
+                            const field_default_node = if (analyzer.peekToken() == .operator_assign) b: {
                                 analyzer.consumeToken();
                                 const default_index = try analyzer.expression();
                                 const default_node = analyzer.nodes.items[default_index.unwrap()];
@@ -2036,7 +2006,7 @@ const Analyzer = struct {
                                 break :b default_index;
                             } else Node.Index.invalid;
 
-                            _ = try analyzer.expectToken(.comma);
+                            _ = try analyzer.expectToken(.operator_comma);
 
                             const field_node = try analyzer.addNode(.{
                                 .id = .container_field,
@@ -2048,15 +2018,15 @@ const Analyzer = struct {
                             break :blk field_node;
                         },
                         .@"enum" => {
-                            const value_associated = switch (analyzer.tokens[analyzer.token_i].id) {
-                                .comma => Node.Index.invalid,
+                            const value_associated = switch (analyzer.peekToken()) {
+                                .operator_comma => Node.Index.invalid,
                                 else => value: {
                                     analyzer.consumeToken();
                                     break :value try analyzer.expression();
                                 },
                             };
 
-                            _ = try analyzer.expectToken(.comma);
+                            _ = try analyzer.expectToken(.operator_comma);
 
                             const enum_field_node = try analyzer.addNode(.{
                                 .id = .enum_field,
@@ -2082,18 +2052,11 @@ const Analyzer = struct {
     }
 };
 
-const Members = struct {
-    len: usize,
-    left: Node.Index,
-    right: Node.Index,
-};
-
 // Here it is assumed that left brace is consumed
-
-pub fn analyze(allocator: Allocator, tokens: []const Token, source_file: []const u8, file_index: File.Index) !Result {
+pub fn analyze(allocator: Allocator, lexer: lexical_analyzer.Result, source_file: []const u8, file_index: File.Index) !Result {
     const start = std.time.Instant.now() catch unreachable;
     var analyzer = Analyzer{
-        .tokens = tokens,
+        .lexer = lexer,
         .source_file = source_file,
         .file_index = file_index,
         .allocator = allocator,
@@ -2109,7 +2072,7 @@ pub fn analyze(allocator: Allocator, tokens: []const Token, source_file: []const
     assert(!node_index.invalid);
 
     const members = try analyzer.containerMembers(.@"struct");
-    assert(analyzer.token_i == analyzer.tokens.len);
+    assert(analyzer.token_i == analyzer.lexer.ids.items.len);
 
     const node_list = try analyzer.nodeList(members);
 

@@ -7,7 +7,6 @@ pub const panic = Compilation.panic;
 pub fn main() !void {
     const GPA = std.heap.GeneralPurposeAllocator(.{});
     var gpa = GPA{};
-
     try Compilation.init(gpa.allocator());
 }
 

@@ -506,7 +506,7 @@ pub const Intrinsic = struct {
 
 // Each time an enum is added here, a corresponding insertion in the initialization must be made
 pub const ValidIntrinsic = enum {
-    //@"asm", this is processed separately as it need special parsing
+    @"asm", //this is processed separately as it need special parsing
     cast,
     @"error",
     import,
@@ -772,20 +772,20 @@ pub const BinaryOperation = struct {
     pub const Id = enum {
         add,
         sub,
-        bit_and,
-        bit_xor,
-        bit_or,
         mul,
         div,
         mod,
+        bit_and,
+        bit_xor,
+        bit_or,
         shift_left,
         shift_right,
         compare_equal,
-        compare_greater_than,
-        compare_greater_or_equal,
-        compare_less_than,
-        compare_less_or_equal,
         compare_not_equal,
+        compare_greater,
+        compare_greater_equal,
+        compare_less,
+        compare_less_equal,
     };
 };
 
@@ -1499,33 +1499,7 @@ pub fn compileModule(compilation: *Compilation, descriptor: Module.Descriptor) !
 
         try semantic_analyzer.initialize(compilation, module, packages[0], value_index);
 
-        if (module.descriptor.transpile_to_c) {
-            // try c_transpiler.initialize(compilation, module);
-            // if (module.descriptor.is_build) {
-            //     const argv = [_][]const u8{ module.descriptor.executable_path, "--compiler", compilation.executable_absolute_path };
-            //     const process_result = try std.ChildProcess.run(.{
-            //         .allocator = compilation.base_allocator,
-            //         .argv = &argv,
-            //     });
-            //
-            //     switch (process_result.term) {
-            //         .Exited => |exit_code| {
-            //             if (exit_code != 0) {
-            //                 for (argv) |arg| {
-            //                     std.debug.print("{s} ", .{arg});
-            //                 }
-            //                 std.debug.print("exited with failure: {}\n", .{exit_code});
-            //                 std.debug.print("STDOUT:\n```\n{s}\n```\n", .{process_result.stdout});
-            //                 std.debug.print("STDERR:\n```\n{s}\n```\n", .{process_result.stderr});
-            //                 @panic("Internal error");
-            //             }
-            //         },
-            //         else => @panic("Unexpected program state"),
-            //     }
-            // }
-        } else {
-            try llvm.initialize(compilation, module);
-        }
+        // try llvm.initialize(compilation, module);
     }
 }
 
@@ -1549,6 +1523,38 @@ pub const Package = struct {
         try package.dependencies.ensureUnusedCapacity(allocator, 1);
         package.dependencies.putAssumeCapacityNoClobber(package_name, new_dependency);
     }
+};
+
+pub const FixedKeyword = enum {
+    @"comptime",
+    @"const",
+    @"var",
+    void,
+    noreturn,
+    function,
+    @"while",
+    bool,
+    true,
+    false,
+    @"fn",
+    @"unreachable",
+    @"return",
+    ssize,
+    usize,
+    @"switch",
+    @"if",
+    @"else",
+    @"struct",
+    @"enum",
+    @"union",
+    @"extern",
+    null,
+    @"align",
+    @"export",
+    cc,
+    @"for",
+    undefined,
+    @"break",
 };
 
 pub const File = struct {
@@ -1585,16 +1591,27 @@ pub const File = struct {
     }
 
     fn lex(file: *File, allocator: Allocator, file_index: File.Index) !void {
+        _ = file_index;
+
         assert(file.status == .loaded_into_memory);
-        file.lexical_analyzer_result = try lexical_analyzer.analyze(allocator, file.source_code, file_index);
+        file.lexical_analyzer_result = try lexical_analyzer.analyze(allocator, file.source_code);
         file.status = .lexed;
     }
 
     fn parse(file: *File, allocator: Allocator, file_index: File.Index) !void {
         assert(file.status == .lexed);
-        file.syntactic_analyzer_result = try syntactic_analyzer.analyze(allocator, file.lexical_analyzer_result.tokens.items, file.source_code, file_index);
+        logln(.parser, .file, "[START PARSING FILE #{} {s}]", .{ file_index.uniqueInteger(), file.package.source_path });
+        file.syntactic_analyzer_result = try syntactic_analyzer.analyze(allocator, file.lexical_analyzer_result, file.source_code, file_index);
+        logln(.parser, .file, "[END PARSING FILE #{} {s}]", .{ file_index.uniqueInteger(), file.package.source_path });
 
         file.status = .parsed;
+    }
+
+    pub fn getTokenBytes(file: *File, token_index: Token.Index) []const u8 {
+        const offset = file.lexical_analyzer_result.token_offsets.items[token_index];
+        const len = file.lexical_analyzer_result.token_lengths.items[token_index];
+        const bytes = file.source_code[offset..][0..len];
+        return bytes;
     }
 };
 
