@@ -8,7 +8,7 @@ comptime {
     }
 }
 
-const _start = fn () noreturn export cc(.naked) {
+const _start = fn naked, export () noreturn {
     #asm({
         xor ebp, ebp;
         mov rdi, rsp;
@@ -21,7 +21,7 @@ var argument_count: usize = 0;
 var argument_values: [&]const [&:0]const u8 = undefined;
 var environment_values: [&:null]const ?[&:null]const u8 = undefined;
 
-const start = fn(argc_argv_address: usize) noreturn export {
+const start = fn export (argc_argv_address: usize) noreturn {
     var argument_address_iterator = argc_argv_address;
     const argument_count_ptr: &usize = #cast(argument_address_iterator);
     argument_count = argument_count_ptr.@;
@@ -33,6 +33,6 @@ const start = fn(argc_argv_address: usize) noreturn export {
     std.os.exit(exit_code = result);
 }
 
-const main = fn(argc: s32, argv: [&:null]?[&:null]u8, env: [&:null]?[&:null]u8) s32 export {
+const main = fn export (argc: s32, argv: [&:null]?[&:null]u8, env: [&:null]?[&:null]u8) s32 {
     return #import("main").main();
 }

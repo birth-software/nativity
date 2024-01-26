@@ -17,5 +17,4 @@ const Abi = enum{
 
 const CallingConvention = enum{
     system_v,
-    naked,
 };

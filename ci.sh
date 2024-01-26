@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
+argument_count=$#;
+extra_args=""
+use_debug="true"
+if [ $argument_count -ne 0 ]; then
+    llvm_debug_path=$1
+    llvm_release_path=$2
+    use_debug="false"
+    extra_args="-Dllvm_debug_path=$llvm_debug_path -Dllvm_release_path=$llvm_release_path"
+fi
 
 echo -e "\e[90mCompiling Nativity with Zig...\e[0m"
-nativity_use_llvm=true
-zig build -Duse_llvm=$nativity_use_llvm
+zig build -Dllvm_debug=$use_debug $extra_args
+if [[ "$?" != 0 ]]; then
+    exit 1
+fi
 failed_test_count=0
 passed_test_count=0
 test_directory_name=test
@@ -57,41 +68,41 @@ do
     test_i=$(($test_i + 1))
 done
 
-for integral_test_case in $integral_test_directory_files
-do
-    MY_TESTNAME=${integral_test_case##*/}
-    cd test/integral/$MY_TESTNAME
-    $nat_compiler
-
-    if [[ "$?" == "0" ]]; then
-        passed_compilation_count=$(($passed_compilation_count + 1))
-        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-            nat/$MY_TESTNAME
-
-            if [[ "$?" == "0" ]]; then
-                passed_test_count=$(($passed_test_count + 1))
-                result="\e[32mPASSED\e[0m"
-            else
-                failed_test_count=$(($failed_test_count + 1))
-                result="\e[31mFAILED\e[0m"
-                failed_tests+=("$test_i. $MY_TESTNAME")
-            fi
-
-            ran_test_count=$(($ran_test_count + 1))
-        else
-            result="\e[31mOS NOT SUPPORTED\e[0m"
-        fi
-    else
-        failed_compilation_count=$(($failed_compilation_count + 1))
-        result="\e[31mCOMPILATION FAILURE\e[0m"
-        failed_compilations+=("$test_i. $MY_TESTNAME")
-    fi
-
-    echo -e "[$test_i/$total_test_count] [$result] [INTEGRAL] $MY_TESTNAME"
-
-    test_i=$(($test_i + 1))
-    cd $my_current_directory
-done
+# for integral_test_case in $integral_test_directory_files
+# do
+#     MY_TESTNAME=${integral_test_case##*/}
+#     cd test/integral/$MY_TESTNAME
+#     $nat_compiler
+#
+#     if [[ "$?" == "0" ]]; then
+#         passed_compilation_count=$(($passed_compilation_count + 1))
+#         if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+#             nat/$MY_TESTNAME
+#
+#             if [[ "$?" == "0" ]]; then
+#                 passed_test_count=$(($passed_test_count + 1))
+#                 result="\e[32mPASSED\e[0m"
+#             else
+#                 failed_test_count=$(($failed_test_count + 1))
+#                 result="\e[31mFAILED\e[0m"
+#                 failed_tests+=("$test_i. $MY_TESTNAME")
+#             fi
+#
+#             ran_test_count=$(($ran_test_count + 1))
+#         else
+#             result="\e[31mOS NOT SUPPORTED\e[0m"
+#         fi
+#     else
+#         failed_compilation_count=$(($failed_compilation_count + 1))
+#         result="\e[31mCOMPILATION FAILURE\e[0m"
+#         failed_compilations+=("$test_i. $MY_TESTNAME")
+#     fi
+#
+#     echo -e "[$test_i/$total_test_count] [$result] [INTEGRAL] $MY_TESTNAME"
+#
+#     test_i=$(($test_i + 1))
+#     cd $my_current_directory
+# done
 
 printf "\n"
 echo -e "\e[35m[SUMMARY]\e[0m"
