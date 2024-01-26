@@ -5,8 +5,8 @@ pub fn build(b: *std.Build) !void {
     all = b.option(bool, "all", "All") orelse false;
     const optimization = b.standardOptimizeOption(.{});
     const llvm_debug = b.option(bool, "llvm_debug", "Use LLVM in the debug version") orelse false;
-    const llvm_debug_path = b.option([]const u8, "llvm_debug_path", "LLVM debug path") orelse "../dev/llvm-17-static-debug";
-    const llvm_release_path = b.option([]const u8, "llvm_release_path", "LLVM release path") orelse "../dev/llvm-17-static-release";
+    const llvm_debug_path = b.option([]const u8, "llvm_debug_path", "LLVM debug path") orelse "../llvm-17-static-debug";
+    const llvm_release_path = b.option([]const u8, "llvm_release_path", "LLVM release path") orelse "../llvm-17-static-release";
     const target_query = try std.zig.CrossTarget.parse(.{
         .arch_os_abi = "native-linux-musl",
     });
