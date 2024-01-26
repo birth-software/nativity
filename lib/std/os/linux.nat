@@ -411,7 +411,7 @@ const get_map_flags = fn(flags: std.os.MapFlags) MapFlags{
 }
 
 const mmap = fn(address: ?[&]u8, length: usize, protection_flags: ProtectionFlags, map_flags: MapFlags, fd: s32, offset: u64) usize {
-    const result = #syscall(#cast(Syscall.mmap), #cast(address), length, #cast(protection_flags), #cast(map_flags), fd, offset);
+    const result = #syscall(#cast(Syscall.mmap), #cast(address), length, #cast(protection_flags), #cast(map_flags), #cast(fd), offset);
     return result;
 }
 

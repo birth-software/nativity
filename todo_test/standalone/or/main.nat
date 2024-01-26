@@ -2,5 +2,6 @@ const main = fn() s32 {
     const a: u32 = 0xffff;
     const b: u32 = 0xffff0000;
     const c: u32 = 0xffffffff;
-    return c - (a | b);
+    const result = c - (a | b);
+    return #cast(result);
 }

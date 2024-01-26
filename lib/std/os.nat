@@ -9,7 +9,7 @@ const system = switch (current) {
 
 const exit = fn(exit_code: s32) noreturn {
     switch (current) {
-        .linux => _ = #syscall(#cast(linux.Syscall.exit_group), exit_code),
+        .linux => _ = #syscall(#cast(linux.Syscall.exit_group), #cast(exit_code)),
         .macos => macos.exit(exit_code),
         .windows => windows.ExitProcess(exit_code),
     }
@@ -30,7 +30,7 @@ const FileDescriptor = struct{
             switch (current) {
                 .linux => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                    if (linux.unwrapSyscall(syscall_result = #syscall(#cast(linux.Syscall.read), file_descriptor.handle, #cast(bytes.ptr), len))) |byte_count| {
+                    if (linux.unwrapSyscall(syscall_result = #syscall(#cast(linux.Syscall.read), #cast(file_descriptor.handle), #cast(bytes.ptr), len))) |byte_count| {
                         return byte_count;
                     } else {
                         return null;
@@ -47,7 +47,7 @@ const FileDescriptor = struct{
         switch (current) {
             .linux => {
                 const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                const raw_result = #syscall(#cast(linux.Syscall.write), file_descriptor.handle, #cast(bytes.ptr), len);
+                const raw_result = #syscall(#cast(linux.Syscall.write), #cast(file_descriptor.handle), #cast(bytes.ptr), len);
                 if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
                     return byte_count;
                 } else {

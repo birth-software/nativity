@@ -5,10 +5,8 @@ const Compilation = @import("Compilation.zig");
 pub const panic = Compilation.panic;
 
 pub fn main() !void {
-    const GPA = std.heap.GeneralPurposeAllocator(.{});
-    var gpa = GPA{};
-
-    try Compilation.init(gpa.allocator());
+    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    try Compilation.init(arena_allocator.allocator());
 }
 
 test {

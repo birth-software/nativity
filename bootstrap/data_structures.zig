@@ -6,203 +6,162 @@ pub const AutoArrayHashMap = std.AutoArrayHashMapUnmanaged;
 pub const ArrayList = std.ArrayListUnmanaged;
 pub const ArrayListAligned = std.ArrayListAlignedUnmanaged;
 pub const AutoHashMap = std.AutoHashMapUnmanaged;
+pub const BoundedArray = std.BoundedArray;
 pub const HashMap = std.HashMapUnmanaged;
-pub const SegmentedList = std.SegmentedList;
 pub const StringHashMap = std.StringHashMapUnmanaged;
 pub const StringArrayHashMap = std.StringArrayHashMapUnmanaged;
 
-pub fn BlockList(comptime T: type) type {
+pub fn BlockList(comptime T: type, comptime E: type) type {
     const item_count = 64;
-    const Block = struct {
-        items: [item_count]T = undefined,
-        bitset: Bitset = Bitset.initEmpty(),
-
-        const Bitset = std.StaticBitSet(item_count);
-
-        fn allocateIndex(block: *@This()) !u6 {
-            if (block.bitset.mask != std.math.maxInt(@TypeOf(block.bitset.mask))) {
-                const index = @ctz(~block.bitset.mask);
-                block.bitset.set(index);
-                return @intCast(index);
-            } else {
-                return error.OutOfMemory;
-            }
-        }
-    };
 
     return struct {
-        // TODO: make this not reallocate the whole block. Instead, use a pointer to the block as the ArrayList item
         blocks: ArrayList(*Block) = .{},
         len: usize = 0,
-        first_block: u32 = 0,
 
+        const Block = BoundedArray(T, item_count);
         const List = @This();
 
-        pub const Index = packed struct(u32) {
-            element: u6,
-            block: u24,
-            _reserved: bool = false,
-            invalid: bool = false,
+        pub const Index = getIndexForType(T, E);
+        pub const ElementIndex = Index.Index;
 
-            pub const invalid = Index{
-                .invalid = true,
-                .element = 0,
-                .block = 0,
-            };
+        // pub const append = switch (list_type) {
+        //     .index => appendIndexed,
+        //     .pointer => appendPointer,
+        // };
+        // pub const addOne = switch (list_type) {
+        //     .index => addOneIndexed,
+        //     .pointer => addOnePointer,
+        // };
 
-            pub fn eq(index: Index, other: Index) bool {
-                return @as(u32, @bitCast(index)) == @as(u32, @bitCast(other));
-            }
-
-            pub fn uniqueInteger(index: Index) u32 {
-                assert(!index.invalid);
-                return @as(u30, @truncate(@as(u32, @bitCast(index))));
-            }
-
-            pub fn fromInteger(usize_index: usize) Index {
-                const index: u32 = @intCast(usize_index);
-                const block: u24 = @intCast(index / item_count);
-                const i: u6 = @intCast(index % item_count);
-                return .{
-                    .element = i,
-                    .block = block,
-                };
-            }
-        };
-
-        pub const Iterator = struct {
-            index: Index,
-            list: *List,
-
-            pub const Pair = struct {
-                index: Index,
-            };
-
-            pub fn nextIndex(i: *Iterator) ?Index {
-                // TODO: optimize with ctz and masking out already iterated indices in the bitmask
-                for (i.index.block..i.list.blocks.items.len) |block_index| {
-                    for (@as(u8, i.index.element)..item_count) |element_index| {
-                        if (i.list.blocks.items[block_index].bitset.isSet(element_index)) {
-                            const index = Index{
-                                .element = @intCast(element_index),
-                                .block = @intCast(block_index),
-                            };
-
-                            i.index = index;
-                            i.index.element +%= 1;
-                            i.index.block = @as(u24, @intCast(block_index)) + @intFromBool(i.index.element < element_index);
-
-                            return index;
-                        }
-                    }
-                }
-
-                return null;
-            }
-
-            pub fn nextPointer(i: *Iterator) ?*T {
-                if (i.nextIndex()) |index| {
-                    const result = i.list.get(index);
-                    return result;
-                } else {
-                    return null;
-                }
-            }
-        };
-
-        pub fn iterator(list: *List) Iterator {
-            return .{
-                .index = Index{
-                    .element = 0,
-                    .block = 0,
-                },
-                .list = list,
-            };
+        pub fn wrapSplit(block: usize, element: usize) ElementIndex {
+            return @enumFromInt(block * item_count + element);
         }
 
-        pub fn get(list: *List, index: Index) *T {
-            assert(!index.invalid);
-            return &list.blocks.items[index.block].items[index.element];
+        pub fn get(list: *List, index: ElementIndex) *T {
+            assert(index != .null);
+            const i: u32 = @intFromEnum(index);
+            const block_index = i / item_count;
+            const element_index = i % item_count;
+            const block = list.blocks.items[block_index];
+            const block_slice = block.buffer[0..block.len];
+            const element = &block_slice[element_index];
+            return element;
         }
 
-        pub fn append(list: *List, allocator: Allocator, element: T) !Index {
+        pub fn append(list: *List, allocator: Allocator, element: T) !ElementIndex {
             const result = try list.addOne(allocator);
             list.get(result).* = element;
             return result;
         }
 
-        pub fn addOne(list: *List, allocator: Allocator) !Index {
-            try list.ensureCapacity(allocator, list.len + 1);
-            const max_allocation = list.blocks.items.len * item_count;
-            const result = switch (list.len < max_allocation) {
-                true => blk: {
-                    const block = list.blocks.items[list.first_block];
-                    if (block.allocateIndex()) |element_index| {
-                        break :blk Index{
-                            .element = element_index,
-                            .block = @intCast(list.first_block),
-                        };
-                    } else |_| {
-                        @panic("TODO");
-                    }
-                },
-                false => blk: {
-                    const block_index = list.blocks.items.len;
-                    const new_block = try allocator.create(Block);
-                    new_block.* = .{};
-                    list.blocks.appendAssumeCapacity(new_block);
-                    const element_index = new_block.allocateIndex() catch unreachable;
-                    list.first_block += @intFromBool(block_index != 0);
-                    break :blk Index{
-                        .element = element_index,
-                        .block = @intCast(block_index),
-                    };
-                },
-            };
-
-            list.len += 1;
-
-            return result;
+        pub fn addOne(list: *List, allocator: Allocator) !ElementIndex {
+            const block_index = try list.getFreeBlock(allocator);
+            const block = list.blocks.items[block_index];
+            const index = block.len;
+            _ = try block.addOne();
+            return @enumFromInt(block_index * item_count + index);
         }
 
-        pub fn ensureCapacity(list: *List, allocator: Allocator, new_capacity: usize) !void {
-            const max_allocation = list.blocks.items.len * item_count;
-            if (max_allocation < new_capacity) {
-                const block_count = new_capacity / item_count + @intFromBool(new_capacity % item_count != 0);
-                try list.blocks.ensureTotalCapacity(allocator, block_count);
+        fn getFreeBlock(list: *List, allocator: Allocator) !usize {
+            for (list.blocks.items, 0..) |block, i| {
+                block.ensureUnusedCapacity(1) catch continue;
+                return i;
+            } else {
+                const new_block = try allocator.create(Block);
+                new_block.* = .{};
+                const block_index = list.blocks.items.len;
+                try list.blocks.append(allocator, new_block);
+                return block_index;
             }
         }
 
-        pub fn indexOf(list: *List, elem: *const T) Index {
+        pub fn indexOf(list: *List, elem: *const T) ElementIndex {
             const address = @intFromPtr(elem);
-            for (list.blocks.items, 0..) |*block, block_index| {
-                const base = @intFromPtr(&block.items[0]);
+            for (list.blocks.items, 0..) |block, block_index| {
+                const base = @intFromPtr(&block.buffer[0]);
                 const top = base + @sizeOf(T) * item_count;
                 if (address >= base and address < top) {
-                    return .{
-                        .block = @intCast(block_index),
-                        .element = @intCast(@divExact(address - base, @sizeOf(T))),
-                    };
+                    const result: u32 = @intCast(block_index * item_count + @divExact(address - base, @sizeOf(T)));
+                    return Index.wrap(result);
                 }
             }
 
             @panic("not found");
         }
+    };
+}
 
-        test "Bitset index allocation" {
-            const expect = std.testing.expect;
-            var block = Block{};
-            for (0..item_count) |expected_index| {
-                const new_index = try block.allocateIndex();
-                try expect(new_index == expected_index);
-            }
+pub fn getIndexForType(comptime T: type, comptime E: type) type {
+    assert(@typeInfo(E) == .Enum);
+    _ = T;
+    const IndexType = u32;
+    const MAX = std.math.maxInt(IndexType);
 
-            _ = block.allocateIndex() catch return;
+    const EnumField = std.builtin.Type.EnumField;
+    comptime var fields: []const EnumField = &.{};
+    // comptime var enum_value: comptime_int = 0;
+        fields = fields ++ @typeInfo(E).Enum.fields;
 
-            return error.TestUnexpectedResult;
+    // for (names) |name| {
+    //     fields = fields ++ [1]EnumField{.{
+    //         .name = name,
+    //         .value = enum_value,
+    //     }};
+    //     enum_value += 1;
+    // }
+
+    fields = fields ++ [1]EnumField{.{
+        .name = "null",
+        .value = MAX,
+    }};
+
+    const Result = @Type(.{
+        .Enum = .{
+            .tag_type = IndexType,
+            .fields = fields,
+            .decls = &.{},
+            .is_exhaustive = false,
+        },
+    });
+
+    return struct {
+        pub const Index = Result;
+
+        pub fn unwrap(this: Index) IndexType {
+            assert(this != .null);
+            return @intFromEnum(this);
+        }
+
+        pub fn wrap(value: IndexType) Index {
+            assert(value < MAX);
+            return @enumFromInt(value);
+        }
+
+        pub fn addInt(this: Index, value: IndexType) Index{
+            const this_int = @intFromEnum(this);
+            return @enumFromInt(this_int + value);
+        }
+
+        pub fn subInt(this: Index, value: IndexType) IndexType{
+            const this_int = @intFromEnum(this);
+            return this_int - value;
+        }
+
+        pub fn add(a: Index, b: Index) Index{
+            return @enumFromInt(@intFromEnum(a) + @intFromEnum(b));
+        }
+
+        pub fn sub(a: Index, b: Index) IndexType{
+            return @intFromEnum(a) - @intFromEnum(b);
         }
     };
 }
+
+pub const ListType = enum{
+    index,
+    pointer,
+};
+
 
 pub fn enumFromString(comptime E: type, string: []const u8) ?E {
     return inline for (@typeInfo(E).Enum.fields) |enum_field| {

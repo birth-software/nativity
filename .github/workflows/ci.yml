@@ -13,13 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [
-          ubuntu-latest,
-        ]
-    runs-on: ${{ matrix.os }}
+  build_and_test:
+    runs-on: [ self-hosted, Linux, x64 ]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -29,4 +24,4 @@ jobs:
         with:
           version: master
       - name: Test
-        run: ./ci.sh
+        run: ./ci.sh ../todo_foo_debug_path ../../../../../dev/llvm-static-release-zen4-17.0.6/out/x86_64-linux-musl-native

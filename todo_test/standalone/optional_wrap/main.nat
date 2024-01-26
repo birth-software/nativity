@@ -1,0 +1,8 @@
+const foo = fn(slice: []u8) ?[]u8 {
+    return slice[0..1];
+}
+const main = fn() s32 {
+    _ = foo(slice = .{ 0, 1, 2, 3 }.&);
+
+    return 0;
+}
