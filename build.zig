@@ -27,7 +27,6 @@ pub fn build(b: *std.Build) !void {
     const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_dir, "/include" });
     const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_dir, "/lib" });
 
-    exe.linkLibC();
     exe.linkLibCpp();
 
     exe.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
