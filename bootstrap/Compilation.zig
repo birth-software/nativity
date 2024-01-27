@@ -38,8 +38,11 @@ fn parseArguments(context: *const Context) !Descriptor {
 
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
-    var target_triplet: []const u8 = "x86_64-linux-gnu";
-    var should_transpile_to_c: ?bool = null;
+    var target_triplet: []const u8 = switch (@import("builtin").os.tag) {
+        .linux => "x86_64-linux-gnu",
+        .macos => "aarch64-macos-none",
+        else => unreachable,
+    };
     var maybe_only_parse: ?bool = null;
     var link_libc = false;
     var maybe_executable_name: ?[]const u8 = null;
@@ -113,21 +116,6 @@ fn parseArguments(context: *const Context) !Descriptor {
                 } else {
                     reportUnterminatedArgumentError(current_argument);
                 }
-            } else if (equal(u8, current_argument, "-transpile_to_c")) {
-                if (i + 1 != arguments.len) {
-                    i += 1;
-
-                    const arg = arguments[i];
-                    if (std.mem.eql(u8, arg, "true")) {
-                        should_transpile_to_c = true;
-                    } else if (std.mem.eql(u8, arg, "false")) {
-                        should_transpile_to_c = false;
-                    } else {
-                        unreachable;
-                    }
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
             } else if (equal(u8, current_argument, "-parse")) {
                 if (i + 1 != arguments.len) {
                     i += 1;
@@ -179,7 +167,6 @@ fn parseArguments(context: *const Context) !Descriptor {
 
     const cross_target = try std.zig.CrossTarget.parse(.{ .arch_os_abi = target_triplet });
     const target = try std.zig.system.resolveTargetQuery(cross_target);
-    const transpile_to_c = should_transpile_to_c orelse false;
     const only_parse = maybe_only_parse orelse false;
 
     const main_package_path = if (maybe_main_package_path) |path| blk: {
@@ -213,10 +200,14 @@ fn parseArguments(context: *const Context) !Descriptor {
         .main_package_path = main_package_path,
         .executable_path = executable_path,
         .target = target,
-        .transpile_to_c = transpile_to_c,
         .is_build = is_build,
         .only_parse = only_parse,
-        .link_libc = link_libc,
+        .link_libc = switch (target.os.tag) {
+            .linux => link_libc,
+            .macos => true,
+            .windows => link_libc,
+            else => unreachable,
+        },
         .generate_debug_information = generate_debug_information,
         .name = executable_name,
     };
@@ -431,7 +422,10 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
 
 var logger_bitset = std.EnumSet(LoggerScope).initEmpty();
 
-var writer = std.io.getStdOut().writer();
+fn getWriter() !std.fs.File.Writer{
+    const stdout = std.io.getStdOut();
+    return stdout.writer();
+}
 
 fn shouldLog(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger) bool {
     return logger_bitset.contains(logger_scope) and getLoggerScopeType(logger_scope).Logger.bitset.contains(logger);
@@ -440,21 +434,23 @@ fn shouldLog(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logg
 pub fn logln(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger, comptime format: []const u8, arguments: anytype) void {
     if (shouldLog(logger_scope, logger)) {
         log(logger_scope, logger, format, arguments);
+        const writer = try getWriter();
         writer.writeByte('\n') catch unreachable;
     }
 }
 
 pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger, comptime format: []const u8, arguments: anytype) void {
     if (shouldLog(logger_scope, logger)) {
-        std.fmt.format(writer, format, arguments) catch unreachable;
+        std.fmt.format(try getWriter(), format, arguments) catch unreachable;
     }
 }
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
-    const print_stack_trace = false;
+    const print_stack_trace = true;
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {
+            const writer = try getWriter();
             writer.writeAll("\nPANIC: ") catch {};
             writer.writeAll(message) catch {};
             writer.writeByte('\n') catch {};
@@ -1290,7 +1286,10 @@ pub const Builder = struct {
 
         if (unit.evaluateBooleanAtComptime(condition)) |comptime_condition| {
             if (comptime_condition == true) {
-                unreachable;
+                @panic("TODO: if comptime true");
+                // return If{
+                //     .condition = .true,
+                // };
             } else {
                 return If{
                     .condition = .false,
@@ -3633,7 +3632,6 @@ pub const Descriptor = struct {
     main_package_path: []const u8,
     executable_path: []const u8,
     target: std.Target,
-    transpile_to_c: bool,
     is_build: bool,
     only_parse: bool,
     link_libc: bool,
