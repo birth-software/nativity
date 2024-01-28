@@ -1,4 +1,4 @@
-name: CI_Github_FlyCI
+name: CI_main
 
 on:
   # pull_request:
