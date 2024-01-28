@@ -1,36 +1,104 @@
 const std = @import("std");
-var all: bool = false;
+const assert = std.debug.assert;
 
 pub fn build(b: *std.Build) !void {
-    all = b.option(bool, "all", "All") orelse false;
+    const self_hosted_ci = b.option(bool, "self_hosted_ci", "This option enables the self-hosted CI behavior") orelse false;
+    const third_party_ci = b.option(bool, "third_party_ci", "This option enables the third-party CI behavior") orelse false;
+    const is_ci = self_hosted_ci or third_party_ci;
+    _ = is_ci; // autofix
+    const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
-    const llvm_debug = b.option(bool, "llvm_debug", "Use LLVM in the debug version") orelse false;
-    const llvm_debug_path = b.option([]const u8, "llvm_debug_path", "LLVM debug path") orelse "../llvm-17-static-debug";
-    const llvm_release_path = b.option([]const u8, "llvm_release_path", "LLVM release path") orelse "../llvm-17-static-release";
-    const target_query = try std.zig.CrossTarget.parse(.{
-        .arch_os_abi = "native-linux-musl",
-    });
+    var target_query = b.standardTargetOptionsQueryOnly(.{});
+    const os = target_query.os_tag orelse @import("builtin").os.tag;
+    if (os == .linux) {
+        target_query.abi = .musl;
+    }
     const target = b.resolveTargetQuery(target_query);
-    const exe = b.addExecutable(.{
+    const llvm_version = "17.0.6";
+    var fetcher_run: ?*std.Build.Step.Run = null;
+    const llvm_path = b.option([]const u8, "llvm_path", "LLVM prefix path") orelse blk: {
+        assert(!self_hosted_ci);
+        if (third_party_ci or (!target.query.isNativeOs() or !target.query.isNativeCpu())) {
+            const prefix = "nat/cache";
+            var llvm_directory = try std.ArrayListUnmanaged(u8).initCapacity(b.allocator, 128);
+            llvm_directory.appendSliceAssumeCapacity(prefix ++ "/");
+            llvm_directory.appendSliceAssumeCapacity("llvm-");
+            llvm_directory.appendSliceAssumeCapacity(llvm_version);
+            llvm_directory.appendSliceAssumeCapacity("-");
+            llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.cpu.arch));
+            llvm_directory.appendSliceAssumeCapacity("-");
+            llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.os.tag));
+            llvm_directory.appendSliceAssumeCapacity("-");
+            llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.abi));
+            llvm_directory.appendSliceAssumeCapacity("-");
+            llvm_directory.appendSliceAssumeCapacity(if (std.mem.eql(u8, target.result.cpu.model.name, @tagName(target.result.cpu.arch))) "baseline" else target.result.cpu.model.name);
+
+            var dir = std.fs.cwd().openDir(llvm_directory.items, .{}) catch {
+                const llvm_fetcher = b.addExecutable(.{
+                    .name = "llvm_fetcher",
+                    .root_source_file = .{ .path = "build/llvm_fetcher.zig" },
+                    .target = native_target,
+                    .optimize = .ReleaseFast,
+                    .single_threaded = true,
+                });
+                const run = b.addRunArtifact(llvm_fetcher);
+                fetcher_run = run;
+                run.addArg("-prefix");
+                run.addArg(prefix);
+                run.addArg("-version");
+                run.addArg(llvm_version);
+                run.addArg("-arch");
+                run.addArg(@tagName(target.result.cpu.arch));
+                run.addArg("-os");
+                run.addArg(@tagName(target.result.os.tag));
+                run.addArg("-abi");
+                run.addArg(@tagName(target.result.abi));
+                run.addArg("-cpu");
+                run.addArg(target.result.cpu.model.name);
+                break :blk llvm_directory.items;
+            };
+
+            dir.close();
+
+            break :blk llvm_directory.items;
+        } else {
+            const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
+            break :blk switch (use_debug) {
+                true => "../llvm-17-static-debug",
+                false => "../llvm-17-static-release",
+            };
+        }
+    };
+
+    const compiler = b.addExecutable(.{
         .name = "nat",
         .root_source_file = .{ .path = "bootstrap/main.zig" },
         .target = target,
         .optimize = optimization,
-        .use_llvm = true,
-        .use_lld = true,
     });
-    exe.formatted_panics = false;
-    exe.root_module.unwind_tables = false;
-    exe.root_module.omit_frame_pointer = false;
+    // compiler.formatted_panics = false;
+    // compiler.root_module.unwind_tables = false;
+    // compiler.root_module.omit_frame_pointer = false;
+    compiler.want_lto = false;
 
-    const llvm_dir = if (llvm_debug) llvm_debug_path else llvm_release_path;
-    const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_dir, "/include" });
-    const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_dir, "/lib" });
+    compiler.linkLibC();
+    compiler.linkSystemLibrary("c++");
 
-    exe.linkLibCpp();
+    if (target.result.os.tag == .windows) {
+        compiler.linkSystemLibrary("ole32");
+        compiler.linkSystemLibrary("version");
+        compiler.linkSystemLibrary("uuid");
+        compiler.linkSystemLibrary("msvcrt-os");
+    }
 
-    exe.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
-    exe.addCSourceFile(.{
+    if (fetcher_run) |fr| {
+        compiler.step.dependOn(&fr.step);
+    }
+
+    const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
+    const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
+    compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
+    compiler.addCSourceFile(.{
         .file = std.Build.LazyPath.relative("bootstrap/backend/llvm.cpp"),
         .flags = &.{"-g"},
     });
@@ -218,9 +286,6 @@ pub fn build(b: *std.Build) !void {
         "libLLVMXCoreDisassembler.a",
         "libLLVMXCoreInfo.a",
         "libLLVMXRay.a",
-        // Zlib
-        "libz.a",
-        "libzstd.a",
         //LLD
         "liblldCOFF.a",
         "liblldCommon.a",
@@ -228,14 +293,16 @@ pub fn build(b: *std.Build) !void {
         "liblldMachO.a",
         "liblldMinGW.a",
         "liblldWasm.a",
+        // Zlib
+        "libz.a",
+        if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a",
     };
 
-    inline for (llvm_libraries) |llvm_library| {
-        exe.addObjectFile(std.Build.LazyPath.relative(try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
+    for (llvm_libraries) |llvm_library| {
+        compiler.addObjectFile(std.Build.LazyPath.relative(try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
     }
 
-
-    const install_exe = b.addInstallArtifact(exe, .{});
+    const install_exe = b.addInstallArtifact(compiler, .{});
     b.getInstallStep().dependOn(&install_exe.step);
     b.installDirectory(.{
         .source_dir = std.Build.LazyPath.relative("lib"),
@@ -275,13 +342,28 @@ pub fn build(b: *std.Build) !void {
     debug_command.step.dependOn(b.getInstallStep());
     debug_command.addArg(compiler_exe_path);
 
+    const test_runner = b.addExecutable(.{
+        .name = "test_runner",
+        .root_source_file = .{ .path = "build/test_runner.zig" },
+        .target = native_target,
+        .optimize = optimization,
+        .single_threaded = true,
+    });
+
+    const test_command = b.addRunArtifact(test_runner);
+    test_command.step.dependOn(&compiler.step);
+    test_command.step.dependOn(b.getInstallStep());
+
     if (b.args) |args| {
         run_command.addArgs(args);
         debug_command.addArgs(args);
+        test_command.addArgs(args);
     }
 
     const run_step = b.step("run", "Test the Nativity compiler");
     run_step.dependOn(&run_command.step);
     const debug_step = b.step("debug", "Debug the Nativity compiler");
     debug_step.dependOn(&debug_command.step);
+    const test_step = b.step("test", "Test the Nativity compiler");
+    test_step.dependOn(&test_command.step);
 }

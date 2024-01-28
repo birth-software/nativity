@@ -16,6 +16,7 @@
 
 #include "lld/Common/CommonLinkerContext.h"
 
+
 using namespace llvm;
 
 extern "C" LLVMContext* NativityLLVMCreateContext()
@@ -589,16 +590,26 @@ extern "C" Constant* NativityLLVMContextCreateGlobalStringPointer(IRBuilder<>& b
     return constant;
 }
 
+void stream_to_string(raw_string_ostream& stream, const char** message_ptr, size_t* message_len)
+{
+    stream.flush();
+
+    auto string = stream.str();
+    char* result = new char[string.length()];
+    memcpy(result, string.c_str(), string.length());
+
+    *message_ptr = result;
+    *message_len = string.length();
+}
+
 extern "C" bool NativityLLVMVerifyFunction(Function& function, const char** message_ptr, size_t* message_len)
 {
     std::string message_buffer;
     raw_string_ostream message_stream(message_buffer);
 
     bool result = verifyFunction(function, &message_stream);
-    message_stream.flush();
     auto size = message_stream.str().size();
-    *message_ptr = strndup(message_stream.str().c_str(), size);
-    *message_len = size;
+    stream_to_string(message_stream, message_ptr, message_len);
 
     // We invert the condition because LLVM conventions are just stupid
     return !result;
@@ -610,10 +621,7 @@ extern "C" bool NativityLLVMVerifyModule(const Module& module, const char** mess
     raw_string_ostream message_stream(message_buffer);
 
     bool result = verifyModule(module, &message_stream);
-    message_stream.flush();
-    auto size = message_stream.str().size();
-    *message_ptr = strndup(message_stream.str().c_str(), size);
-    *message_len = size;
+    stream_to_string(message_stream, message_ptr, message_len);
 
     // We invert the condition because LLVM conventions are just stupid
     return !result;
