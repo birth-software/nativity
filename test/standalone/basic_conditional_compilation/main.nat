@@ -1,0 +1,7 @@
+const main = fn() s32 {
+    if (true) {
+        return 0;
+    } else {
+        return 1;
+    }
+}

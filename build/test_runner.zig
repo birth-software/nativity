@@ -10,6 +10,7 @@ const TestError = error{
 };
 
 pub fn main() !void {
+    std.debug.print("\n",.{});
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
     const standalone_test_dir_path = "test/standalone";
@@ -29,6 +30,12 @@ pub fn main() !void {
     standalone_test_dir.close();
 
     var ran_test_count: usize = 0;
+    const FailedTestInfo = struct{
+        name: []const u8,
+        stdout: []const u8,
+        stderr: []const u8,
+    };
+    _ = FailedTestInfo; // autofix
     var failed_test_count: usize = 0;
 
     for (standalone_test_names.items) |standalone_test_name| {
@@ -51,6 +58,12 @@ pub fn main() !void {
             break :b false;
         };
         std.debug.print("[{s}]\n", .{if (success) "OK" else "FAIL"});
+        if (process_run.stdout.len > 0) {
+            std.debug.print("\tSTDOUT:\n{s}\n\n", .{process_run.stdout});
+        }
+        if (process_run.stderr.len > 0) {
+            std.debug.print("\tSTDERR:\n{s}\n\n", .{process_run.stderr});
+        }
     }
 
     std.debug.print("\nTest count: {}. Failed test count: {}\n", .{ran_test_count, failed_test_count});
