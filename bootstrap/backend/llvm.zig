@@ -3,12 +3,24 @@ const equal = std.mem.eql;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Compilation = @import("../Compilation.zig");
+const log = Compilation.log;
+const logln = Compilation.logln;
 const Module = Compilation.Module;
 const data_structures = @import("../data_structures.zig");
 const ArrayList = data_structures.ArrayList;
 const AutoHashMap = data_structures.AutoHashMap;
 
 const bindings = @import("llvm_bindings.zig");
+
+pub const Logger = enum {
+    print_module,
+    function,
+
+    pub var bitset = std.EnumSet(Logger).initMany(&.{
+        .print_module,
+        .function,
+    });
+};
 
 pub const LLVM = struct {
     context: *LLVM.Context,
@@ -3415,10 +3427,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                 llvm.scope = subprogram.toLocalScope().toScope();
             }
             
-            const print_function_name = true;
-            if (print_function_name) {
-                std.debug.print("[LLVM] Compiling {s}...\n", .{name});
-            }
+            logln(.llvm, .function, "[LLVM] Compiling {s}...\n", .{name});
 
             llvm.arg_index = 0;
             llvm.alloca_map.clearRetainingCapacity();
@@ -3461,13 +3470,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         di_builder.finalize();
     }
 
-    const print_module = true;
-    if (print_module) {
         var module_len: usize = 0;
         const module_ptr = llvm.module.toString(&module_len);
         const module_string = module_ptr[0..module_len];
-        std.debug.print("{s}\n", .{module_string});
-    }
+        logln(.llvm, .print_module, "{s}", .{module_string});
 
     const verify_module = true;
     if (verify_module) {

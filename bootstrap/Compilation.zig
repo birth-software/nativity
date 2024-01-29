@@ -392,9 +392,10 @@ pub const Package = struct {
 };
 
 const LoggerScope = enum {
-    compilation,
     lexer,
     parser,
+    compilation,
+    llvm,
 };
 
 const Logger = enum {
@@ -416,6 +417,7 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
             .compilation => @This(),
             .lexer => lexer,
             .parser => parser,
+            .llvm => llvm,
         };
     }
 }
