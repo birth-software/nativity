@@ -16,7 +16,6 @@
 
 #include "lld/Common/CommonLinkerContext.h"
 
-
 using namespace llvm;
 
 extern "C" LLVMContext* NativityLLVMCreateContext()
