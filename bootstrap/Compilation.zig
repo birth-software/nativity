@@ -1269,36 +1269,18 @@ pub const Builder = struct {
     const If = struct{
         condition: Condition,
         const Condition = union(enum){
-            true: Value.Index,
+            true,
             false,
-            runtime: Value.Index,
+            runtime,
         };
     };
 
     fn resolveIf(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !If {
-        const if_node = unit.getNode(node_index);
-        assert(if_node.id == .@"if");
+        _ = builder; // autofix
+        _ = unit; // autofix
+        _ = context; // autofix
+        _ = node_index; // autofix
 
-        const condition = try builder.resolveValueAllocate(unit, context, Type.Expect{
-            .type = .bool,
-        }, if_node.left);
-        assert(condition != .null);
-
-        if (unit.evaluateBooleanAtComptime(condition)) |comptime_condition| {
-            if (comptime_condition == true) {
-                @panic("TODO: if comptime true");
-                // return If{
-                //     .condition = .true,
-                // };
-            } else {
-                return If{
-                    .condition = .false,
-                };
-            }
-        } else {
-            try builder.insertDebugCheckPoint(unit, context, if_node.token);
-            unreachable;
-        }
 
         unreachable;
     }
@@ -1915,17 +1897,32 @@ pub const Builder = struct {
                 assert(node.left != .null);
                 assert(node.right != .null);
 
-                const if_result = try builder.resolveIf(unit, context, node.left);
-                switch (if_result.condition) {
-                    .false => {
+                const if_node = unit.getNode(node.left);
+                assert(if_node.id == .@"if");
+                const condition = try builder.resolveValueAllocate(unit, context, Type.Expect{
+                    .type = .bool,
+                }, if_node.left);
+                assert(condition != .null);
+
+                if (unit.evaluateBooleanAtComptime(condition)) |comptime_condition| {
+                    if (comptime_condition == true) {
+                        value.* = .{
+                            .unresolved = if_node.right,
+                        };
+                        try builder.resolveValue(unit, context, Type.Expect{
+                            .type = .void,
+                        }, value_index);
+                    } else {
                         value.* = .{
                             .unresolved = node.right,
                         };
                         try builder.resolveValue(unit, context, Type.Expect{
                             .type = .void,
                         }, value_index);
-                    },
-                    else => |t| @panic(@tagName(t)),
+                    }
+                } else {
+                    try builder.insertDebugCheckPoint(unit, context, if_node.token);
+                    unreachable;
                 }
             },
             .field_access => {
