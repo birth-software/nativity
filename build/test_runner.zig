@@ -30,13 +30,8 @@ pub fn main() !void {
     standalone_test_dir.close();
 
     var ran_test_count: usize = 0;
-    const FailedTestInfo = struct{
-        name: []const u8,
-        stdout: []const u8,
-        stderr: []const u8,
-    };
-    _ = FailedTestInfo; // autofix
     var failed_test_count: usize = 0;
+    const total_test_count = standalone_test_names.items.len;
 
     for (standalone_test_names.items) |standalone_test_name| {
         defer ran_test_count += 1;
@@ -66,7 +61,7 @@ pub fn main() !void {
         }
     }
 
-    std.debug.print("\nTest count: {}. Failed test count: {}\n", .{ran_test_count, failed_test_count});
+    std.debug.print("\nTOTAL: {}. RAN: {}. FAILED: {}\n", .{total_test_count, ran_test_count, failed_test_count});
     if (failed_test_count > 0) {
         return error.fail;
     }
