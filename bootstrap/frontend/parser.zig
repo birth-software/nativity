@@ -13,7 +13,6 @@ const HashMap = data_structures.HashMap;
 const lexer = @import("lexer.zig");
 
 const Compilation = @import("../Compilation.zig");
-const File = Compilation.File;
 const log = Compilation.log;
 const logln = Compilation.logln;
 const Token = Compilation.Token;
@@ -179,10 +178,12 @@ pub const Node = struct {
         empty_container_literal_guess,
         break_expression,
         character_literal,
-        attribute_naked,
-        attribute_export,
-        attribute_extern,
-        attribute_cc,
+        function_attribute_naked,
+        function_attribute_cc,
+        symbol_attribute_extern,
+        symbol_attribute_export,
+        symbol_attributes,
+        metadata,
     };
 };
 
@@ -199,7 +200,6 @@ const Analyzer = struct {
     nodes: *Node.List,
     node_lists: *ArrayList(ArrayList(Node.Index)),
     source_file: []const u8,
-    file_index: File.Index,
     allocator: Allocator,
     suffix_depth: usize = 0,
 
@@ -288,10 +288,50 @@ const Analyzer = struct {
 
         logln(.parser, .symbol_declaration, "Current token: {}", .{analyzer.peekToken()});
 
-        const type_node_index = switch (analyzer.peekToken()) {
+        const metadata_node_index = switch (analyzer.peekToken()) {
             .operator_colon => blk: {
-                analyzer.consumeToken();
-                break :blk try analyzer.typeExpression();
+                const colon = try analyzer.expectToken(.operator_colon);
+                const type_node_index = if (analyzer.peekToken() != .operator_colon) try analyzer.typeExpression() else .null;
+                const attribute_node_index: Node.Index = if (analyzer.peekToken() == .operator_colon) b: {
+                    analyzer.consumeToken();
+
+                    var list = ArrayList(Node.Index){};
+                    while (analyzer.peekToken() != .operator_assign) {
+                        const identifier = try analyzer.expectToken(.identifier);
+                        const identifier_name = analyzer.bytes(identifier);
+
+                        const attribute_node = inline for (@typeInfo(Compilation.Debug.Declaration.Global.Attribute).Enum.fields) |enum_field| {
+                            if (equal(u8, identifier_name, enum_field.name)) {
+                                const attribute = @field(Compilation.Debug.Declaration.Global.Attribute, enum_field.name); 
+                                const attribute_node = switch (attribute) {
+                                    .@"export" => try analyzer.addNode(.{
+                                        .id = @field(Node.Id, "symbol_attribute_" ++ @tagName(attribute)),
+                                        .token = identifier,
+                                        .left = .null,
+                                        .right = .null,
+                                    }),
+                                };
+                                break attribute_node;
+                            }
+                        } else @panic("Not known attribute");
+                        try list.append(analyzer.allocator, attribute_node);
+
+                        switch (analyzer.peekToken()) {
+                            .operator_assign => {},
+                            .operator_comma => analyzer.consumeToken(),
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    }
+
+                    break :b try analyzer.nodeList(list);
+                } else .null;
+
+                break :blk try analyzer.addNode(.{
+                    .id = .metadata,
+                    .token = colon,
+                    .left = type_node_index,
+                    .right = attribute_node_index,
+                });
             },
             else => Node.Index.null,
         };
@@ -310,7 +350,7 @@ const Analyzer = struct {
         const declaration = Node{
             .id = mutability_node_id,
             .token = first,
-            .left = type_node_index,
+            .left = metadata_node_index,
             .right = init_node_index,
         };
 
@@ -350,8 +390,8 @@ const Analyzer = struct {
                 if (equal(u8, identifier_name, enum_field.name)) {
                     const attribute = @field(Compilation.Function.Attribute, enum_field.name); 
                     const attribute_node = switch (attribute) {
-                        .naked, .@"export", => try analyzer.addNode(.{
-                            .id = @field(Node.Id, "attribute_" ++ @tagName(attribute)),
+                        .naked, => try analyzer.addNode(.{
+                            .id = @field(Node.Id, "function_attribute_" ++ @tagName(attribute)),
                             .token = identifier,
                             .left = .null,
                             .right = .null,
@@ -826,9 +866,9 @@ const Analyzer = struct {
         _ = try analyzer.expectToken(.operator_left_parenthesis);
         const intrinsic_name = analyzer.bytes(intrinsic_token)[1..];
 
-        const intrinsic_id = inline for (@typeInfo(Compilation.Intrinsic.Id).Enum.fields) |enum_field| {
+        const intrinsic_id = inline for (@typeInfo(Compilation.IntrinsicId).Enum.fields) |enum_field| {
             if (equal(u8, enum_field.name, intrinsic_name)) {
-                break @field(Compilation.Intrinsic.Id, enum_field.name);
+                break @field(Compilation.IntrinsicId, enum_field.name);
             }
         } else @panic(intrinsic_name);
 
@@ -1902,13 +1942,13 @@ const Analyzer = struct {
 
     fn addNode(analyzer: *Analyzer, node: Node) !Node.Index {
         const node_index = try analyzer.nodes.append(analyzer.allocator, node);
-        logln(.parser, .node_creation, "Adding node #{} {s} to file #{} (left: {}, right: {})", .{ Node.unwrap(node_index), @tagName(node.id), File.unwrap(analyzer.file_index), switch (node.left) {
-            .null => 0xffff_ffff,
-            else => Node.unwrap(node.left),
-        }, switch (node.right) {
-            .null => 0xffff_ffff,
-            else => Node.unwrap(node.right),
-        }});
+        // logln(.parser, .node_creation, "Adding node #{} {s} to file #{} (left: {}, right: {})", .{ Node.unwrap(node_index), @tagName(node.id), File.unwrap(analyzer.file_index), switch (node.left) {
+        //     .null => 0xffff_ffff,
+        //     else => Node.unwrap(node.left),
+        // }, switch (node.right) {
+        //     .null => 0xffff_ffff,
+        //     else => Node.unwrap(node.right),
+        // }});
         // if (Logger.bitset.contains(.node_creation_detailed)) {
         //     const chunk_start = analyzer.lexer.offsets.items[node.token];
         //     const chunk_end = analyzer.lexer.offsets.items[node.token + 1];
@@ -1950,13 +1990,13 @@ const Analyzer = struct {
 
 
 // Here it is assumed that left brace is consumed
-pub fn analyze(allocator: Allocator, lexer_result: lexer.Result, source_file: []const u8, file_index: File.Index, token_buffer: *Token.Buffer, node_list: *Node.List, node_lists: *ArrayList(ArrayList(Node.Index))) !Result {
+pub fn analyze(allocator: Allocator, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *Node.List, node_lists: *ArrayList(ArrayList(Node.Index))) !Result {
     const start = std.time.Instant.now() catch unreachable;
     var analyzer = Analyzer{
         .lexer = lexer_result,
         .token_buffer = token_buffer,
         .source_file = source_file,
-        .file_index = file_index,
+        // .file_index = file_index,
         .token_i = lexer_result.offset,
         .allocator = allocator,
         .nodes = node_list,
