@@ -32,9 +32,25 @@ fn reportUnterminatedArgumentError(string: []const u8) noreturn {
     std.debug.panic("Unterminated argument: {s}", .{string});
 }
 
-fn parseArguments(context: *const Context) !Descriptor {
-    const allocator = context.allocator;
-    const arguments = (try std.process.argsAlloc(allocator))[1..];
+pub fn foo(context: *const Context) !Descriptor {
+    _ = context; // autofix
+}
+
+pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
+    const context: *Context = try allocator.create(Context);
+
+    const self_exe_path = try std.fs.selfExePathAlloc(allocator);
+    const self_exe_dir_path = std.fs.path.dirname(self_exe_path).?;
+    context.* = .{
+        .allocator = allocator,
+        .cwd_absolute_path = try realpathAlloc(allocator, "."),
+        .executable_absolute_path = self_exe_path,
+        .directory_absolute_path = self_exe_dir_path,
+        .build_directory = try std.fs.cwd().makeOpenPath("nat", .{}),
+    };
+
+    try context.build_directory.makePath(cache_dir_name);
+    try context.build_directory.makePath(installation_dir_name);
 
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
@@ -196,43 +212,25 @@ fn parseArguments(context: *const Context) !Descriptor {
         break :blk result;
     };
 
-    return .{
-        .main_package_path = main_package_path,
-        .executable_path = executable_path,
-        .target = target,
-        .is_build = is_build,
-        .only_parse = only_parse,
-        .link_libc = switch (target.os.tag) {
-            .linux => link_libc,
-            .macos => true,
-            .windows => link_libc,
-            else => unreachable,
-        },
-        .generate_debug_information = generate_debug_information,
-        .name = executable_name,
-    };
-}
-
-pub fn init(allocator: Allocator) !void {
-    const context: *Context = try allocator.create(Context);
-
-    const self_exe_path = try std.fs.selfExePathAlloc(allocator);
-    const self_exe_dir_path = std.fs.path.dirname(self_exe_path).?;
-    context.* = .{
-        .allocator = allocator,
-        .cwd_absolute_path = try realpathAlloc(allocator, "."),
-        .executable_absolute_path = self_exe_path,
-        .directory_absolute_path = self_exe_dir_path,
-        .build_directory = try std.fs.cwd().makeOpenPath("nat", .{}),
-    };
-
-    try context.build_directory.makePath(cache_dir_name);
-    try context.build_directory.makePath(installation_dir_name);
-
     const unit = try context.allocator.create(Unit);
     unit.* = .{
-        .descriptor = try parseArguments(context),
+        .descriptor = .{
+            .main_package_path = main_package_path,
+            .executable_path = executable_path,
+            .target = target,
+            .is_build = is_build,
+            .only_parse = only_parse,
+            .link_libc = switch (target.os.tag) {
+                .linux => link_libc,
+                .macos => true,
+                .windows => link_libc,
+                else => unreachable,
+            },
+            .generate_debug_information = generate_debug_information,
+            .name = executable_name,
+        },
     };
+
     try unit.compile(context);
 }
 
@@ -392,9 +390,10 @@ pub const Package = struct {
 };
 
 const LoggerScope = enum {
-    compilation,
     lexer,
     parser,
+    compilation,
+    llvm,
 };
 
 const Logger = enum {
@@ -416,6 +415,7 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
             .compilation => @This(),
             .lexer => lexer,
             .parser => parser,
+            .llvm => llvm,
         };
     }
 }

@@ -98,11 +98,18 @@ pub fn build(b: *std.Build) !void {
     const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
     const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
     compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
-    compiler.addCSourceFile(.{
-        .file = std.Build.LazyPath.relative("bootstrap/backend/llvm.cpp"),
+    const cpp_files = .{
+        "bootstrap/backend/llvm.cpp",
+        "bootstrap/frontend/clang/main.cpp",
+        "bootstrap/frontend/clang/cc1.cpp",
+        "bootstrap/frontend/clang/cc1as.cpp",
+    };
+    compiler.addCSourceFiles(.{
+        .files = &cpp_files,
         .flags = &.{"-g"},
     });
 
+    const zlib = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
     const llvm_libraries = [_][]const u8{
         "libLLVMAArch64AsmParser.a",
         "libLLVMAArch64CodeGen.a",
@@ -294,8 +301,51 @@ pub fn build(b: *std.Build) !void {
         "liblldMinGW.a",
         "liblldWasm.a",
         // Zlib
+        zlib,
         "libz.a",
-        if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a",
+        // Clang
+        "libclangAnalysis.a",
+        "libclangAnalysisFlowSensitive.a",
+        "libclangAnalysisFlowSensitiveModels.a",
+        "libclangAPINotes.a",
+        "libclangARCMigrate.a",
+        "libclangAST.a",
+        "libclangASTMatchers.a",
+        "libclangBasic.a",
+        "libclangCodeGen.a",
+        "libclangCrossTU.a",
+        "libclangDependencyScanning.a",
+        "libclangDirectoryWatcher.a",
+        "libclangDriver.a",
+        "libclangDynamicASTMatchers.a",
+        "libclangEdit.a",
+        "libclangExtractAPI.a",
+        "libclangFormat.a",
+        "libclangFrontend.a",
+        "libclangFrontendTool.a",
+        "libclangHandleCXX.a",
+        "libclangHandleLLVM.a",
+        "libclangIndex.a",
+        "libclangIndexSerialization.a",
+        "libclangInterpreter.a",
+        "libclangLex.a",
+        "libclangParse.a",
+        "libclangRewrite.a",
+        "libclangRewriteFrontend.a",
+        "libclangSema.a",
+        "libclangSerialization.a",
+        "libclangStaticAnalyzerCheckers.a",
+        "libclangStaticAnalyzerCore.a",
+        "libclangStaticAnalyzerFrontend.a",
+        "libclangSupport.a",
+        "libclangTooling.a",
+        "libclangToolingASTDiff.a",
+        "libclangToolingCore.a",
+        "libclangToolingInclusions.a",
+        "libclangToolingInclusionsStdlib.a",
+        "libclangToolingRefactoring.a",
+        "libclangToolingSyntax.a",
+        "libclangTransformer.a",
     };
 
     for (llvm_libraries) |llvm_library| {
