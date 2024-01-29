@@ -98,8 +98,14 @@ pub fn build(b: *std.Build) !void {
     const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
     const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
     compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
-    compiler.addCSourceFile(.{
-        .file = std.Build.LazyPath.relative("bootstrap/backend/llvm.cpp"),
+    const cpp_files = .{
+        "bootstrap/backend/llvm.cpp",
+        "bootstrap/frontend/clang/main.cpp",
+        "bootstrap/frontend/clang/cc1.cpp",
+        "bootstrap/frontend/clang/cc1as.cpp",
+    };
+    compiler.addCSourceFiles(.{
+        .files = &cpp_files,
         .flags = &.{"-g"},
     });
 

@@ -39,7 +39,8 @@ pub fn main() !void {
         const source_file_path = try std.mem.concat(allocator, u8, &.{standalone_test_dir_path, "/", standalone_test_name, "/main.nat"});
         const process_run = try std.ChildProcess.run(.{
             .allocator = allocator, 
-            .argv = &.{"zig-out/bin/nat", "-main_source_file", source_file_path},
+            // TODO: delete -main_source_file?
+            .argv = &.{"zig-out/bin/nat", "exe", "-main_source_file", source_file_path},
         });
         const result: TestError!bool = switch (process_run.term) {
             .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
