@@ -90,6 +90,7 @@ pub const LLVM = struct {
         const toString = bindings.NativityLLVMModuleToString;
         const getIntrinsicDeclaration = bindings.NativityLLVMModuleGetIntrinsicDeclaration;
         const createDebugInfoBuilder = bindings.NativityLLVMModuleCreateDebugInfoBuilder;
+        const generateMachineCode = bindings.NativityLLVMGenerateMachineCode;
     };
 
     pub const Builder = opaque {
@@ -2925,6 +2926,12 @@ const Error = error{
 
 const address_space = 0;
 
+pub const Format = enum(c_uint) {
+    elf = 0,
+    macho = 1,
+    coff = 2,
+};
+
 pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !void {
     const llvm_context = LLVM.Context.create() orelse return Error.context;
     const module = LLVM.Module.create(@ptrCast(unit.descriptor.name.ptr), unit.descriptor.name.len, llvm_context) orelse return Error.module;
@@ -3286,13 +3293,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     const value = if (llvm.llvm_value_map.get(load.value)) |v| v else blk: {
                         const value = switch (load.value.value) {
                             .runtime => |instr_index| llvm.llvm_instruction_map.get(instr_index).?,
-                            //     const instruction = unit.instructions.get(instr_index);
-                            //     break :b switch (instruction.*) {
-                            //         .argument_declaration => llvm.argument_allocas.get(instr_index).?,
-                            //         .stack_slot => unreachable,
-                            //         else => |t| @panic(@tagName(t)),
-                            //     };
-                            // },
                             else => |t| @panic(@tagName(t)),
                         };
                         try llvm.llvm_value_map.putNoClobber(context.allocator, load.value, value);
@@ -3401,13 +3401,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                 .@"unreachable" => {
                     _ = llvm.builder.createUnreachable() orelse return LLVM.Value.Instruction.Error.@"unreachable";
                 },
-                // .fetch_global => |global_declaration| {
-                //     const global_variable = llvm.global_variable_map.get(global_declaration).?;
-                //     const global_type = try llvm.getType(unit, context, global_declaration.declaration.type);
-                //     const is_volatile = false;
-                //     const load = llvm.builder.createLoad(global_type, global_variable.toValue(), is_volatile, "global", "global".len) orelse return LLVM.Value.Instruction.Error.load;
-                //     try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, load.toValue());
-                // },
                 else => |t| @panic(@tagName(t)),
             }
         }
@@ -3443,10 +3436,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         di_builder.finalize();
     }
 
-        var module_len: usize = 0;
-        const module_ptr = llvm.module.toString(&module_len);
-        const module_string = module_ptr[0..module_len];
-        logln(.llvm, .print_module, "{s}", .{module_string});
+    var module_len: usize = 0;
+    const module_ptr = llvm.module.toString(&module_len);
+    const module_string = module_ptr[0..module_len];
+    logln(.llvm, .print_module, "{s}", .{module_string});
 
     const verify_module = true;
     if (verify_module) {
@@ -3461,8 +3454,57 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     const file_path = unit.descriptor.executable_path;
     const object_file_path = try std.mem.joinZ(context.allocator, "", &.{ file_path, ".o" });
     const destination_file_path = try std.mem.joinZ(context.allocator, "", &.{file_path});
-    const r = bindings.NativityLLVMGenerateMachineCode(llvm.module, object_file_path.ptr, object_file_path.len, destination_file_path.ptr, destination_file_path.len);
+    const r = llvm.module.generateMachineCode(object_file_path.ptr, object_file_path.len, destination_file_path.ptr, destination_file_path.len);
     if (!r) {
         @panic("Compilation failed!");
+    }
+
+    const format: Format = switch (unit.descriptor.target.os.tag) {
+        .windows => .coff,
+        .macos => .macho,
+        .linux => .elf,
+        else => unreachable,
+    };
+
+    const driver_program = switch (format) {
+        .coff => "lld-link",
+        .elf => "ld.lld",
+        .macho => "ld64.lld",
+    };
+    var arguments = ArrayList([*:0]const u8){};
+    try arguments.append(context.allocator, driver_program);
+
+    try arguments.append(context.allocator, object_file_path.ptr);
+    try arguments.append(context.allocator, "-o");
+    try arguments.append(context.allocator, destination_file_path.ptr);
+
+    if (format == .macho) {
+        try arguments.append(context.allocator, "-platform_version");
+        try arguments.append(context.allocator, "macos");
+        try arguments.append(context.allocator, "11");
+        try arguments.append(context.allocator, "14");
+        try arguments.append(context.allocator, "-arch");
+        try arguments.append(context.allocator, "arm64");
+        try arguments.append(context.allocator, "-lSystem");
+
+    }
+
+    var stdout_ptr: [*]const u8 = undefined;
+    var stdout_len: usize = 0;
+    var stderr_ptr: [*]const u8 = undefined;
+    var stderr_len: usize = 0;
+
+    const linking_result = bindings.NativityLLDLink(format, arguments.items.ptr, arguments.items.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len);
+
+    if (stdout_len > 0) {
+        std.debug.print("{s}\n", .{stdout_ptr[0..stdout_len]});
+    }
+
+    if (stderr_len > 0) {
+        std.debug.print("{s}\n", .{stderr_ptr[0..stderr_len]});
+    }
+
+    if (!linking_result) {
+        std.debug.panic("Linker invokation failed: {s}", .{arguments.items});
     }
 }

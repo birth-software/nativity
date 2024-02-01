@@ -68,6 +68,8 @@ pub fn build(b: *std.Build) !void {
             };
         }
     };
+    const compiler_options = b.addOptions();
+    compiler_options.addOption(bool, "print_stack_trace", is_ci);
 
     const compiler = b.addExecutable(.{
         .name = "nat",
@@ -75,6 +77,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimization,
     });
+    compiler.root_module.addOptions("configuration", compiler_options);
     compiler.formatted_panics = is_ci;
     compiler.root_module.unwind_tables = is_ci;
     compiler.root_module.omit_frame_pointer = false;
