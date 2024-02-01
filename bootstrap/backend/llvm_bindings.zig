@@ -83,7 +83,7 @@ pub extern fn NativityLLVMVerifyModule(module: *LLVM.Module, message_ptr: *[*]co
 pub extern fn NativityLLVMModuleToString(module: *LLVM.Module, message_len: *usize) [*]const u8;
 pub extern fn NativityLLVMFunctionToString(function: *LLVM.Value.Function, message_len: *usize) [*]const u8;
 
-pub extern fn NativityLLVMGenerateMachineCode(module: *LLVM.Module, object_file_path_ptr: [*]const u8, object_file_path_len: usize, file_path_ptr: [*]const u8, file_path_len: usize) bool;
+
 pub extern fn NativityLLVMBuilderIsCurrentBlockTerminated(builder: *LLVM.Builder) bool;
 pub extern fn NativityLLVMGetUndefined(type: *LLVM.Type) ?*LLVM.Value.Constant.Undefined;
 pub extern fn NativityLLVMFunctionSetCallingConvention(function: *LLVM.Value.Function, calling_convention: LLVM.Value.Function.CallingConvention) void;
@@ -117,3 +117,6 @@ pub extern fn NativityLLVMCreatePhiNode(type: *LLVM.Type, reserved_value_count: 
 pub extern fn NativityLLVMAllocatGetAllocatedType(alloca: *LLVM.Value.Instruction.Alloca) *LLVM.Type;
 pub extern fn NativityLLVMValueToAlloca(value: *LLVM.Value) ?*LLVM.Value.Instruction.Alloca;
 pub extern fn NativityLLVMGlobalVariableSetInitializer(global_variable: *LLVM.Value.Constant.GlobalVariable, constant_initializer: *LLVM.Value.Constant) void;
+
+pub extern fn NativityLLVMGenerateMachineCode(module: *LLVM.Module, object_file_path_ptr: [*]const u8, object_file_path_len: usize, file_path_ptr: [*]const u8, file_path_len: usize) bool;
+pub extern fn NativityLLDLink(format: llvm.Format, argument_ptr: [*]const [*:0]const u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;

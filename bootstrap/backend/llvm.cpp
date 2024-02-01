@@ -774,6 +774,10 @@ namespace lld {
         bool link(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
                 llvm::raw_ostream &stderrOS, bool exitEarly, bool disableOutput);
     }
+    namespace macho {
+        bool link(llvm::ArrayRef<const char *> args, llvm::raw_ostream &stdoutOS,
+                llvm::raw_ostream &stderrOS, bool exitEarly, bool disableOutput);
+    }
 }
 
 extern "C" bool NativityLLVMGenerateMachineCode(Module& module, const char* object_file_path_ptr, size_t object_file_path_len, const char* file_path_ptr, size_t file_path_len)
@@ -798,11 +802,6 @@ extern "C" bool NativityLLVMGenerateMachineCode(Module& module, const char* obje
     module.setDataLayout(target_machine->createDataLayout());
     module.setTargetTriple(target_triple);
 
-#if 0
-    SmallVector<char> bytes;
-    raw_svector_ostream message_stream(bytes);
-    auto stream = buffer_ostream(message_stream);
-#else 
     std::error_code EC;
     auto object_file_path = StringRef(object_file_path_ptr, object_file_path_len);
     raw_fd_ostream stream(object_file_path, EC, sys::fs::OF_None);
@@ -810,7 +809,6 @@ extern "C" bool NativityLLVMGenerateMachineCode(Module& module, const char* obje
         return false;
     }
 
-#endif
     legacy::PassManager pass;
     bool result = target_machine->addPassesToEmitFile(pass, stream, nullptr, llvm::CGFT_ObjectFile, false);
     if (result) {
@@ -821,15 +819,41 @@ extern "C" bool NativityLLVMGenerateMachineCode(Module& module, const char* obje
     pass.run(module);
     stream.flush();
     
-    std::vector<const char*> args;
-    args.push_back("ld.lld");
-    args.push_back(object_file_path_ptr);
-    args.push_back("-o");
-    args.push_back(file_path_ptr);
-
-    lld::elf::link(args, llvm::outs(), llvm::errs(), true, false);
-
     return true;
+}
+
+enum class Format {
+    elf = 0,
+    macho = 1,
+    coff = 2,
+};
+
+extern "C" bool NativityLLDLink(Format format, const char** argument_ptr, size_t argument_count, const char** stdout_ptr, size_t* stdout_len, const char** stderr_ptr, size_t* stderr_len)
+{
+    auto arguments = ArrayRef<const char*>(argument_ptr, argument_count);
+    std::string stdout_string;
+    raw_string_ostream stdout_stream(stdout_string);
+
+    std::string stderr_string;
+    raw_string_ostream stderr_stream(stderr_string);
+
+    bool success = false;
+    switch (format) {
+        case Format::elf:
+            success = lld::elf::link(arguments, stdout_stream, stderr_stream, true, false);
+            break;
+        case Format::coff:
+            success = lld::coff::link(arguments, stdout_stream, stderr_stream, true, false);
+        case Format::macho:
+            success = lld::macho::link(arguments, stdout_stream, stderr_stream, true, false);
+        default:
+            break;
+    }
+
+    stream_to_string(stdout_stream, stdout_ptr, stdout_len);
+    stream_to_string(stderr_stream, stderr_ptr, stderr_len);
+
+    return success;
 }
 
 extern "C" bool NativityLLVMCompareTypes(Type* a, Type* b)
