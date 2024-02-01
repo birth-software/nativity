@@ -96,6 +96,22 @@ extern "C" void NativityLLVMBuilderSetCurrentDebugLocation(IRBuilder<>& builder,
     builder.SetCurrentDebugLocation(debug_location);
 }
 
+extern "C" DIExpression* NativityLLVMDebugInfoBuilderCreateExpression(DIBuilder& builder, uint64_t* address, size_t length)
+{
+    auto expr = ArrayRef<uint64_t>(address, length);
+    auto* expression = builder.createExpression(expr);
+    return expression;
+}
+
+extern "C" DIGlobalVariableExpression* NativityLLVMDebugInfoBuilderCreateGlobalVariableExpression(DIBuilder& builder, DIScope* scope, const char* name_ptr, size_t name_len, const char* linkage_name_ptr, size_t linkage_name_len, DIFile* file, unsigned line_number, DIType* type, bool is_local_to_unit, bool is_defined, DIExpression* expression, MDNode* declaration, MDTuple* template_parameters, uint32_t alignment)
+{
+    auto name = StringRef(name_ptr, name_len);
+    auto linkage_name = StringRef(linkage_name_ptr, linkage_name_len);
+    auto annotations = nullptr;
+    auto* global_variable = builder.createGlobalVariableExpression(scope, name, linkage_name, file, line_number, type, is_local_to_unit, is_defined, expression, declaration, template_parameters, alignment, annotations);
+    return global_variable;
+}
+
 extern "C" DILocalVariable* NativityLLVMDebugInfoBuilderCreateParameterVariable(DIBuilder& builder, DIScope* scope, const char* name_ptr, size_t name_len, unsigned argument_index, DIFile* file, unsigned line_number, DIType* type, bool always_preserve, DINode::DIFlags flags)
 {
     assert(isa<DILocalScope>(scope));
