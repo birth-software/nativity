@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Set up Zig
         uses: davidgm94/setup-zig@foo
         with:
@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Set up Zig
         uses: davidgm94/setup-zig@foo
         with:
@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Set up Zig
         uses: davidgm94/setup-zig@foo
         with:
@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Set up Zig
         uses: davidgm94/setup-zig@foo
         with:
