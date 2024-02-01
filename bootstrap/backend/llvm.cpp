@@ -324,6 +324,11 @@ extern "C" DISubprogram* NativityLLVMFunctionGetSubprogram(Function& function)
     return subprogram;
 }
 
+extern "C" void NativityLLVMGlobalVariableSetInitializer(GlobalVariable& global_variable, Constant* constant_initializer)
+{
+    global_variable.setInitializer(constant_initializer);
+}
+
 extern "C" Constant* NativityLLVMConstantStruct(StructType* struct_type, Constant** constant_ptr, size_t constant_count)
 {
     auto constants = ArrayRef<Constant*>(constant_ptr, constant_count);

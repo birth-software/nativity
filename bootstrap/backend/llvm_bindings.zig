@@ -116,3 +116,4 @@ pub extern fn NativityLLVMCreatePhiNode(type: *LLVM.Type, reserved_value_count: 
 
 pub extern fn NativityLLVMAllocatGetAllocatedType(alloca: *LLVM.Value.Instruction.Alloca) *LLVM.Type;
 pub extern fn NativityLLVMValueToAlloca(value: *LLVM.Value) ?*LLVM.Value.Instruction.Alloca;
+pub extern fn NativityLLVMGlobalVariableSetInitializer(global_variable: *LLVM.Value.Constant.GlobalVariable, constant_initializer: *LLVM.Value.Constant) void;

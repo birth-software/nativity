@@ -5,7 +5,6 @@ pub fn build(b: *std.Build) !void {
     const self_hosted_ci = b.option(bool, "self_hosted_ci", "This option enables the self-hosted CI behavior") orelse false;
     const third_party_ci = b.option(bool, "third_party_ci", "This option enables the third-party CI behavior") orelse false;
     const is_ci = self_hosted_ci or third_party_ci;
-    _ = is_ci; // autofix
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
     var target_query = b.standardTargetOptionsQueryOnly(.{});
@@ -76,9 +75,9 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimization,
     });
-    // compiler.formatted_panics = false;
-    // compiler.root_module.unwind_tables = false;
-    // compiler.root_module.omit_frame_pointer = false;
+    compiler.formatted_panics = is_ci;
+    compiler.root_module.unwind_tables = is_ci;
+    compiler.root_module.omit_frame_pointer = false;
     compiler.want_lto = false;
 
     compiler.linkLibC();

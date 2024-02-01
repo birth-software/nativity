@@ -28,12 +28,12 @@ const ArgumentParsingError = error{
     main_source_file_not_found,
 };
 
-fn reportUnterminatedArgumentError(string: []const u8) noreturn {
-    std.debug.panic("Unterminated argument: {s}", .{string});
+fn todo() noreturn {
+    @panic("todo");
 }
 
-pub fn foo(context: *const Context) !Descriptor {
-    _ = context; // autofix
+fn reportUnterminatedArgumentError(string: []const u8) noreturn {
+    std.debug.panic("Unterminated argument: {s}", .{string});
 }
 
 pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
@@ -234,133 +234,6 @@ pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
     try unit.compile(context);
 }
 
-pub const Intrinsic = struct{
-    kind: Kind,
-    type: Type.Index,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace @This().List.Index;
-
-    // Each time an enum is added here, a corresponding insertion in the initialization must be made
-    pub const Kind = union(Id) {
-        @"asm", //this is processed separately as it need special parsing
-        cast: Value.Index,
-        enum_to_int: Value.Index,
-        @"error",
-        int_to_pointer: Value.Index,
-        import,
-        min,
-        size,
-        sign_extend: Value.Index,
-        syscall: []const Value.Index,
-        zero_extend: Value.Index,
-    };
-
-    pub const Id = enum{
-        @"asm", //this is processed separately as it need special parsing
-        cast,
-        enum_to_int,
-        @"error",
-        int_to_pointer,
-        import,
-        min,
-        size,
-        sign_extend,
-        syscall,
-        zero_extend,
-    };
-};
-
-pub const BinaryOperation = struct{
-    left: Value.Index,
-    right: Value.Index,
-    type: Type.Index,
-    id: Id,
-
-    pub const Id = enum {
-        add,
-        sub,
-        mul,
-        div,
-        mod,
-        bit_and,
-        bit_xor,
-        bit_or,
-        shift_left,
-        shift_right,
-        compare_equal,
-        compare_not_equal,
-        compare_greater,
-        compare_greater_equal,
-        compare_less,
-        compare_less_equal,
-    };
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-};
-
-pub const Assignment = struct {
-    destination: Value.Index,
-    source: Value.Index,
-    operation: ?BinaryOperation.Id,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-};
-
-pub const Call = struct {
-    value: Value.Index,
-    arguments: []const Value.Index,
-    type: Type.Index,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-};
-
-pub const Return = struct {
-    value: Value.Index,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-};
-
-pub const InlineAssembly = struct {
-    instructions: []const InlineAssembly.Instruction.Index,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-
-    pub const Instruction = struct {
-        id: u32,
-        operands: []const Operand,
-
-        pub const List = BlockList(@This(), enum{});
-        pub usingnamespace @This().List.Index;
-    };
-
-    pub const Operand = union(enum) {
-        register: u32,
-        number_literal: u64,
-        value_index: Value.Index,
-    };
-
-    pub const x86_64 = struct {
-        pub const Instruction = enum {
-            @"and",
-            call,
-            mov,
-            xor,
-        };
-
-        pub const Register = enum {
-            ebp,
-            rsp,
-            rdi,
-        };
-    };
-};
-
 fn realpathAlloc(allocator: Allocator, pathname: []const u8) ![]const u8 {
     var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const realpathInStack = try std.os.realpath(pathname, &path_buffer);
@@ -446,7 +319,7 @@ pub fn log(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger
 }
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
-    const print_stack_trace = true;
+    const print_stack_trace = false;
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {
@@ -466,7 +339,7 @@ const TypeCheckSwitchEnums = struct {
 };
 
 const ImportFileResult = struct {
-    index: File.Index,
+    index: Debug.File.Index,
     is_new: bool,
 };
 
@@ -475,129 +348,6 @@ const ImportPackageResult = struct {
     is_package: bool,
 };
 
-pub const Value = union(enum) {
-    undefined,
-    @"unreachable",
-    unresolved: Node.Index,
-    copy: Value.Index,
-    type: Type.Index,
-    declaration: Declaration.Index,
-    bool: bool,
-    reference: Declaration.Index,
-    intrinsic: Intrinsic.Index,
-    unary_operation: UnaryOperation.Index,
-    binary_operation: BinaryOperation.Index,
-    assignment: Assignment.Index,
-    integer: Integer,
-    enum_field: Enum.Field.Index,
-    block: Block.Index,
-    function_definition: Function.Definition.Index,
-    @"return": Return.Index,
-    call: Call.Index,
-    inline_assembly: InlineAssembly.Index,
-
-    pub const List = BlockList(@This(), Common);
-    pub usingnamespace List.Index;
-
-    const Common = enum{
-        undefined,
-        @"unreachable",
-        bool_false,
-        bool_true,
-
-        const map = std.EnumArray(@This(), Value).init(.{
-            .undefined = .undefined,
-            .@"unreachable" = .@"unreachable",
-            .bool_false = .{
-                .bool = false,
-            },
-            .bool_true = .{
-                .bool = true,
-            },
-        });
-    };
-
-    pub const Integer = struct {
-        value: u64,
-        type: Type.Index,
-    };
-
-    pub fn isComptime(value: *const Value, unit: *Unit) bool {
-        return Compilation.isComptime(value, unit);
-    }
-
-    pub fn getType(value: *const Value, unit: *Unit) Type.Index {
-        return Compilation.getType(value, unit);
-    }
-};
-
-fn isComptime(value: *const Value, unit: *Unit) bool {
-    const result: bool = switch (value.*) {
-        .type => true,
-        .bool => true,
-        .copy => true,
-        .enum_field => true,
-        .function_definition => true,
-        .intrinsic => |intrinsic_index| switch (unit.intrinsics.get(intrinsic_index).kind) {
-            .cast => |value_index| Compilation.isComptime(unit.values.get(value_index), unit),
-            .int_to_pointer => false,
-            else => |t| @panic(@tagName(t)),
-        },
-        .reference => false,
-        .call => false,
-        else => |t| @panic(@tagName(t)),
-    };
-
-    return result;
-}
-
-fn getType(value: *const Value, unit: *Unit) Type.Index{
-    return switch (value.*) {
-        .type => Type.Index.type,
-        .bool => Type.Index.bool,
-        .copy => |value_index| b: {
-            const v = unit.values.get(value_index);
-            break :b getType(v, unit);
-        },
-        .reference => |declaration_index| b: {
-            const declaration = unit.declarations.get(declaration_index);
-            assert(declaration.type != .null);
-            const declaration_type = unit.unwrapTypeCopy(declaration.type);
-            assert(unit.types.get(declaration_type).* != .unresolved);
-            assert(unit.types.get(declaration_type).* != .copy);
-            break :b declaration_type;
-        },
-        .integer => |integer| integer.type,
-        .enum_field => |enum_field_index| unit.enum_fields.get(enum_field_index).parent,
-        .function_definition => |function_index| unit.function_definitions.get(function_index).type,
-        .call => |call_index| unit.calls.get(call_index).type,
-        else => |t| @panic(@tagName(t)),
-    };
-}
-
-pub const UnaryOperation = struct {
-    value: Value.Index,
-    type: Type.Index,
-    id: Id,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-
-    pub const Id = enum {
-        boolean_not,
-        negation,
-        address_of,
-        pointer_dereference,
-    };
-};
-
-pub const Block = struct{
-    scope: Scope,
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-};
-
-const Compilation = @This();
 
 pub const Type = union(enum) {
     void,
@@ -605,12 +355,10 @@ pub const Type = union(enum) {
     type,
     comptime_int,
     bool,
-    unresolved: Node.Index,
-    copy: Type.Index,
     @"struct": Struct.Index,
     @"enum": Enum.Index,
     function: Function.Prototype.Index,
-    integer: Integer,
+    integer: Type.Integer,
     pointer: Pointer,
 
     fn getByteSize(ty: *Type, unit: *Unit) u32 {
@@ -621,10 +369,10 @@ pub const Type = union(enum) {
         };
     }
 
-    fn getScope(ty: *Type, unit: *Unit) *Scope {
+    fn getScope(ty: *Type, unit: *Unit) *Debug.Scope {
         return switch (ty.*) {
-            .@"struct" => |struct_index| &unit.structs.get(struct_index).scope,
-            .@"enum" => |enum_index| &unit.enums.get(enum_index).scope,
+            .@"struct" => |struct_index| &unit.structs.get(struct_index).scope.scope,
+            .@"enum" => |enum_index| &unit.enums.get(enum_index).scope.scope,
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -758,45 +506,48 @@ pub const Type = union(enum) {
 
 pub const Instruction = union(enum) {
     argument_declaration: ArgumentDeclaration,
+    block: Debug.Block.Index,
     // TODO
     call: Instruction.Call,
     cast: Cast,
     // TODO: remove?
-    constant_int: Value.Integer,
+    constant_int: struct{
+        value: u64,
+        type: Type.Index,
+    },
     debug_checkpoint: DebugCheckPoint,
-    global_variable: GlobalVariable.Index,
+    global: *Debug.Declaration.Global,
     inline_assembly: InlineAssembly.Index,
     integer_binary_operation: Instruction.IntegerBinaryOperation,
-    // TODO: delete
+    // TODO: should we join these two?
     load: Load,
-    load_instruction: LoadInstruction,
-    load_global: LoadGlobal,
     pop_scope: Instruction.Scope,
     push_scope: Instruction.Scope,
-    ret: Instruction.Index,
+    ret: V,
     ret_void,
     stack_slot: Instruction.StackSlot,
     store: Store,
     syscall: Syscall,
     @"unreachable",
 
+
     const Syscall = struct{
-        arguments: []const Instruction.Index,
+        arguments: []const V,
     };
 
     const Callable = union(enum) {
-        function_definition: Function.Definition.Index,
+        function_definition: *Debug.Declaration.Global,
     };
 
     const Call = struct{
         callable: Callable,
         function_type: Type.Index,
-        arguments: []const Instruction.Index,
+        arguments: []const V,
     };
 
     const IntegerBinaryOperation = struct{
-        left: Instruction.Index,
-        right: Instruction.Index,
+        left: V,
+        right: V,
         id: Id,
         signedness: Type.Integer.Signedness,
 
@@ -807,8 +558,8 @@ pub const Instruction = union(enum) {
     };
 
     const Scope = struct {
-        old: *Compilation.Scope,
-        new: *Compilation.Scope,
+        old: *Debug.Scope,
+        new: *Debug.Scope,
     };
 
     const ArgumentDeclaration = struct{
@@ -818,7 +569,7 @@ pub const Instruction = union(enum) {
 
     const Cast = struct {
         id: Cast.Id,
-        value: Value.Index,
+        value: V,
         type: Type.Index,
 
         const Id = enum{
@@ -826,25 +577,18 @@ pub const Instruction = union(enum) {
             int_to_pointer,
             sign_extend,
             zero_extend,
+            pointer_var_to_const,
         };
     };
 
     const DebugCheckPoint = struct{
-        scope: *Compilation.Scope,
+        scope: *Debug.Scope,
         line: u32,
         column: u32,
     };
 
     const Load = struct{
-        value: Value.Index,
-    };
-
-    const LoadGlobal = struct{
-        value: GlobalVariable.Index,
-    };
-
-    const LoadInstruction = struct{
-        value: Instruction.Index,
+        value: V,
     };
 
     const StackSlot = struct{
@@ -853,8 +597,8 @@ pub const Instruction = union(enum) {
 
     const Store = struct{
         // TODO:
-        destination: Instruction.Index,
-        source: Instruction.Index,
+        destination: V,
+        source: V,
     };
 
     pub const List = BlockList(@This(), enum{});
@@ -875,31 +619,32 @@ pub const Function = struct{
     pub const Attribute = enum{
         cc,
         naked,
-        @"export",
         @"extern",
     };
 
     pub const Definition = struct{
-        scope: Scope,
-        symbol: GlobalSymbol,
+        scope: Debug.Scope.Function,
         basic_blocks: ArrayList(BasicBlock.Index) = .{},
         // TODO: make this more efficient
-        declarations: AutoArrayHashMap(Declaration.Index, Instruction.Index) = .{},
-        argument_map: AutoArrayHashMap(Declaration.Index, Instruction.Index) = .{},
         type: Type.Index,
-        body: Value.Index,
+        body: Debug.Block.Index,
 
         pub const List = BlockList(@This(), enum{});
         pub usingnamespace @This().List.Index;
+    };
+
+    const CallingConvention = enum{
+        c,
+        auto,
     };
 
     pub const Prototype = struct {
         argument_types: []const Type.Index,
         return_type: Type.Index,
         attributes: Attributes,
+        calling_convention: CallingConvention,
 
         const Attributes = struct{
-            @"export": bool,
             naked: bool,
         };
 
@@ -911,34 +656,14 @@ pub const Function = struct{
 
 const Struct = struct{
     fields: ArrayList(Field) = .{},
-    scope: Scope,
+    scope: Debug.Scope.Global,
     backing_type: Type.Index,
 
     const Field = struct{
         name: u32,
         type: u32,
-        value: Value.Index,
+        value: V.Comptime,
     };
-
-    const List = BlockList(@This(), enum{});
-    pub usingnamespace @This().List.Index;
-};
-
-pub const GlobalSymbol = struct{
-    name: u32,
-    type: Type.Index,
-    kind: Kind,
-
-    const Kind = enum{
-        code,
-        data,
-    };
-};
-
-pub const GlobalVariable = struct{
-    symbol: GlobalSymbol,
-    mutability: Mutability,
-    value: Value.Index,
 
     const List = BlockList(@This(), enum{});
     pub usingnamespace @This().List.Index;
@@ -960,92 +685,179 @@ pub const Context = struct {
     }
 };
 
-pub const File = struct {
-    relative_path: []const u8,
-    package: *Package,
-    source_code: []const u8 = &.{},
-    status: Status = .not_loaded,
-    lexer: lexer.Result = undefined,
-    parser: parser.Result = undefined,
-    value: Value.Index = .null,
-    type: Type.Index = .null,
-    scope: Scope,
-
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
-
-    pub const Status = enum {
-        not_loaded,
-        loaded_into_memory,
-        lexed,
-        parsed,
-    };
-};
-
-pub const Scope = struct{
-    declarations: AutoArrayHashMap(u32, Declaration.Index) =.{},
-    parent: ?*Scope = null,
-    file: File.Index,
-    line: u32,
-    column: u32,
-    kind: Kind,
-    local: bool,
-    level: u8,
-
-    const Lookup = struct{
-        scope: *Scope,
-        declaration: Declaration.Index,
-    };
-
-    fn lookupDeclaration(s: *Scope, name: u32, look_in_parent_scopes: bool) ?Lookup{
-        var scope_it: ?*Scope = s;
-        while (scope_it) |scope| : (scope_it = scope.parent) {
-            if (scope.declarations.get(name)) |declaration| {
-                return Lookup{
-                    .declaration = declaration,
-                    .scope = scope,
-                };
-            }
-
-            if (!look_in_parent_scopes) break;
-        } 
-
-        return null;
-    }
-
-    fn getFile(scope: *Scope, unit: *Unit) File.Index {
-        var scope_it: ?*Scope = scope;
-        while (scope_it) |s| : (scope_it = s.parent) {
-            if (s.kind == .file) {
-                const file = @fieldParentPtr(File, "scope", s);
-                const file_index = unit.files.indexOf(file);
-                return file_index;
-            }
-        } else @panic("No parent file scope");
-
-    }
-
-    const Kind = enum{
-        compilation_unit,
-        file,
-        file_container,
-        container,
-        function,// Arguments
-        block,
-    };
-};
-
-pub const Declaration = struct{
-    scope: *Scope,
-    value: Value.Index,
+pub const V = struct{
+    value: union(enum) {
+        unresolved: Node.Index,
+        runtime: Instruction.Index,
+        @"comptime": Comptime,
+        function_reference: *Debug.Declaration.Global,
+    },
     type: Type.Index,
-    line: u32,
-    column: u32,
-    name: u32,
-    mutability: Mutability,
 
-    pub const List = BlockList(@This(), enum{});
-    pub usingnamespace List.Index;
+    const Comptime = union(enum){
+        unresolved: Node.Index,
+        undefined,
+        type: Type.Index,
+        bool: bool,
+        integer: u64,
+        enum_value: Enum.Field.Index,
+        function_definition: Function.Definition.Index,
+
+        fn getType(v: Comptime, unit: *Unit) Type.Index{
+            return switch (v) {
+                .type => .type,
+                .bool => .bool,
+                .enum_value => |enum_field_index| unit.enum_fields.get(enum_field_index).parent,
+                .function_definition => |function_definition_index| unit.function_definitions.get(function_definition_index).type,
+                else => |t| @panic(@tagName(t)),
+            };
+        }
+    };
+};
+
+
+pub const Debug = struct{
+    pub const Declaration = struct{
+        scope: *Scope,
+        type: Type.Index,
+        name: u32,
+        line: u32,
+        column: u32,
+        mutability: Mutability,
+        kind: Kind,
+
+        const Kind = enum{
+            global,
+            local,
+            argument,
+        };
+
+        pub const Global = struct{
+            declaration: Declaration,
+            initial_value: V.Comptime,
+            type_node_index: Node.Index,
+            attributes: Attributes,
+
+            const Attributes = std.EnumSet(Attribute);
+
+            pub const Attribute = enum{
+                @"export",
+            };
+
+            pub const List = BlockList(@This(), enum{});
+            pub usingnamespace List.Index;
+
+            pub fn getFunctionDefinitionIndex(global: *Global) Function.Definition.Index{
+                return global.initial_value.function_definition;
+            }
+        };
+
+        pub const Local = struct{
+            declaration: Declaration,
+            pub const List = BlockList(@This(), enum{});
+            pub usingnamespace List.Index;
+        };
+        pub const Argument = struct{
+            declaration: Declaration,
+
+            pub const List = BlockList(@This(), enum{});
+            pub usingnamespace List.Index;
+        };
+    };
+
+    pub const Scope = struct{
+        declarations: AutoArrayHashMap(u32, *Declaration) =.{},
+        parent: ?*Scope = null,
+        file: File.Index,
+        line: u32,
+        column: u32,
+        kind: Kind,
+        local: bool,
+        level: u8,
+
+        const Lookup = struct{
+            scope: *Scope,
+            declaration: *Declaration,
+        };
+
+        const Local = struct{
+            scope: Scope,
+            local_declaration_map: AutoArrayHashMap(*Debug.Declaration.Local, Instruction.Index) = .{},
+        };
+        const Global = struct{
+            scope: Scope,
+        };
+        const Function = struct{
+            scope: Scope,
+            argument_map: AutoArrayHashMap(*Debug.Declaration.Argument, Instruction.Index) = .{},
+        };
+
+        fn lookupDeclaration(s: *Scope, name: u32, look_in_parent_scopes: bool) ?Lookup{
+            var scope_it: ?*Scope = s;
+            while (scope_it) |scope| : (scope_it = scope.parent) {
+                if (scope.declarations.get(name)) |declaration| {
+                    return Lookup{
+                        .declaration = declaration,
+                        .scope = scope,
+                    };
+                }
+
+                if (!look_in_parent_scopes) break;
+            } 
+
+            return null;
+        }
+
+        fn getFile(scope: *Scope, unit: *Unit) File.Index {
+            var scope_it: ?*Scope = scope;
+            while (scope_it) |s| : (scope_it = s.parent) {
+                if (s.kind == .file) {
+                    const file = @fieldParentPtr(File, "scope", s);
+                    const file_index = unit.files.indexOf(file);
+                    return file_index;
+                }
+            } else @panic("No parent file scope");
+
+        }
+
+        const Kind = enum{
+            compilation_unit,
+            file,
+            file_container,
+            container,
+            function,// Arguments
+            block,
+        };
+    };
+
+    pub const Block = struct{
+        scope: Scope.Local,
+        pub const List = BlockList(@This(), enum{});
+        pub usingnamespace List.Index;
+    };
+
+    pub const File = struct {
+        relative_path: []const u8,
+        package: *Package,
+        source_code: []const u8 = &.{},
+        status: Status = .not_loaded,
+        lexer: lexer.Result = undefined,
+        parser: parser.Result = undefined,
+        // value: Value.Index = .null,
+        type: Type.Index = .null,
+        scope: Scope.Global,
+
+        pub const List = BlockList(@This(), enum{});
+        pub usingnamespace List.Index;
+
+        pub const Status = enum {
+            not_loaded,
+            loaded_into_memory,
+            lexed,
+            parsed,
+        };
+    };
+
 };
 
 pub const Mutability = enum(u1) {
@@ -1053,21 +865,277 @@ pub const Mutability = enum(u1) {
     @"var",
 };
 
+pub const IntrinsicId = enum{
+    @"asm", //this is processed separately as it need special parsing
+    cast,
+    enum_to_int,
+    @"error",
+    int_to_pointer,
+    import,
+    min,
+    size,
+    sign_extend,
+    syscall,
+    zero_extend,
+};
+
+pub const BinaryOperationId = enum {
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    bit_and,
+    bit_xor,
+    bit_or,
+    shift_left,
+    shift_right,
+    compare_equal,
+    compare_not_equal,
+    compare_greater,
+    compare_greater_equal,
+    compare_less,
+    compare_less_equal,
+};
+
 pub const Builder = struct {
-    current_scope: *Scope,
-    current_file: File.Index = .null,
+    current_scope: *Debug.Scope,
+    current_file: Debug.File.Index = .null,
     current_function: Function.Definition.Index = .null,
     current_basic_block: BasicBlock.Index = .null,
     last_check_point: struct{
         line: u32 = 0,
         column: u32 = 0,
-        scope: ?*Scope = null,
+        scope: ?*Debug.Scope = null,
     } = .{},
     generate_debug_info: bool,
     emit_ir: bool,
 
+    fn resolveIntrinsic(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) anyerror!V {
+        const node = unit.getNode(node_index);
+        const intrinsic_id: IntrinsicId = @enumFromInt(Node.unwrap(node.right));
+        const argument_node_list = unit.getNodeList(node.left);
 
-    fn pushScope(builder: *Builder, unit: *Unit, context: *const Context, new_scope: *Scope) !void {
+        switch (intrinsic_id) {
+            .import => {
+                const file_index = try builder.resolveImport(unit, context, type_expect, argument_node_list);
+                const file = unit.files.get(file_index);
+                return .{
+                    .value = .{
+                        .@"comptime" = .{
+                            .type = file.type,
+                        },
+                    },
+                    .type = .type,
+                };
+            },
+            .@"asm" => {
+                const architecture = InlineAssembly.x86_64;
+
+                var instructions = try ArrayList(InlineAssembly.Instruction.Index).initCapacity(context.allocator, argument_node_list.len);
+
+                for (argument_node_list) |assembly_statement_node_index| {
+                    const assembly_statement_node = unit.getNode(assembly_statement_node_index);
+                    const instruction_name = unit.getExpectedTokenBytes(assembly_statement_node.token, .identifier);
+                    const instruction = inline for (@typeInfo(architecture.Instruction).Enum.fields) |instruction_enum_field| {
+                        if (equal(u8, instruction_name, instruction_enum_field.name)) {
+                            break @field(architecture.Instruction, instruction_enum_field.name);
+                        }
+                    } else unreachable;
+                    const operand_nodes = unit.getNodeList(assembly_statement_node.left);
+
+                    var operands = try ArrayList(InlineAssembly.Operand).initCapacity(context.allocator, operand_nodes.len);
+
+                    for (operand_nodes) |operand_node_index| {
+                        const operand_node = unit.getNode(operand_node_index);
+                        const operand: InlineAssembly.Operand = switch (operand_node.id) {
+                            .assembly_register => blk: {
+                                const register_name = unit.getExpectedTokenBytes(operand_node.token, .identifier);
+
+                                const register = inline for (@typeInfo(architecture.Register).Enum.fields) |register_enum_field| {
+                                    if (equal(u8, register_name, register_enum_field.name)) {
+                                        break @field(architecture.Register, register_enum_field.name);
+                                    }
+                                } else unreachable;
+                                break :blk .{
+                                    .register = @intFromEnum(register),
+                                };
+                            },
+                            .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(operand_node.token, .number_literal))) {
+                                .int => |integer| .{
+                                    .number_literal = integer,
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            .identifier => b: {
+                                const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, operand_node_index, .left);
+
+                                break :b .{
+                                    .value = result,
+                                };
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        };
+
+                        operands.appendAssumeCapacity(operand);
+                    }
+
+                    const instruction_index = try unit.assembly_instructions.append(context.allocator, .{
+                        .id = @intFromEnum(instruction),
+                        .operands = operands.items,
+                    });
+
+                    instructions.appendAssumeCapacity(instruction_index);
+                }
+
+                const inline_assembly = try unit.inline_assembly.append(context.allocator, .{
+                    .instructions = instructions.items,
+                });
+
+                const inline_asm = try unit.instructions.append(context.allocator, .{
+                    .inline_assembly = inline_assembly,
+                });
+                try builder.appendInstruction(unit, context, inline_asm);
+
+                return .{
+                    .value = .{
+                        .runtime = inline_asm,
+                    },
+                    // TODO: WARN fix
+                    .type = .@"noreturn",
+                };
+            },
+            .cast => {
+                assert(argument_node_list.len == 1);
+                const argument_node_index = argument_node_list[0];
+                // TODO: depends? .right is not always the right choice
+                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_index, .right);
+
+                const source_type = unit.types.get(v.type);
+                                 //
+                const cast_id: Instruction.Cast.Id = switch (type_expect) {
+                    .type => |type_index| b: {
+                        assert(type_index != v.type);
+                        const destination_type = unit.types.get(type_index);
+                        switch (destination_type.*) {
+                            .pointer => |destination_pointer| {
+                                _ = destination_pointer; // autofix
+                                switch (source_type.*) {
+                                    .integer => |source_integer| {
+                                        _ = source_integer; // autofix
+                                                            // TODO:
+                                        break :b .int_to_pointer;
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+                            },
+                            .integer => |destination_integer| {
+                                switch (source_type.*) {
+                                    .@"enum" => {
+                                        break :b .enum_to_int;
+                                    },
+                                    .integer => |source_integer| {
+                                        if (destination_integer.bit_count < source_integer.bit_count) {
+                                            unreachable;
+                                        } else if (destination_integer.bit_count > source_integer.bit_count) {
+                                            assert(destination_integer.signedness != source_integer.signedness);
+                                            break :b switch (destination_integer.signedness) {
+                                                .signed => .sign_extend,
+                                                .unsigned => .sign_extend,
+                                            };
+                                        } else {
+                                            unreachable;
+                                        }
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+
+                const instruction = try unit.instructions.append(context.allocator, .{
+                    .cast = .{
+                        .value = v,
+                        .type = type_expect.type,
+                        .id = cast_id,
+                    },
+                });
+                
+                try builder.appendInstruction(unit, context, instruction);
+
+                return .{
+                    .value = .{
+                        .runtime = instruction,
+                    },
+                    .type = type_expect.type,
+                };
+            },
+            .size => {
+                assert(argument_node_list.len == 1);
+                const argument_type_index = try builder.resolveType(unit, context, argument_node_list[0]);
+                const argument_type = unit.types.get(argument_type_index);
+                const argument_size = argument_type.getByteSize(unit);
+
+                const integer_value = argument_size;
+                const integer_type = switch (type_expect) {
+                    .type => |type_index| b: {
+                        const ty = unit.types.get(type_index);
+                        break :b switch (ty.*) {
+                            .integer => type_index,
+                            else => |t| @panic(@tagName(t)),
+                        };
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+
+                return .{
+                    .value = .{
+                        .@"comptime" = .{
+                            .integer = integer_value,
+                        },
+                    },
+                    .type = integer_type,
+                };
+            },
+            .syscall => {
+                if (argument_node_list.len > 0 and argument_node_list.len <= 6 + 1) {
+                    var instruction_list = try ArrayList(V).initCapacity(context.allocator, argument_node_list.len);
+                    // TODO
+                    const arg_type_expect = Type.Expect{
+                        .type = Type.Index.usize,
+                    };
+
+                    for (argument_node_list) |argument_node_index| {
+                        const argument_value = try builder.resolveRuntimeValue(unit, context, arg_type_expect, argument_node_index, .right);
+                        instruction_list.appendAssumeCapacity(argument_value);
+                    }
+
+                    const syscall = try unit.instructions.append(context.allocator, .{
+                        .syscall = .{
+                            .arguments = instruction_list.items,
+                        },
+                    });
+
+                    try builder.appendInstruction(unit, context, syscall);
+
+                    return .{
+                        .value = .{
+                            .runtime = syscall,
+                        },
+                        .type = Type.Index.usize,
+                    };
+                } else {
+                    @panic("Syscall argument mismatch");
+                }
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+    }
+
+    fn pushScope(builder: *Builder, unit: *Unit, context: *const Context, new_scope: *Debug.Scope) !void {
         const old_scope = builder.current_scope;
 
         if (builder.current_basic_block != .null) {
@@ -1109,55 +1177,27 @@ pub const Builder = struct {
         _ = try builder.analyzeFile(unit, context, file_index);
     }
 
-    fn analyzeFile(builder: *Builder, unit: *Unit, context: *const Context, file_index: File.Index) !void {
+    fn analyzeFile(builder: *Builder, unit: *Unit, context: *const Context, file_index: Debug.File.Index) !void {
         const old_scope = builder.current_scope;
-        builder.current_scope = &unit.scope;
+        builder.current_scope = &unit.scope.scope;
         defer builder.current_scope = old_scope;
 
         const file = unit.files.get(file_index);
         assert(file.status == .parsed);
-        assert(file.value == .null);
 
         const previous_file = builder.current_file;
         builder.current_file = file_index;
         defer builder.current_file = previous_file;
 
-        try builder.pushScope(unit, context, &file.scope);
+        try builder.pushScope(unit, context, &file.scope.scope);
         defer builder.popScope(unit, context) catch unreachable;
 
         const main_node_index = file.parser.main_node_index;
-        const main_node = unit.node_buffer.get(main_node_index);
-        const main_node_list = unit.getNodeList(main_node.left);
 
-
-        // Dummy
-        file.type = try unit.types.append(context.allocator, .{
-            .unresolved = main_node_index,
-        });
-        file.value = try unit.values.append(context.allocator, .{
-            .type = file.type,
-        });
-
-        try builder.resolveContainerType(unit, context, main_node_list, main_node_index, .@"struct", file.type);
+        // File type already assigned
+        _ = try builder.resolveContainerType(unit, context, main_node_index, .@"struct");
+        assert(file.type != .null);
     }
-
-    fn resolveValueAllocate(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) !Value.Index {
-        const value_index = try unit.values.append(context.allocator, .{
-            .unresolved = node_index,
-        });
-        try builder.resolveValue(unit, context, type_expect, value_index);
-        return value_index;
-    }
-
-    const TypeCheckResult = enum {
-        success,
-        zero_extend,
-        sign_extend,
-        take_source,
-        take_expected,
-        optional_wrap,
-        array_coerce_to_slice,
-    };
 
     const CastResult = enum{
         int_to_pointer,
@@ -1165,55 +1205,6 @@ pub const Builder = struct {
         sign_extend,
         zero_extend,
     };
-
-    fn getCastType(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, value_index: Value.Index) !CastResult {
-        _ = builder; // autofix
-        _ = context; // autofix
-        const value_type_index = unit.values.get(value_index).getType(unit);
-        const value_type = unit.types.get(value_type_index);
-
-        return switch (type_expect) {
-            .type => |type_index| {
-                const destination_type = unit.types.get(type_index);
-                switch (destination_type.*) {
-                    .pointer => |destination_pointer| {
-                        _ = destination_pointer; // autofix
-                        switch (value_type.*) {
-                            .integer => |source_integer| {
-                                _ = source_integer; // autofix
-                                // TODO:
-                                return .int_to_pointer;
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        }
-                    },
-                    .integer => |destination_integer| {
-                        switch (value_type.*) {
-                            .@"enum" => {
-                                return .enum_to_int;
-                            },
-                            .integer => |source_integer| {
-                                if (destination_integer.bit_count < source_integer.bit_count) {
-                                    unreachable;
-                                } else if (destination_integer.bit_count > source_integer.bit_count) {
-                                    assert(destination_integer.signedness != source_integer.signedness);
-                                    return switch (destination_integer.signedness) {
-                                        .signed => .sign_extend,
-                                        .unsigned => .sign_extend,
-                                    };
-                                } else {
-                                    unreachable;
-                                }
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        }
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-            },
-            else => |t| @panic(@tagName(t)),
-        };
-    }
 
     const TokenDebugInfo = struct{
         line: u32,
@@ -1275,744 +1266,213 @@ pub const Builder = struct {
         };
     };
 
-    fn resolveIf(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !If {
-        _ = builder; // autofix
-        _ = unit; // autofix
-        _ = context; // autofix
-        _ = node_index; // autofix
+    fn referenceGlobalDeclaration(builder: *Builder, unit: *Unit, context: *const Context, scope: *Debug.Scope, declaration: *Debug.Declaration) !V{
+        // TODO: implement this
+        assert(declaration.kind == .global);
+        const old_context = builder.startContextSwitch(.{
+            .scope = scope,
+            .file = scope.file,
+            .basic_block = .null,
+        });
 
-
-        unreachable;
-    }
-
-    fn referenceDeclaration(builder: *Builder, unit: *Unit, context: *const Context, scope: *Scope, identifier: []const u8, declaration_index: Declaration.Index, value_index: Value.Index) !void {
-        _ = identifier; // autofix
-        const old_file = builder.current_file;
-        builder.current_file = scope.getFile(unit);
-        defer builder.current_file = old_file;
-
-        const old_scope = builder.current_scope;
-        builder.current_scope = scope;
-        defer builder.current_scope = old_scope;
-
-        const old_basic_block = builder.current_basic_block;
-        defer builder.current_basic_block = old_basic_block;
-
-        // We need to switch the current file so that the correct node pointers are picked by the indices into the file buffer
-        const declaration = unit.declarations.get(declaration_index);
-        const declaration_value_index = declaration.value;
-
-        const is_comptime = if (declaration_value_index != .null) b: {
-            const declaration_value = unit.values.get(declaration_value_index);
-
-            switch (declaration_value.*) {
-                .unresolved => {
-                    switch (declaration.type) {
-                        .null => {},
-                        else => {
-                            if (scope.kind == .function) {
-                                @panic("arguments are not supposed to be here");
-                            }
-
-                            try builder.resolveType(unit, context, declaration.type);
-                        },
-                    }
-
-                    const type_expect = switch (declaration.type) {
-                        .null => .none,
-                        else => Type.Expect{
-                            .type = declaration.type,
-                        },
-                    };
-
-                    try builder.resolveValue(unit, context, type_expect, declaration_value_index);
-
-                    switch (declaration.type) {
-                        .null => declaration.type = declaration_value.getType(unit),
-                        else => {
-                            const declaration_type = unit.types.get(declaration.type);
-                            assert(declaration_type.* != .unresolved);
-                        },
-                    }
-
-                    switch (unit.values.get(declaration_value_index).*) {
-                        .unresolved => unreachable,
-                        .function_definition => |function_definition_index| {
-                            const function_definition = unit.function_definitions.get(function_definition_index);
-                            function_definition.symbol = .{
-                                .type = declaration.type,
-                                .name = declaration.name,
-                                .kind = .code,
-                            };
-
-                            try unit.function_declaration_map.putNoClobber(context.allocator, function_definition_index, declaration_index);
-                        },
-                        .type => |type_index| {
-                            switch (unit.types.get(type_index).*) {
-                                .unresolved, .copy => unreachable,
-                                else => {},
-                            }
-                            try unit.type_declaration_map.putNoClobber(context.allocator, type_index, declaration_index);
-                        },
-                        else => {},
-                    }
-                },
-                else => {},
-            }
-
-            assert(declaration_value.* != .declaration);
-            assert(declaration_value.* != .unresolved);
-
-            const result = if (declaration.mutability == .@"const" and declaration_value.isComptime(unit)) blk: {
-                if (declaration_value_index != value_index) {
-                    unit.copyValue(value_index, declaration.value);
-                } else {
-                    std.debug.print("Same value, not copying...\n", .{});
-                }
-
-                break :blk true;
-            } else blk: {
-                // Here we need to declare global variables that go into the executable
-                switch (scope.kind) {
-                    .block,
-                    .function,
-                    => {},
-                    .file_container => {
-                        if (unit.global_variable_map.get(declaration_index)) |_| {
-                            //
-                        } else {
-                            switch (unit.values.get(declaration.value).*) {
-                                .integer => {},
-                                .undefined => {},
-                                else => |t| @panic(@tagName(t)),
-                            }
-                            const global_variable = try unit.global_variables.append(context.allocator, .{
-                                .symbol = .{
-                                    .name = declaration.name,
-                                    .type = declaration.type,
-                                    .kind = .data,
-                                },
-                                .mutability = declaration.mutability,
-                                .value = declaration.value,
-                            });
-                            try unit.global_variable_map.putNoClobber(context.allocator, declaration_index, global_variable);
-                        }
+        const global_declaration = @fieldParentPtr(Debug.Declaration.Global, "declaration", declaration);
+        switch (global_declaration.initial_value) {
+            .unresolved => |declaration_node_index| {
+                assert(declaration.type == .null);
+                switch (global_declaration.type_node_index) {
+                    .null => {},
+                    else => |type_node_index| {
+                        declaration.type = try builder.resolveType(unit, context, type_node_index);
                     },
-                    else => |t| @panic(@tagName(t)),
                 }
 
-                break :blk false;
-            };
-
-            break :b result;
-        } else false;
-
-        if (!is_comptime) {
-            if (declaration.value != value_index) {
-                const value = unit.values.get(value_index);
-                value.* = .{
-                    .reference = declaration_index,
+                const type_expect = switch (declaration.type) {
+                    .null => Type.Expect.none,
+                    else => Type.Expect{
+                        .type = declaration.type,
+                    },
                 };
 
-                // Map the value to an instruction
-                switch (declaration.scope.kind) {
-                    .function => {
-                        const function = unit.function_definitions.get( builder.current_function);
-                        const declaration_instruction = function.argument_map.get(declaration_index).?;
-                        const load = try unit.instructions.append(context.allocator, .{
-                            .load_instruction = .{
-                                .value = declaration_instruction,
-                            },
-                        });
-                        try builder.appendInstruction(unit, context, load);
+                global_declaration.initial_value = try builder.resolveComptimeValue(unit, context, type_expect, global_declaration.attributes, declaration_node_index);
 
-                        try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, load);
+                switch (declaration.type) {
+                    .null => {
+                        assert(global_declaration.type_node_index == .null);
+                        declaration.type = global_declaration.initial_value.getType(unit);
                     },
-                    .block => {
-                        const function = unit.function_definitions.get( builder.current_function);
-                        const declaration_instruction = function.declarations.get(declaration_index).?;
-                        const load = try unit.instructions.append(context.allocator, .{
-                            .load_instruction = .{
-                                .value = declaration_instruction,
-                            },
-                        });
-                        try builder.appendInstruction(unit, context, load);
-
-                        try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, load);
-                    },
-                    .file_container => {
-                        const global_variable_index = unit.global_variable_map.get(declaration_index).?;
-                        const load = try unit.instructions.append(context.allocator, .{
-                            .load_global = .{
-                                .value = global_variable_index,
-                            },
-                        });
-                        try builder.appendInstruction(unit, context, load);
-                        try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, load);
-                    },
-                    else => |t| @panic(@tagName(t)),
+                    else => {},
                 }
-            } else unreachable;
+
+                switch (global_declaration.initial_value) {
+                    .function_definition => {
+                        try unit.code_to_emit.append(context.allocator, global_declaration);
+                    },
+                    else => {
+                        if (global_declaration.attributes.contains(.@"export") or declaration.mutability == .@"var") {
+                            try unit.data_to_emit.append(context.allocator, global_declaration);
+                        }
+                    },
+                }
+            },
+            else => {},
+        }
+
+        builder.endContextSwitch(old_context);
+
+        switch (global_declaration.initial_value) {
+            .function_definition => {
+                return .{
+                    .value = .{
+                        .function_reference = global_declaration,
+                    },
+                    .type = global_declaration.declaration.type,
+                };
+            },
+            else => {
+                if (declaration.mutability == .@"const") {
+                    return .{
+                        .value = .{
+                            .@"comptime" = global_declaration.initial_value,
+                        },
+                        .type = declaration.type,
+                    };
+                } else {
+                    const instruction = try unit.instructions.append(context.allocator, .{
+                        .global = global_declaration,
+                    });
+                    return .{
+                        .value = .{
+                            .runtime = instruction,
+                        },
+                        .type = declaration.type,// TODO: fetch proper type
+                    };
+                }
+            },
         }
     }
 
-    fn resolveValue(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, value_index: Value.Index) anyerror!void {
-        const value = unit.values.get(value_index);
-        const node_index = switch (value.*) {
-            .unresolved => |ni| ni,
-            else => |t| @panic(@tagName(t)),
+    const ContextSwitch = struct{
+        scope: *Debug.Scope,
+        file: Debug.File.Index,
+        basic_block: BasicBlock.Index,
+    };
+
+    fn startContextSwitch(builder: *Builder, new: ContextSwitch) ContextSwitch {
+        const old = ContextSwitch{
+            .scope = builder.current_scope,
+            .file = builder.current_file,
+            .basic_block = builder.current_basic_block,
         };
 
+        builder.current_scope = new.scope;
+        builder.current_basic_block = new.basic_block;
+        builder.current_file = new.file;
+
+        return old;
+    }
+
+    fn endContextSwitch(builder: *Builder, old: ContextSwitch) void {
+        builder.current_scope = old.scope;
+        builder.current_basic_block = old.basic_block;
+        builder.current_file = old.file;
+    }
+
+    fn resolveImport(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, arguments: []const Node.Index) !Debug.File.Index {
+        switch (type_expect) {
+            .none => {},
+            .type => |type_index| if (type_index != .type) @panic("expected type"),
+        }
+        if (arguments.len != 1) {
+            @panic("Import argument mismatch");
+        }
+
+        const argument_node_index = arguments[0];
+        const argument_node = unit.getNode(argument_node_index);
+        if (argument_node.id != .string_literal) {
+            @panic("Import expected a string literal as an argument");
+        }
+
+        const string_literal_bytes = unit.tokenStringLiteral(argument_node.token);
+
+        const import_file = try unit.importFile(context, builder.current_file, string_literal_bytes);
+
+        if (import_file.file.is_new) {
+            const new_file_index = import_file.file.index;
+            try unit.generateAbstractSyntaxTreeForFile(context, new_file_index);
+            try builder.analyzeFile(unit, context, new_file_index);
+            logln(.compilation, .import, "Done analyzing {s}!", .{string_literal_bytes});
+        }
+
+        const file = unit.files.get(import_file.file.index);
+        assert(file.type != .null);
+
+        return import_file.file.index;
+    }
+
+    fn resolveComptimeValue(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, global_attributes: Debug.Declaration.Global.Attributes, node_index: Node.Index) anyerror!V.Comptime{
         const node = unit.getNode(node_index);
-
         switch (node.id) {
-            .block => {
-                const token_debug_info = builder.getTokenDebugInfo(unit, node.token);
-                const block_index = try unit.blocks.append(context.allocator, .{
-                    .scope = .{
-                        .line = token_debug_info.line,
-                        .column = token_debug_info.column,
-                        .kind = .block,
-                        .level = builder.current_scope.level + 1,
-                        .local = builder.current_scope.local,
-                        .file = builder.current_file,
-                    },
-                });
-
-                value.* = .{
-                    .block = block_index,
-                };
-
-                const block = unit.blocks.get(block_index);
-                try builder.pushScope(unit, context, &block.scope);
-                defer builder.popScope(unit, context) catch unreachable;
-
-                const statement_node_list = unit.getNodeList(node.left);
-
-                for (statement_node_list) |statement_node_index| {
-                    const statement_node = unit.getNode(statement_node_index);
-
-                    try builder.insertDebugCheckPoint(unit, context, statement_node.token);
-
-                    switch (statement_node.id) {
-                        .assign,
-                        .add_assign,
-                        .if_else,
-                        .@"return",
-                        .intrinsic,
-                        .constant_symbol_declaration,
-                        .variable_symbol_declaration,
-                        .call,
-                        .@"switch",
-                        .@"unreachable",
-                        => {
-                            const statement_value_index = try builder.resolveValueAllocate(unit, context, Type.Expect { .type = .void }, statement_node_index);
-                            assert(unit.values.get(statement_value_index).* != .unresolved);
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
-                }
-            },
-            .assign, .add_assign => {
-                switch (type_expect) {
-                    .none => {},
-                    .type => |original_type_index| {
-                        const type_index = unit.unwrapTypeCopy(original_type_index);
-                        assert(type_index == .void);
-                    },
-                }
-
-                if (unit.getNode(node.left).id == .discard) {
-                    value.* = .{
-                        .unresolved = node.right,
-                    };
-
-                    try builder.resolveValue(unit, context, Type.Expect.none, value_index);
-                } else {
-                    const left = try builder.resolveValueAllocate(unit, context, Type.Expect.none, node.left);
-                    const left_value = unit.values.get(left);
-                    const is_left_comptime = left_value.isComptime(unit);
-                    const left_type = left_value.getType(unit);
-
-                    switch (is_left_comptime) {
-                        true => unreachable,
-                        false => {
-                            const right = try builder.resolveValueAllocate(unit, context, Type.Expect{ .type = left_type }, node.right);
-                            const right_value = unit.values.get(right);
-                            _ = right_value; // autofix
-                            const right_i = unit.value_to_instruction_map.get(right).?;
-
-                            const assignment = Assignment{
-                                .destination = left,
-                                .source = right,
-                                .operation = switch (node.id) {
-                                    .assign => null,
-                                    .add_assign => .add,
-                                    else => |t| @panic(@tagName(t)),
-                                },
-                            };
-                            const assignment_index = try unit.assignments.append(context.allocator, assignment);
-                            value.* = .{
-                                .assignment = assignment_index,
-                            };
-                            // TODO: get better at this
-                            const store = try unit.instructions.append(context.allocator, .{
-                                .store = .{
-                                    // TODO: do this better in a more efficient way
-                                    .destination = switch (left_value.*) {
-                                        .reference => |declaration_index| b: {
-                                            const declaration = unit.declarations.get(declaration_index);
-                                            switch (declaration.scope.kind) {
-                                                .file_container => {
-                                                    const global_variable_index = unit.global_variable_map.get(declaration_index).?;
-                                                    const instruction = try unit.instructions.append(context.allocator, .{
-                                                        .global_variable = global_variable_index,
-                                                    });
-                                                    break :b instruction;
-                                                },
-                                                .block => {
-                                                    const function_definition = unit.function_definitions.get(builder.current_function);
-                                                    const stack_slot_instruction = function_definition.declarations.get(declaration_index).?;
-                                                    break :b stack_slot_instruction;
-                                                },
-                                                else => |t| @panic(@tagName(t)),
-                                            }
-                                        },
-                                        else => |t| @panic(@tagName(t)),
-                                    },
-                                    .source = right_i,
-                                },
-                            });
-
-                            try builder.appendInstruction(unit, context, store);
-                        },
-                    }
-                }
-            },
-            .identifier => {
-                const identifier = unit.getExpectedTokenBytes(node.token, .identifier);
-
-                const hash = try unit.processIdentifier(context, identifier);
-
-                const look_in_parent_scopes = true;
-                if (builder.current_scope.lookupDeclaration(hash, look_in_parent_scopes)) |lookup| {
-                    const scope = lookup.scope;
-                    const declaration_index = lookup.declaration;
-                    try builder.referenceDeclaration(unit, context, scope, 
-                        identifier, // Field inserted for debugging purposes
-                        declaration_index, value_index);
-                } else {
-                    var scope_it: ?*Scope = builder.current_scope;
-                    const indentation_size = 4;
-                    var indentation: u32 = 0;
-
-                    var file_path: []const u8 = "";
-                    while (scope_it) |scope| : (scope_it = scope.parent) {
-                        for (0..indentation * indentation_size) |_|{
-                            std.debug.print(" ", .{});
-                        }
-                        std.debug.print("> Scope {s} ", .{@tagName(scope.kind)});
-                        switch (scope.kind) {
-                            .compilation_unit => {},
-                            .file_container, .container => {},
-                            .function => {},
-                            .file => {
-                                const file = @fieldParentPtr(File, "scope", scope);
-                                std.debug.print("{s}", .{file.relative_path});
-                                file_path = file.relative_path;
-                            },
-                            .block => {},
-                        }
-
-                        std.debug.print("\n", .{});
-                        indentation += 1;
-                    }
-
-                    std.debug.panic("Identifier '{s}' not found in file {s}", .{identifier, file_path});
-                }
-
-                assert(value.* != .unresolved);
-            },
             .intrinsic => {
-                const intrinsic_id: Intrinsic.Id = @enumFromInt(Node.unwrap(node.right));
                 const argument_node_list = unit.getNodeList(node.left);
-
+                const intrinsic_id: IntrinsicId = @enumFromInt(Node.unwrap(node.right));
                 switch (intrinsic_id) {
                     .import => {
-                        if (argument_node_list.len != 1) {
-                            @panic("Import argument mismatch");
-                        }
-
-                        const argument_node_index = argument_node_list[0];
-                        const argument_node = unit.getNode(argument_node_index);
-                        if (argument_node.id != .string_literal) {
-                            @panic("Import expected a string literal as an argument");
-                        }
-
-                        const string_literal_bytes = unit.tokenStringLiteral(argument_node.token);
-
-                        const import_file = try unit.importFile(context, builder.current_file, string_literal_bytes);
-
-                        if (import_file.file.is_new) {
-                            const new_file_index = import_file.file.index;
-                            try unit.generateAbstractSyntaxTreeForFile(context, new_file_index);
-                            try builder.analyzeFile(unit, context, new_file_index);
-                            logln(.compilation, .import, "Done analyzing {s}!", .{string_literal_bytes});
-                        }
-
-                        const file = unit.files.get(import_file.file.index);
-                        const file_type = unit.types.get(file.type);
-                        assert(file_type.* != .unresolved);
-                        unit.copyValue(value_index, file.value);
-                    },
-                    .@"asm" => {
-                        const architecture = InlineAssembly.x86_64;
-
-                        var instructions = try ArrayList(InlineAssembly.Instruction.Index).initCapacity(context.allocator, argument_node_list.len);
-
-                        for (argument_node_list) |assembly_statement_node_index| {
-                            const assembly_statement_node = unit.getNode(assembly_statement_node_index);
-                            const instruction_name = unit.getExpectedTokenBytes(assembly_statement_node.token, .identifier);
-                            const instruction = inline for (@typeInfo(architecture.Instruction).Enum.fields) |instruction_enum_field| {
-                                if (equal(u8, instruction_name, instruction_enum_field.name)) {
-                                    break @field(architecture.Instruction, instruction_enum_field.name);
-                                }
-                            } else unreachable;
-                            const operand_nodes = unit.getNodeList(assembly_statement_node.left);
-
-                            var operands = try ArrayList(InlineAssembly.Operand).initCapacity(context.allocator, operand_nodes.len);
-
-                            for (operand_nodes) |operand_node_index| {
-                                const operand_node = unit.getNode(operand_node_index);
-                                const operand: InlineAssembly.Operand = switch (operand_node.id) {
-                                    .assembly_register => blk: {
-                                        const register_name = unit.getExpectedTokenBytes(operand_node.token, .identifier);
-
-                                        const register = inline for (@typeInfo(architecture.Register).Enum.fields) |register_enum_field| {
-                                            if (equal(u8, register_name, register_enum_field.name)) {
-                                                break @field(architecture.Register, register_enum_field.name);
-                                            }
-                                        } else unreachable;
-                                        break :blk .{
-                                            .register = @intFromEnum(register),
-                                        };
-                                    },
-                                    .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(operand_node.token, .number_literal))) {
-                                        .int => |integer| .{
-                                            .number_literal = integer,
-                                        },
-                                        else => |t| @panic(@tagName(t)),
-                                    },
-                                    .identifier => .{
-                                        .value_index = try builder.resolveValueAllocate(unit, context, Type.Expect.none, operand_node_index),
-                                    },
-                                    else => |t| @panic(@tagName(t)),
-                                };
-
-                                operands.appendAssumeCapacity(operand);
-                            }
-
-                            const instruction_index = try unit.assembly_instructions.append(context.allocator, .{
-                                .id = @intFromEnum(instruction),
-                                .operands = operands.items,
-                            });
-
-                            instructions.appendAssumeCapacity(instruction_index);
-                        }
-
-                        const inline_assembly = try unit.inline_assembly.append(context.allocator, .{
-                            .instructions = instructions.items,
-                        });
-
-                        const inline_asm = try unit.instructions.append(context.allocator, .{
-                            .inline_assembly = inline_assembly,
-                        });
-                        try builder.appendInstruction(unit, context, inline_asm);
-
-                        try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, inline_asm);
-
-                        value.* = .{
-                            .inline_assembly = inline_assembly,
+                        const file_index = try builder.resolveImport(unit, context, type_expect, argument_node_list);
+                        const file = unit.files.get(file_index);
+                        return .{
+                            .type = file.type,
                         };
-                    },
-                    .cast => {
-                        assert(argument_node_list.len == 1);
-                        const value_to_cast_index = try builder.resolveValueAllocate(unit, context, Type.Expect.none, argument_node_list[0]);
-
-                        const cast_type = try builder.getCastType(unit, context, type_expect, value_to_cast_index);
-                        switch (cast_type) {
-                            .int_to_pointer => {
-                                const intrinsic = try unit.intrinsics.append(context.allocator, .{
-                                    .kind = .{
-                                        .int_to_pointer = value_to_cast_index,
-                                    },
-                                    .type = type_expect.type,
-                                });
-
-                                const instruction = try unit.instructions.append(context.allocator, .{
-                                    .cast = .{
-                                        .id = .int_to_pointer,
-                                        .value = value_to_cast_index,
-                                        .type = type_expect.type,
-                                    },
-                                });
-
-                                try builder.appendInstruction(unit, context, instruction);
-
-                                value.* = .{
-                                    .intrinsic = intrinsic,
-                                };
-
-                                try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, instruction);
-                            },
-                            .enum_to_int => {
-                                const intrinsic = try unit.intrinsics.append(context.allocator, .{
-                                        .kind = .{
-                                            .enum_to_int = value_to_cast_index,
-                                        },
-                                        .type = type_expect.type,
-                                    });
-
-                                const instruction = try unit.instructions.append(context.allocator, .{
-                                    .cast = .{
-                                        .id = .enum_to_int,
-                                        .value = value_to_cast_index,
-                                        .type = type_expect.type,
-                                    },
-                                });
-
-                                try builder.appendInstruction(unit, context, instruction);
-                                try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, instruction);
-
-                                value.* = .{
-                                    .intrinsic = intrinsic,
-                                };
-                            },
-                            .sign_extend => {
-                                const intrinsic = try unit.intrinsics.append(context.allocator, .{
-                                        .kind = .{
-                                            .sign_extend = value_to_cast_index,
-                                        },
-                                        .type = type_expect.type,
-                                    });
-
-                                const instruction = try unit.instructions.append(context.allocator, .{
-                                    .cast = .{
-                                        .id = .sign_extend,
-                                        .value = value_to_cast_index,
-                                        .type = type_expect.type,
-                                    },
-                                });
-
-                                try builder.appendInstruction(unit, context, instruction);
-                                try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, instruction);
-
-                                value.* = .{
-                                    .intrinsic = intrinsic,
-                                };
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        }
-                    },
-                    .size => {
-                        assert(argument_node_list.len == 1);
-                        const argument_type_index = unit.unwrapTypeCopy(try builder.resolveTypeAllocate(unit, context, argument_node_list[0]));
-                        const argument_type = unit.types.get(argument_type_index);
-                        const argument_size = argument_type.getByteSize(unit);
-
-                        const integer = Value.Integer{
-                            .value = argument_size,
-                            .type = switch (type_expect) {
-                                .none => .comptime_int,
-                                .type => |type_index| b: {
-                                    const ty = unit.types.get(type_index);
-                                    break :b switch (ty.*) {
-                                        .integer => type_index,
-                                        else => |t| @panic(@tagName(t)),
-                                    };
-                                },
-                            },
-                        };
-
-                        value.* = .{
-                            .integer = integer,
-                        };
-
-                        const const_int = try unit.getConstantInt(context, integer);
-
-                        try builder.appendInstruction(unit, context, const_int);
-                        // We dont mind clobbering the value
-                        try unit.value_to_instruction_map.put(context.allocator, value_index, const_int);
-                    },
-                    .syscall => {
-                        if (argument_node_list.len > 0 and argument_node_list.len <= 6 + 1) {
-                            var argument_list = try ArrayList(Value.Index).initCapacity(context.allocator, argument_node_list.len);
-                            var instruction_list = try ArrayList(Instruction.Index).initCapacity(context.allocator, argument_node_list.len);
-                            // TODO
-                            const arg_type_expect = Type.Expect{
-                                .type = Type.Index.usize,
-                            };
-
-                            for (argument_node_list) |argument_node_index| {
-                                const argument_value_index = try builder.resolveValueAllocate(unit, context, arg_type_expect, argument_node_index);
-
-                                const argument_value = unit.values.get(argument_value_index);
-                                _ = argument_value; // autofix
-                                const instruction_index = unit.value_to_instruction_map.get(argument_value_index).?;
-
-                                argument_list.appendAssumeCapacity(argument_value_index);
-                                instruction_list.appendAssumeCapacity(instruction_index);
-                            }
-
-                            const intrinsic = try unit.intrinsics.append(context.allocator, .{
-                                .kind = .{
-                                    .syscall = argument_list.items,
-                                },
-                                .type = Type.Index.usize,
-                            });
-
-                            const syscall = try unit.instructions.append(context.allocator, .{
-                                .syscall = .{
-                                    .arguments = instruction_list.items,
-                                },
-                            });
-
-                            try builder.appendInstruction(unit, context, syscall);
-
-                            try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, syscall);
-
-                            value.* = .{
-                                .intrinsic = intrinsic,
-                            };
-                        } else {
-                            @panic("Syscall argument mismatch");
-                        }
                     },
                     else => |t| @panic(@tagName(t)),
-                }
-
-                assert(value.* != .unresolved);
-            },
-            .if_else => {
-                assert(node.left != .null);
-                assert(node.right != .null);
-
-                const if_node = unit.getNode(node.left);
-                assert(if_node.id == .@"if");
-                const condition = try builder.resolveValueAllocate(unit, context, Type.Expect{
-                    .type = .bool,
-                }, if_node.left);
-                assert(condition != .null);
-
-                if (unit.evaluateBooleanAtComptime(condition)) |comptime_condition| {
-                    if (comptime_condition == true) {
-                        value.* = .{
-                            .unresolved = if_node.right,
-                        };
-                        try builder.resolveValue(unit, context, Type.Expect{
-                            .type = .void,
-                        }, value_index);
-                    } else {
-                        value.* = .{
-                            .unresolved = node.right,
-                        };
-                        try builder.resolveValue(unit, context, Type.Expect{
-                            .type = .void,
-                        }, value_index);
-                    }
-                } else {
-                    try builder.insertDebugCheckPoint(unit, context, if_node.token);
-                    unreachable;
                 }
             },
             .field_access => {
-                const right_node = unit.getNode(node.right);
-                assert(right_node.id == .identifier);
-                const identifier = unit.getExpectedTokenBytes(right_node.token,.identifier);
-
-                const lvi = try builder.resolveValueAllocate(unit, context, Type.Expect.none, node.left);
-                const left_value_index = unit.unwrapValueCopy(lvi);
-                const left_value = unit.values.get(left_value_index);
-
-                switch (left_value.*) {
-                    .type => |type_index| {
-                        const left_type = unit.types.get(type_index);
-                        const scope = left_type.getScope(unit);
-                        const identifier_hash = try unit.processIdentifier(context, identifier);
-                        const look_in_parent_scopes = false;
-
-                        if (scope.lookupDeclaration(identifier_hash, look_in_parent_scopes)) |lookup| {
-                            try builder.referenceDeclaration(unit,context, lookup.scope, identifier, // Argument inserted for debugging
-                                lookup.declaration, value_index);
-                            if (value.isComptime(unit)) {
-                                //
-                            } else {
-                                unreachable;
-                            }
-                        } else {
-                            switch (left_type.*) {
-                                .@"enum" => |enum_index| {
-                                    const enum_type = unit.enums.get(enum_index);
-                                    const field_index = for (enum_type.fields.items) |enum_field_index| {
-                                        const enum_field = unit.enum_fields.get(enum_field_index);
-                                        if (enum_field.name == identifier_hash) {
-                                            break enum_field_index;
-                                        }
-                                    } else @panic("identifier not found");
-                                    value.* = .{
-                                        .enum_field = field_index,
-                                    };
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            }
-                        }
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
+                const result = try builder.resolveFieldAccess(unit, context, type_expect, node_index);
+                return switch (result.value) {
+                    .@"comptime" => |ct| ct,
+                    else => @panic("Expected comptime value, found runtime value"),
+                };
             },
-            .keyword_false => unit.copyValue(value_index, Value.Index.bool_false),
-            .keyword_true => unit.copyValue(value_index, Value.Index.bool_true),
+            .keyword_false,
+            .keyword_true, => return .{
+                .@"bool" = node.id == .keyword_true,
+            },
             .function_definition => {
                 const current_basic_block = builder.current_basic_block;
                 defer builder.current_basic_block = current_basic_block;
                 builder.current_basic_block = .null;
+
                 const function_prototype_node_index = node.left;
                 const body_node_index = node.right;
 
-                const function_prototype_index = try builder.resolveFunctionPrototype(unit, context, function_prototype_node_index);
+                const function_prototype_index = try builder.resolveFunctionPrototype(unit, context, function_prototype_node_index, global_attributes.contains(.@"export"));
                 const function_prototype_type_index = try unit.types.append(context.allocator, .{
                     .function = function_prototype_index,
-                });
-                const body_value_index = try unit.values.append(context.allocator, .{
-                    .unresolved = body_node_index,
                 });
 
                 const old_function = builder.current_function;
                 const token_debug_info = builder.getTokenDebugInfo(unit, node.token);
                 builder.current_function = try unit.function_definitions.append(context.allocator, .{
                     .type = function_prototype_type_index,
-                    .body = body_value_index,
-                    .scope = Scope{
+                    .body = undefined,
+                    .scope = .{
+                        .scope = Debug.Scope{
                         .line = token_debug_info.line,
                         .column = token_debug_info.column,
                         .kind = .function,
                         .local = true,
                         .level = builder.current_scope.level + 1,
                         .file = builder.current_file,
+                        },
                     },
-                    // This data assignment when the symbol is resolved in an upper step in the callstack
-                    .symbol = undefined,
                 });
                 defer builder.current_function = old_function;
 
                 const function = unit.function_definitions.get(builder.current_function);
-                value.* = .{
-                    .function_definition = builder.current_function,
-                };
 
                 builder.last_check_point = .{};
 
-                try builder.pushScope(unit, context, &function.scope);
+                try builder.pushScope(unit, context, &function.scope.scope);
                 defer builder.popScope(unit, context) catch unreachable;
 
                 const entry_basic_block = try builder.newBasicBlock(unit, context);
@@ -2039,39 +1499,39 @@ pub const Builder = struct {
                         }
 
                         const argument_token_debug_info = builder.getTokenDebugInfo(unit, argument_node.token);
-                        const argument_declaration_index = try unit.declarations.append(context.allocator, .{
-                            .scope = builder.current_scope,
-                            .name = argument_name_hash,
-                            .type = argument_type_index,
-                            .value = .null,
-                            .mutability = .@"const",
-                            .line = argument_token_debug_info.line,
-                            .column = argument_token_debug_info.column,
+                        const argument_declaration_index = try unit.argument_declarations.append(context.allocator, .{
+                            .declaration = .{
+                                .scope = builder.current_scope,
+                                .name = argument_name_hash,
+                                .type = argument_type_index,
+                                .mutability = .@"const",
+                                .line = argument_token_debug_info.line,
+                                .column = argument_token_debug_info.column,
+                                .kind = .argument,
+                            },
                         });
+                        comptime assert(@TypeOf(argument_declaration_index) == Debug.Declaration.Argument.Index);
+                        const argument = unit.argument_declarations.get(argument_declaration_index);
 
-                        try builder.current_scope.declarations.putNoClobber(context.allocator, argument_name_hash, argument_declaration_index);
-                    }
-
-                    for (builder.current_scope.declarations.values()) |declaration_index| {
-                        const argument_declaration = unit.declarations.get(declaration_index);
+                        try builder.current_scope.declarations.putNoClobber(context.allocator, argument_name_hash, &argument.declaration);
 
                         const argument_instruction = try unit.instructions.append(context.allocator, .{
                             .argument_declaration = .{
-                                .name = argument_declaration.name,
-                                .type = argument_declaration.type,
+                                .name = argument.declaration.name,
+                                .type = argument.declaration.type,
                             },
                         });
 
                         try builder.appendInstruction(unit, context, argument_instruction);
 
-                        try function.argument_map.putNoClobber(context.allocator, declaration_index, argument_instruction);
+                        try function.scope.argument_map.putNoClobber(context.allocator, argument, argument_instruction);
                     }
                 }
 
                 const body_node = unit.getNode(body_node_index);
 
                 if (body_node.id == .block) {
-                    try builder.resolveValue(unit, context, Type.Expect{ .type = .void }, body_value_index);
+                    function.body = try builder.resolveBlock(unit, context, body_node_index);
 
                     logln(.compilation, .ir, "Function #{}", .{Function.Definition.unwrap(builder.current_function)});
 
@@ -2093,162 +1553,25 @@ pub const Builder = struct {
                                 .cast => |cast| {
                                     log(.compilation, .ir, "{s}", .{@tagName(cast.id)});
                                 },
-                                // .binary_operation => |binary_operation| {
-                                //     log(.compilation, .ir, "{s}", .{@tagName(binary_operation.id)});
-                                // },
                                 else => {}
                             }
                             logln(.compilation, .ir, "",  .{});
                         }
                     }
+
+                    const function_definition_index = builder.current_function;
+
+                    return .{
+                        .function_definition = function_definition_index,
+                    };
                 } else {
                     @panic("Function body is expected to be a block");
                 }
             },
-            .constant_symbol_declaration,
-            .variable_symbol_declaration, => {
-                // All variables here are local
-                assert(builder.current_scope.local);
-                const expected_identifier_token_index = Token.addInt(node.token, 1);
-                const identifier = unit.getExpectedTokenBytes(expected_identifier_token_index, .identifier);
-                logln(.compilation, .identifier, "Analyzing local declaration {s}", .{identifier});
-                const identifier_hash = try unit.processIdentifier(context, identifier);
-
-                const look_in_parent_scopes = true;
-                if (builder.current_scope.lookupDeclaration(identifier_hash, look_in_parent_scopes)) |lookup| {
-                    _ = lookup; // autofix
-                    std.debug.panic("Identifier '{s}' already declarared on scope", .{identifier});
-                }
-
-                const type_node_index = node.left;
-                const value_node_index = node.right;
-                assert(value_node_index != .null);
-                const init_value_index = try unit.values.append(context.allocator, .{
-                    .unresolved = value_node_index,
-                });
-
-                const declaration_type_index: Type.Index = switch (type_node_index) {
-                    .null => blk: {
-                        try builder.resolveValue(unit, context, Type.Expect.none, init_value_index);
-                        const init_value = unit.values.get(init_value_index);
-                        const init_type_index = init_value.getType(unit);
-                        break :blk init_type_index;
-                    },
-                    else => blk: {
-                        const type_index = try builder.resolveTypeAllocate(unit, context, type_node_index);
-                        try builder.resolveValue(unit, context, Type.Expect{
-                            .type = type_index,
-                        }, init_value_index);
-                        break :blk type_index;
-                    },
-                };
-
-                const token_debug_info = builder.getTokenDebugInfo(unit, node.token);
-
-                const mutability: Mutability = switch (node.id) {
-                    .constant_symbol_declaration => .@"const",
-                    .variable_symbol_declaration => .@"var",
-                    else => unreachable,
-                };
-
-                const declaration_index = try unit.declarations.append(context.allocator, .{
-                    .scope = builder.current_scope,
-                    .name = identifier_hash,
-                    .type = declaration_type_index,
-                    .value = init_value_index,
-                    .mutability = mutability,
-                    .line = token_debug_info.line,
-                    .column = token_debug_info.column,
-                });
-
-                try builder.current_scope.declarations.putNoClobber(context.allocator, identifier_hash, declaration_index);
-
-                if (!(mutability == .@"const" and unit.values.get(init_value_index).isComptime(unit))) {
-                    const instruction = try unit.instructions.append(context.allocator, .{
-                        .stack_slot = .{
-                            .type = unit.unwrapTypeCopy(declaration_type_index),
-                        },
-                    });
-                    try builder.appendInstruction(unit, context, instruction);
-
-                    const current_function = unit.function_definitions.get(builder.current_function);
-                    try current_function.declarations.putNoClobber(context.allocator, declaration_index, instruction);
-
-                    const init_value = unit.values.get(init_value_index);
-                    switch (init_value.*) {
-                        .intrinsic => |intrinsic_index| {
-                            const intrinsic = unit.intrinsics.get(intrinsic_index);
-                            _ = intrinsic; // autofix
-                            // @breakpoint();
-                        },
-                        else => {},
-                    }
-                    const init_value_instruction = unit.value_to_instruction_map.get(init_value_index).?;
-
-                    // TODO: store initial value
-                    const initialization = try unit.instructions.append(context.allocator, .{
-                        .store = .{
-                            .destination = instruction,
-                            .source = init_value_instruction,
-                        },
-                    });
-                    try builder.appendInstruction(unit, context, initialization);
-                }
-
-                value.* = .{
-                    .declaration = declaration_index,
-                };
-            },
-            .pointer_dereference => {
-                // TODO: 
-                const pointer_type_expect = switch (type_expect) {
-                    .none => unreachable,//type_expect,
-                    .type => |type_index| b: {
-                        const pointer_type = try unit.types.append(context.allocator, .{
-                            .unresolved = undefined,
-                        });
-                        try unit.getPointerType(context, .{
-                            .type = type_index,
-                            .mutability = .@"const",
-                            .many = false, // TODO
-                            .termination = .none, // TODO
-                            .nullable = false,
-                        }, pointer_type);
-                        const result = Type.Expect{
-                            .type = pointer_type,
-                        };
-                        break :b result;
-                    }, 
-                };
-                const pointer_value_index = try builder.resolveValueAllocate(unit, context, pointer_type_expect, node.left);
-
-                const load = try unit.instructions.append(context.allocator, .{
-                    .load = .{
-                        .value = pointer_value_index,
-                    },
-                });
-                try builder.appendInstruction(unit, context, load);
-
-                const unary_operation = try unit.unary_operations.append(context.allocator, .{
-                    .value = pointer_value_index,
-                    .type = switch (type_expect) {
-                        .none => unreachable,
-                        .type => |type_index| type_index,
-                    },
-                    .id = .pointer_dereference,
-                });
-
-                value.* = .{
-                    .unary_operation = unary_operation,
-                };
-
-                try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, load);
-            },
             .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(node.token, .number_literal))) {
                 .int => |integer| {
                     const type_index = switch (type_expect) {
-                        .type => |original_type_index| b: {
-                            const type_index = unit.unwrapTypeCopy(original_type_index);
+                        .type => |type_index| b: {
                             const ty = unit.types.get(type_index);
                             break :b switch (ty.*) {
                                 .integer => type_index,
@@ -2256,314 +1579,262 @@ pub const Builder = struct {
                             };
                         },
                         .none => Type.Index.comptime_int,
-                        //else => |t| @panic(@tagName(t)),
                     };
+                    _ = type_index; // autofix
 
-                    const integer_value = Value.Integer{
-                        .value = integer,
-                        .type = type_index,
+                    return .{
+                        .integer = integer,
                     };
-                    
-                    const const_int = try unit.getConstantInt(context, integer_value);
-
-                    if (builder.current_basic_block != .null) {
-                        try builder.appendInstruction(unit, context, const_int);
-                    }
-
-                    value.* = .{
-                        .integer = integer_value,
-                    };
-
-                    try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, const_int);
                 },
                 else => |t| @panic(@tagName(t)),
             },
             .undefined => {
-                value.* = .undefined;
-            },
-            .add, .mul => {
-                const binary_operation_id: BinaryOperation.Id = switch (node.id) {
-                    .add => .add,
-                    .sub => .sub,
-                    .bit_and => .bit_and,
-                    .bit_xor => .bit_xor,
-                    .bit_or => .bit_or,
-                    .mul => .mul,
-                    .div => .div,
-                    .mod => .mod,
-                    .shift_left => .shift_left,
-                    .shift_right => .shift_right,
-                    .compare_equal => .compare_equal,
-                    .compare_not_equal => .compare_not_equal,
-                    .compare_greater => .compare_greater,
-                    .compare_greater_equal => .compare_greater_equal,
-                    .compare_less => .compare_less,
-                    .compare_less_equal => .compare_less_equal,
-                    else => |t| @panic(@tagName(t)),
-                };
-                const left_expect_type: Type.Expect = switch (binary_operation_id) {
-                    .compare_equal,
-                    .compare_not_equal,
-                    .compare_less,
-                    .compare_less_equal,
-                    .compare_greater,
-                    .compare_greater_equal,
-                    => Type.Expect.none,
-                    else => type_expect,
-                };
-                const left_value_index = try builder.resolveValueAllocate(unit, context, left_expect_type, node.left);
-                const left_value = unit.values.get(left_value_index);
-                const left_instruction = unit.value_to_instruction_map.get(left_value_index).?;
-                const left_type = left_value.getType(unit);
-                                         
-                const right_expect_type: Type.Expect = switch (type_expect) {
-                    .none => Type.Expect{
-                        .type = left_type,
-                    },
-                    .type => switch (binary_operation_id) {
-                        .add,
-                        .sub,
-                        .bit_and,
-                        .bit_xor,
-                        .bit_or,
-                        .mul,
-                        .div,
-                        .mod,
-                        .shift_left,
-                        .shift_right,
-                        => type_expect,
-                        // .shift_left,
-                        // .shift_right,
-                        // => ExpectType{
-                        //     .type_index = Type.u8,
-                        // },
-                        .compare_equal,
-                        .compare_not_equal,
-                        .compare_less,
-                        .compare_greater,
-                        .compare_greater_equal,
-                        .compare_less_equal,
-                        => Type.Expect{
-                            .type = left_type,
-                        },
-                    },
-                    // else => |t| @panic(@tagName(t)),
-                };
-                const right_value_index = try builder.resolveValueAllocate(unit, context, right_expect_type, node.right);
-                const right_instruction = unit.value_to_instruction_map.get(right_value_index).?;
-
-                const binary_operation = BinaryOperation{
-                    .left = left_value_index,
-                    .right = right_value_index,
-                    .type = switch (type_expect) {
-                        .none => switch (binary_operation_id) {
-                            .bit_and,
-                            .bit_or,
-                            .shift_right,
-                            .add,
-                            .sub,
-                            .mul,
-                            .div,
-                            .mod,
-                            => left_type,
-                            else => |t| @panic(@tagName(t)),
-                        },
-                        .type => |type_index| type_index,
-                        // else => |t| @panic(@tagName(t)),
-                    },
-                    .id = binary_operation_id,
-                };
-                const binary_operation_index = try unit.binary_operations.append(context.allocator, binary_operation);
-
-                {
-                    const instruction = switch (unit.types.get(left_type).*) {
-                        .integer => |integer| b: {
-                            const id: Instruction.IntegerBinaryOperation.Id = switch (binary_operation_id) {
-                                .add => .add,
-                                .mul => .mul,
-                                else => |t| @panic(@tagName(t)),
-                            };
-
-                            const i = try unit.instructions.append(context.allocator, .{
-                                .integer_binary_operation = .{
-                                    .left = left_instruction,
-                                    .right = right_instruction,
-                                    .id = id,
-                                    .signedness = integer.signedness,
-                                },
-                            });
-                            break :b i;
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    };
-
-                    try builder.appendInstruction(unit, context, instruction);
-                    try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, instruction);
-                }
-                
-                value.* = .{
-                    .binary_operation = binary_operation_index,
-                };
-            },
-            .call => {
-                assert(node.left != .null);
-                assert(node.right != .null);
-                const left_node = unit.getNode(node.left);
-                const is_field_access = switch (left_node.id) {
-                    .field_access => true,
-                    else => false,
-                };
-                _ = is_field_access; // autofix
-                const left_value_index = unit.unwrapValueCopy( try builder.resolveValueAllocate(unit, context, Type.Expect.none, node.left));
-                const left_value = unit.values.get(left_value_index);
-
-                switch (left_value.*) {
-                    .function_definition => |function_definition_index| {
-                        const function = unit.function_definitions.get(function_definition_index);
-                        const function_type = unit.types.get( function.type);
-                        const function_prototype = unit.function_prototypes.get(function_type.function);
-                        const argument_nodes = unit.getNodeList(node.right);
-                        const argument_declaration_count = function.scope.declarations.count();
-
-                        if (argument_nodes.len != argument_declaration_count) {
-                            @panic("Argument count mismatch");
-                        }
-
-                        var list = try ArrayList(Value.Index).initCapacity(context.allocator, argument_declaration_count);
-                        var instruction_list = try ArrayList(Instruction.Index).initCapacity(context.allocator, argument_declaration_count);
-
-                        for (argument_nodes, function.scope.declarations.values()) |arg_ni, argument_declaration_index| {
-                            const argument_node = unit.getNode(arg_ni);
-                            const argument_declaration = unit.declarations.get(argument_declaration_index);
-                            const arg_type_expect = Type.Expect{
-                                .type = argument_declaration.type,
-                            };
-                            const argument_node_index = switch (argument_node.id) {
-                                .named_argument => argument_node.right,
-                                else => arg_ni,
-                            };
-                            const argument_value_index = try builder.resolveValueAllocate(unit, context, arg_type_expect, argument_node_index);
-                            list.appendAssumeCapacity(argument_value_index);
-                            instruction_list.appendAssumeCapacity(unit.value_to_instruction_map.get(argument_value_index).?);
-                        }
-
-                        const call = Call{
-                            .value = left_value_index,
-                            .arguments = list.items,
-                            .type = switch (type_expect) {
-                                .none => function_prototype.return_type,
-                                .type => |type_index| b: {
-                                    const rt_index = unit.unwrapTypeCopy( function_prototype.return_type);
-                                    const rt = unit.types.get(rt_index);
-                                    _ = rt; // autofix
-                                    if (rt_index != .noreturn) {
-                                        assert(type_index == rt_index);
-                                    }
-                                    break :b rt_index;
-                                },
-                                // else => |t| @panic(@tagName(t)),
-                            },
-                        };
-
-                        const instruction = try unit.instructions.append(context.allocator, .{
-                            .call = .{
-                                .callable = .{
-                                    .function_definition = function_definition_index,
-                                },
-                                .function_type = function.type,
-                                .arguments = instruction_list.items,
-                            },
-                        });
-                        try builder.appendInstruction(unit, context, instruction);
-                        
-                        try unit.value_to_instruction_map.putNoClobber(context.allocator, value_index, instruction);
-
-                        // TODO: type check return type
-                        const call_index = try unit.calls.append(context.allocator, call);
-
-                        value.* = .{
-                            .call = call_index,
-                        };
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-            },
-            .@"return" => {
-                assert(node.left != .null);
-                assert(node.right == .null);
-                const return_value_node_index = node.left;
-                const return_value_index = try builder.resolveValueAllocate(unit, context, Type.Expect{
-                    .type = unit.getReturnType(builder.current_function),
-                },return_value_node_index);
-                const instruction_index = unit.value_to_instruction_map.get(return_value_index).?;
-                const return_index = try unit.returns.append(context.allocator,.{
-                    .value = return_value_index,
-                });
-                value.* = .{
-                    .@"return" = return_index,
-                };
-
-                const ret = try unit.instructions.append(context.allocator, .{
-                    .ret = instruction_index,
-                });
-                try builder.appendInstruction(unit, context, ret);
-            },
-            .@"switch" => {
-                const switch_expression_value_index = try builder.resolveValueAllocate(unit, context, Type.Expect.none, node.left);
-                const case_nodes = unit.getNodeList(node.right);
-
-                const comptime_switch_expression = unit.evaluateAtComptime(switch_expression_value_index);
-                if (comptime_switch_expression != .null) {
-                    const switch_expression = unit.values.get(comptime_switch_expression);
-                    switch (switch_expression.*) {
-                        .enum_field => |enum_field_index| {
-                            const enum_field = unit.enum_fields.get(enum_field_index);
-                            const enum_type_general = unit.types.get(enum_field.parent);
-                            const enum_type = unit.enums.get(enum_type_general.@"enum");
-                            const typecheck_enum_result = try unit.typecheckSwitchEnums(context, enum_type.*, case_nodes);
-
-                            const group_index = for (typecheck_enum_result.switch_case_groups.items, 0..) |switch_case_group, switch_case_group_index| {
-                                break for (switch_case_group.items) |field_index| {
-                                    if (enum_field_index == field_index) {
-                                        break switch_case_group_index;
-                                    }
-                                } else {
-                                    continue;
-                                };
-                            } else typecheck_enum_result.else_switch_case_group_index orelse unreachable;
-                            const true_switch_case_node = unit.getNode(case_nodes[group_index]);
-                            value.* = .{
-                                .unresolved = true_switch_case_node.right,
-                            };
-                            try builder.resolveValue(unit, context, type_expect, value_index);
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
-                } else {
-                    unreachable;
-                }
+                return .undefined;
             },
             .enum_type => {
-                const node_list = unit.getNodeList(node.left);
-
-                const type_index = try unit.types.append(context.allocator,.{
-                    .unresolved = node_index,
-                });
-                value.* = .{
+                const type_index = try builder.resolveContainerType(unit, context, node_index, .@"enum");
+                return .{
                     .type = type_index,
                 };
-
-                try builder.resolveContainerType(unit, context, node_list, node_index, .@"enum", type_index);
             },
-            .@"unreachable" => {
-                unit.copyValue(value_index, .@"unreachable");
-                const instruction = try unit.instructions.append(context.allocator, .@"unreachable");
-                try builder.appendInstruction(unit, context, instruction);
+            .@"switch" => {
+                const result = try builder.resolveSwitch(unit, context, type_expect, node_index);
+                switch (result.value) {
+                    .@"comptime" => |ct| {
+                        return ct;
+                    },
+                    .runtime => unreachable,
+                    else => unreachable,
+                }
             },
             else => |t| @panic(@tagName(t)),
         }
+        unreachable;
+    }
 
-        assert(value.* != .unresolved);
+    fn referenceArgumentDeclaration(builder: *Builder, unit: *Unit, context: *const Context, scope: *Debug.Scope, declaration: *Debug.Declaration) !V {
+        _ = builder; // autofix
+        _ = unit; // autofix
+        _ = context; // autofix
+        assert(declaration.kind == .argument);
+        assert(scope.kind == .function);
+
+        const argument_declaration = @fieldParentPtr(Debug.Declaration.Argument, "declaration", declaration);
+        const function_scope = @fieldParentPtr(Debug.Scope.Function, "scope", scope);
+        const instruction_index = function_scope.argument_map.get(argument_declaration).?;
+
+        return .{
+            .value = .{
+                .runtime = instruction_index,
+            },
+            .type = declaration.type,
+        };
+
+    }
+
+    fn referenceLocalDeclaration(builder: *Builder, unit:  *Unit, context: *const Context, scope: *Debug.Scope, declaration: *Debug.Declaration) !V {
+        _ = builder; // autofix
+        _ = unit; // autofix
+        _ = context; // autofix
+        assert(declaration.kind == .local);
+        assert(scope.kind == .block);
+
+        const local_declaration = @fieldParentPtr(Debug.Declaration.Local, "declaration", declaration);
+        const local_scope = @fieldParentPtr(Debug.Scope.Local, "scope", scope);
+        const instruction_index = local_scope.local_declaration_map.get(local_declaration).?;
+
+        return .{
+            .value = .{
+                .runtime = instruction_index,
+            },
+            .type = declaration.type,
+        };
+    }
+
+    const TypeCheckResult = enum{
+        success,
+        pointer_var_to_const,
+    };
+
+    const TypecheckError = error{
+    };
+
+    fn typecheck(builder: *Builder, unit: *Unit, context: *const Context, destination_type_index: Type.Index, source_type_index: Type.Index) TypecheckError!TypeCheckResult {
+        _ = builder; // autofix
+        _ = context; // autofix
+        if (destination_type_index == source_type_index) {
+            return .success;
+        } else {
+            const destination = unit.types.get(destination_type_index);
+            const source = unit.types.get(source_type_index);
+            switch (destination.*) {
+                .pointer => |destination_pointer| {
+                    switch (source.*) {
+                        .pointer => |source_pointer| {
+                            if (destination_pointer.type == source_pointer.type) {
+                                if (destination_pointer.many == source_pointer.many) {
+                                    if (destination_pointer.termination == source_pointer.termination) {
+                                        if (destination_pointer.nullable == source_pointer.nullable) {
+                                            assert(destination_pointer.mutability != source_pointer.mutability);
+                                            assert(destination_pointer.mutability == .@"const");
+                                            assert(source_pointer.mutability == .@"var");
+
+                                            return .pointer_var_to_const;
+                                        }
+                                    }
+                                }
+                            }
+
+                            unreachable;
+                        },
+                        else =>|t| @panic(@tagName(t)),
+                    }
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+            unreachable;
+        }
+    }
+
+    const Side = enum{
+        left,
+        right,
+    };
+
+    fn resolveIdentifier(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) !V {
+        const node = unit.getNode(node_index);
+        const identifier = unit.getExpectedTokenBytes(node.token, .identifier);
+
+        const hash = try unit.processIdentifier(context, identifier);
+
+        const look_in_parent_scopes = true;
+        if (builder.current_scope.lookupDeclaration(hash, look_in_parent_scopes)) |lookup| {
+            // TODO: we could do this better
+            // const scope = lookup.scope;
+            const preliminary_result: V = switch (lookup.scope.kind) {
+                .file_container, .file => try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration),
+                .function => try builder.referenceArgumentDeclaration(unit, context, lookup.scope, lookup.declaration),
+                .block => try builder.referenceLocalDeclaration(unit, context, lookup.scope, lookup.declaration),
+                else => |t| @panic(@tagName(t)),
+            };
+
+            const v: V = switch (preliminary_result.value) {
+                .runtime => switch (side) {
+                    .left => preliminary_result,
+                    .right => b: {
+                        const instruction = try unit.instructions.append(context.allocator, .{
+                            .load = .{
+                                .value = preliminary_result,
+                            },
+                            });
+
+                        try builder.appendInstruction(unit, context, instruction);
+
+                        break :b .{
+                            .value = .{
+                                .runtime = instruction,
+                            },
+                            .type = lookup.declaration.type,
+                        };
+                    },
+                },
+                .@"comptime", .function_reference => preliminary_result,
+                else => |t| @panic(@tagName(t)),
+            };
+
+            switch (type_expect) {
+                .none => return v,
+                .type => |expected_type_index| {
+                    const typecheck_result = try builder.typecheck(unit, context, expected_type_index, lookup.declaration.type);
+                    switch (typecheck_result) {
+                        .success => return v,
+                        .pointer_var_to_const => {
+                            const cast_to_const = try unit.instructions.append(context.allocator, .{
+                                .cast = .{
+                                    .id = .pointer_var_to_const,
+                                    .value = v,
+                                    .type = expected_type_index,
+                                },
+                            });
+
+                            try builder.appendInstruction(unit, context, cast_to_const);
+                            return .{
+                                .value =.{
+                                    .runtime = cast_to_const,
+                                },
+                                .type = expected_type_index,
+                            };
+                        },
+                    }
+                },
+            }
+        } else {
+            var scope_it: ?*Debug.Scope = builder.current_scope;
+            const indentation_size = 4;
+            var indentation: u32 = 0;
+
+            var file_path: []const u8 = "";
+            while (scope_it) |scope| : (scope_it = scope.parent) {
+                for (0..indentation * indentation_size) |_|{
+                    std.debug.print(" ", .{});
+                }
+                std.debug.print("> Scope {s} ", .{@tagName(scope.kind)});
+                switch (scope.kind) {
+                    .compilation_unit => {},
+                    .file_container, .container => {},
+                    .function => {},
+                    .file => {
+                        const global_scope = @fieldParentPtr(Debug.Scope.Global, "scope", scope);
+                        const file = @fieldParentPtr(Debug.File, "scope", global_scope);
+                        std.debug.print("{s}", .{file.relative_path});
+                        file_path = file.relative_path;
+                    },
+                    .block => {},
+                }
+
+                std.debug.print("\n", .{});
+                indentation += 1;
+            }
+
+            std.debug.panic("Identifier '{s}' not found in file {s}", .{identifier, file_path});
+        }
+    }
+
+    fn resolveAssignment(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !V {
+        const node = unit.getNode(node_index);
+        switch (node.id) {
+            .assign, .add_assign => {
+                if (unit.getNode(node.left).id == .discard) {
+                    const r =  try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.right, .right);
+                    return r;
+                } else {
+                    const left = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
+                    switch (left.value) {
+                        .runtime => |instr_index| switch (unit.instructions.get(instr_index).*) {
+                            .load => unreachable,
+                            else => {},
+                        },
+                        else => {},
+                    }
+                    const right = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = left.type }, node.right, .right);
+                    const store = try unit.instructions.append(context.allocator, .{
+                        .store = .{
+                            .destination = left,
+                            .source = right,
+                        },
+                        });
+                    try builder.appendInstruction(unit, context, store);
+
+                    return .{
+                        .value = .{
+                            .runtime = store,
+                        },
+                        .type = .void,
+                    };
+                }
+            },
+            else => |t| @panic(@tagName(t)),
+        }
     }
 
     fn newBasicBlock(builder: *Builder, unit: *Unit, context: *const Context) !BasicBlock.Index{
@@ -2574,24 +1845,11 @@ pub const Builder = struct {
         return entry_basic_block;
     }
 
-    fn resolveTypeAllocate(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !Type.Index {
-        const type_index = try unit.types.append(context.allocator, .{
-            .unresolved = node_index,
-        });
-        try builder.resolveType(unit, context, type_index);
-        return type_index;
-    }
-
-    fn resolveType(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index) anyerror!void {
-        const ty = unit.types.get(type_index);
-        const node_index = switch (ty.*) {
-            .unresolved => |ni| ni,
-            else => |t| @panic(@tagName(t)),
-        };
+    fn resolveType(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !Type.Index {
         const node = unit.getNode(node_index);
 
-        switch (node.id) {
-            .signed_integer_type, .unsigned_integer_type, => {
+        const result: Type.Index = switch (node.id) {
+            .signed_integer_type, .unsigned_integer_type, => b: {
                 const token_bytes = unit.getExpectedTokenBytes(node.token, switch (node.id) {
                     .signed_integer_type => .keyword_signed_integer,
                     .unsigned_integer_type => .keyword_unsigned_integer,
@@ -2599,17 +1857,17 @@ pub const Builder = struct {
                 });
 
                 const number_chunk = token_bytes[1..];
-                                       //
-                try unit.getIntegerType(context, .{
+                const type_index = try unit.getIntegerType(context, .{
                     .bit_count = try std.fmt.parseInt(u16, number_chunk, 10),
                     .signedness = switch (node.id) {
                         .signed_integer_type => .signed,
                         .unsigned_integer_type => .unsigned,
                         else => unreachable,
                     },
-                }, type_index);
+                });
+                break :b type_index;
             },
-            .pointer_type => {
+            .pointer_type => b: {
                 const attribute_node_list = unit.getNodeList(node.left);
                 var mutability = Mutability.@"var";
                 var element_type_index = Type.Index.null;
@@ -2632,7 +1890,7 @@ pub const Builder = struct {
                                 unreachable;
                             }
 
-                            element_type_index = try builder.resolveTypeAllocate(unit, context, element_node_index);
+                            element_type_index = try builder.resolveType(unit, context, element_node_index);
                         },
                         .const_expression => mutability = .@"const",
                         .many_pointer_expression => many = true,
@@ -2652,36 +1910,38 @@ pub const Builder = struct {
 
                 assert(element_type_index != .null);
 
-                try unit.getPointerType(context, .{
+                const pointer_type = try unit.getPointerType(context, .{
                     .mutability = mutability,
                     .many = many,
                     .type = element_type_index,
                     .termination = termination,
                     .nullable = false,
-                }, type_index);
+                });
+                break :b pointer_type;
             },
-            .optional_type => {
-                const element_type_index = try builder.resolveTypeAllocate(unit, context, node.left);
+            .optional_type => blk: {
+                const element_type_index = try builder.resolveType(unit, context, node.left);
                 const element_type = unit.types.get(element_type_index);
-                switch (element_type.*) {
-                    .pointer => |pointer| {
+                const r = switch (element_type.*) {
+                    .pointer => |pointer| b: {
                         var nullable_pointer = pointer;
                         assert(!nullable_pointer.nullable);
                         nullable_pointer.nullable = true;
-                        try unit.getPointerType(context, nullable_pointer, type_index);
+                        break :b try unit.getPointerType(context, nullable_pointer);
                     },
                     else => unreachable,
-                }
+                };
+                break :blk r;
             },
-            .keyword_noreturn => unit.copyType(type_index, Type.Index.noreturn),
-            .usize_type => unit.copyType(type_index, Type.Index.usize),
+            .keyword_noreturn => .noreturn,
+            .usize_type => .usize,
             else => |t| @panic(@tagName(t)),
-        }
+        };
 
-        assert(unit.types.get(type_index).* != .unresolved);
+        return result;
     }
 
-    fn resolveFunctionPrototype(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !Function.Prototype.Index {
+    fn resolveFunctionPrototype(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index, is_export: bool) !Function.Prototype.Index {
         const node = unit.getNode(node_index);
         assert(node.id == .function_prototype);
         const attribute_and_return_type_node_list = unit.getNodeList(node.right);
@@ -2693,21 +1953,23 @@ pub const Builder = struct {
             .argument_types = &.{},
             .return_type = .null,
             .attributes = .{
-                .@"export" = false,
+                // .@"export" = false,
                 .naked = false,
+            },
+            .calling_convention = switch (is_export) {
+                true => .c,
+                false => .auto,
             },
         });
 
 
-        var is_export: bool = false;
         var is_naked: bool = false;
 
         // Resolve attributes
         for (attribute_node_list) |attribute_node_index| {
             const attribute_node = unit.getNode(attribute_node_index);
             switch (attribute_node.id) {
-                .attribute_export => is_export = true,
-                .attribute_naked => is_naked = true,
+                .function_attribute_naked => is_naked = true,
                 else => |t| @panic(@tagName(t)),
             }
         }
@@ -2722,8 +1984,7 @@ pub const Builder = struct {
                 const argument_node = unit.getNode(argument_node_index);
                 assert(argument_node.id == .argument_declaration);
 
-                const argument_type_index = try builder.resolveTypeAllocate(unit, context, argument_node.left);
-                assert(unit.types.get(argument_type_index).* != .unresolved);
+                const argument_type_index = try builder.resolveType(unit, context, argument_node.left);
                 argument_types.appendAssumeCapacity(argument_type_index);
             }
 
@@ -2731,24 +1992,24 @@ pub const Builder = struct {
         }
 
         function_prototype.attributes = .{
-            .@"export" = is_export,
             .naked = is_naked,
         };
 
-        function_prototype.return_type = try builder.resolveTypeAllocate(unit, context, return_type_node_index);
+        function_prototype.return_type = try builder.resolveType(unit, context, return_type_node_index);
 
         return function_prototype_index;
     }
 
-    fn resolveContainerType(builder: *Builder, unit: *Unit, context: *const Context, container_nodes: []const Node.Index, container_node_index: Node.Index, container_type: ContainerType, type_index: Type.Index) !void {
+    fn resolveContainerType(builder: *Builder, unit: *Unit, context: *const Context, container_node_index: Node.Index, container_type: ContainerType) !Type.Index {
         const current_basic_block = builder.current_basic_block;
         defer builder.current_basic_block = current_basic_block;
         builder.current_basic_block = .null;
 
         const container_node = unit.getNode(container_node_index);
+        const container_nodes = unit.getNodeList(container_node.left);
 
         const Data = struct{
-            scope: *Scope,
+            scope: *Debug.Scope.Global,
             type: Type.Index,
         };
 
@@ -2758,8 +2019,8 @@ pub const Builder = struct {
                 switch (builder.current_scope.kind) {
                     .file => unreachable,
                     else => {
-                        const backing_type_index = try builder.resolveTypeAllocate(unit, context, backing_type_node_index);
-                        const backing_type = unit.types.get(unit.unwrapTypeCopy(backing_type_index));
+                        const backing_type_index = try builder.resolveType(unit, context, backing_type_node_index);
+                        const backing_type = unit.types.get(backing_type_index);
                         switch (backing_type.*) {
                             .integer => |integer| {
                                 switch (integer.bit_count) {
@@ -2774,10 +2035,6 @@ pub const Builder = struct {
                     },
                 }
             },
-            // if (true) unreachable;
-            // break :blk switch (container_type) {
-            //     else => |t| @panic(@tagName(t)),
-            // };
         };
 
         const token_debug_info = builder.getTokenDebugInfo(unit, container_node.token);
@@ -2786,24 +2043,35 @@ pub const Builder = struct {
                 assert(container_node.id == .struct_type);
                 const struct_index = try unit.structs.append(context.allocator, .{
                     .scope = .{
-                        .kind = switch (builder.current_scope.kind) {
-                            .file => .file_container,
-                            else => .container,
+                        .scope = .{
+                            .kind = switch (builder.current_scope.kind) {
+                                .file => .file_container,
+                                else => .container,
+                            },
+                            .line = token_debug_info.line,
+                            .column = token_debug_info.column,
+                            .level = builder.current_scope.level + 1,
+                            .local = false,
+                            .file = builder.current_file,
                         },
-                        .line = token_debug_info.line,
-                        .column = token_debug_info.column,
-                        .level = builder.current_scope.level + 1,
-                        .local = false,
-                        .file = builder.current_file,
                     },
                     .backing_type = backing_type,
                 });
                 const struct_type = unit.structs.get(struct_index);
 
-                const ty = unit.types.get(type_index);
-                ty.* = .{
+                const type_index = try unit.types.append(context.allocator, .{
                     .@"struct" = struct_index,
-                };
+                });
+
+                // Save file type
+                switch (builder.current_scope.kind) {
+                    .file => {
+                        const global_scope = @fieldParentPtr(Debug.Scope.Global, "scope", builder.current_scope);
+                        const file = @fieldParentPtr(Debug.File, "scope", global_scope);
+                        file.type = type_index;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
 
                 try unit.struct_type_map.putNoClobber(context.allocator, struct_index, type_index);
 
@@ -2816,21 +2084,22 @@ pub const Builder = struct {
                 assert(container_node.id == .enum_type);
                 const enum_index = try unit.enums.append(context.allocator, .{
                     .scope = .{
-                        .kind = .container,
-                        .line = token_debug_info.line,
-                        .column = token_debug_info.column,
-                        .level = builder.current_scope.level + 1,
-                        .local = false,
-                        .file = builder.current_file,
+                        .scope = .{
+                            .kind = .container,
+                            .line = token_debug_info.line,
+                            .column = token_debug_info.column,
+                            .level = builder.current_scope.level + 1,
+                            .local = false,
+                            .file = builder.current_file,
+                        }
                     },
                     .backing_type = backing_type,
                 });
 
                 const enum_type = unit.enums.get(enum_index);
-                const ty = unit.types.get(type_index);
-                ty.* = .{
+                const type_index = try unit.types.append(context.allocator, .{
                     .@"enum" = enum_index,
-                };
+                });
                 break :b .{
                     .scope = &enum_type.scope,
                     .type = type_index,
@@ -2839,7 +2108,8 @@ pub const Builder = struct {
         };
 
         const scope = data.scope;
-        try builder.pushScope(unit, context, scope);
+        const type_index = data.type;
+        try builder.pushScope(unit, context, &scope.scope);
         defer builder.popScope(unit, context) catch unreachable;
 
         const count = blk: {
@@ -2905,36 +2175,69 @@ pub const Builder = struct {
                         }
 
                         assert(declaration_node.right != .null);
-                        const type_node_index = declaration_node.left;
-                        const value_node_index = declaration_node.right;
-                        const unresolved_initial_value = try unit.values.append(context.allocator, .{
-                            .unresolved = value_node_index,
-                        });
+                        const metadata_node_index = declaration_node.left;
+                        const metadata_node_result: struct {
+                            type_node_index: Node.Index,
+                            attributes_node_index: Node.Index,
+                        } = if (metadata_node_index != .null) b: {
+                            const metadata_node = unit.getNode(metadata_node_index);
 
-                        const declaration_type_index: Type.Index = switch (type_node_index) {
-                            .null => .null,
-                            else => try unit.types.append(context.allocator, .{
-                                .unresolved = type_node_index,
-                            }),
+                            break :b .{
+                                .type_node_index = metadata_node.left,
+                                .attributes_node_index = metadata_node.right,
+                            };
+                        } else .{
+                            .type_node_index = .null,
+                            .attributes_node_index = .null,
                         };
 
-                        const declaration_token_debug_info = builder.getTokenDebugInfo(unit, declaration_node.token);
+                        const type_node_index = metadata_node_result.type_node_index;
+                        const attributes_node_index = metadata_node_result.attributes_node_index;
+                        const attributes: Debug.Declaration.Global.Attributes = switch (attributes_node_index) {
+                            .null => Debug.Declaration.Global.Attributes.initEmpty(),
+                            else => b: {
+                                var res = Debug.Declaration.Global.Attributes.initEmpty();
+                                const attribute_nodes = unit.getNodeList(attributes_node_index);
+                                for (attribute_nodes) |attribute_node_index| {
+                                    const attribute_node = unit.getNode(attribute_node_index);
+                                    switch (attribute_node.id) {
+                                        .symbol_attribute_export => res.setPresent(.@"export", true),
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+                                }
 
-                        const declaration = try unit.declarations.append(context.allocator, .{
-                            .scope = builder.current_scope,
-                            .name = identifier_hash,
-                            .type = declaration_type_index,
-                            .value = unresolved_initial_value,
-                            .mutability = switch (declaration_node.id) {
-                                .constant_symbol_declaration => .@"const",
-                                .variable_symbol_declaration => .@"var",
-                                else => unreachable,
+                                break :b res;
+                            }
+                        };
+
+                        const value_node_index = declaration_node.right;
+
+                        const declaration_token_debug_info = builder.getTokenDebugInfo(unit, declaration_node.token);
+                        const mutability: Mutability = switch (declaration_node.id) {
+                            .constant_symbol_declaration => .@"const",
+                            .variable_symbol_declaration => .@"var",
+                            else => unreachable,
+                        };
+                                                          //
+                        const global_declaration_index = try unit.global_declarations.append(context.allocator, .{
+                            .declaration = .{
+                                .scope = &scope.scope,
+                                .name = identifier_hash,
+                                .type = .null,
+                                .line = declaration_token_debug_info.line,
+                                .column = declaration_token_debug_info.column,
+                                .mutability = mutability,
+                                .kind = .global,
                             },
-                            .line = declaration_token_debug_info.line,
-                            .column = declaration_token_debug_info.column,
+                            .initial_value = .{
+                                .unresolved = value_node_index,
+                            },
+                            .type_node_index = type_node_index,
+                            .attributes = attributes,
                         });
 
-                        try builder.current_scope.declarations.putNoClobber(context.allocator, identifier_hash, declaration);
+                        const global_declaration = unit.global_declarations.get(global_declaration_index);
+                        try builder.current_scope.declarations.putNoClobber(context.allocator, identifier_hash, &global_declaration.declaration);
                     },
                     else => unreachable,
                 }
@@ -2952,30 +2255,15 @@ pub const Builder = struct {
                     if (enum_type.backing_type == .null) {
                         const bit_count = @bitSizeOf(@TypeOf(field_nodes.items.len)) - @clz(field_nodes.items.len);
                         const real_bit_count: u16 = if (bit_count <= 8) 8 else if (bit_count <= 16) 16 else if (bit_count <= 32) 32 else if (bit_count <= 64) 64 else unreachable;
-                        const backing_type_index = try unit.types.append(context.allocator, .{
-                            .unresolved = undefined,
-                        });
 
-                        try unit.getIntegerType(context, .{
+                        enum_type.backing_type = try unit.getIntegerType(context, .{
                             .bit_count = real_bit_count,
                             .signedness = .unsigned,
-                        }, backing_type_index);
-
-                        enum_type.backing_type = backing_type_index;
+                        });
                     }
                 },
                 else => |t| @panic(@tagName(t)),
             }
-
-            //    // TODO: bit-sized integers
-            //    const expect_type = ExpectType{
-            //        .type_index = switch (backing_type.invalid) {
-            //            true => blk: {
-            //                break :blk type_index;
-            //            },
-            //            false => backing_type,
-            //        },
-            //    };
 
             for (field_nodes.items, 0..) |field_node_index, index| {
                 const field_node = unit.getNode(field_node_index);
@@ -2991,15 +2279,12 @@ pub const Builder = struct {
                         const enum_value: usize = switch (field_node.left) {
                             .null => index,
                             else => b: {
-                                const enum_value_index = try builder.resolveValueAllocate(unit, context, Type.Expect.none, field_node.left);
-                                const comptime_enum_value_index = unit.evaluateAtComptime(enum_value_index);
-                                if (comptime_enum_value_index == .null) @panic("Enum value must be known at compile time");
-                                const enum_value = unit.values.get(comptime_enum_value_index);
-
-                                break :b switch (enum_value.*) {
-                                    .integer => |integer| integer.value,
-                                    else => |t| @panic(@tagName(t)),
-                                };
+                                const enum_value = try builder.resolveComptimeValue(unit, context, Type.Expect{
+                                    .type = enum_type.backing_type,
+                                }, .{},
+                                //Debug.Declaration.Global.Attributes.initEmpty(),
+                                field_node.left);
+                                break :b enum_value.integer;
                             },
                         };
                        const enum_field_index = try unit.enum_fields.append(context.allocator, .{
@@ -3023,19 +2308,634 @@ pub const Builder = struct {
                 const comptime_node = unit.getNode(comptime_node_index);
                 assert(comptime_node.id == .@"comptime");
 
-                const comptime_block_value = try unit.values.append(context.allocator, .{
-                    .unresolved = comptime_node.left,
-                });
-                try builder.resolveValue(unit, context, Type.Expect{
-                    .type = .void,
-                }, comptime_block_value);
+                assert(comptime_node.left != .null);
+                assert(comptime_node.right == .null);
+
+                const left_node = unit.getNode(comptime_node.left);
+                switch (left_node.id) {
+                    .block => {
+                        const block = try builder.resolveBlock(unit, context, comptime_node.left);
+                        _ = block; // autofix
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
             }
         }
+
+        return type_index;
+    }
+
+    fn resolveRuntimeValue(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) anyerror!V{
+        const node = unit.getNode(node_index);
+        switch (node.id) {
+            .identifier => {
+                const result = try builder.resolveIdentifier(unit, context, type_expect, node_index, side);
+                return result;
+            },
+            .intrinsic => {
+                return try builder.resolveIntrinsic(unit, context, type_expect, node_index);
+            },
+            .pointer_dereference => {
+                // TODO: 
+                const pointer_type_expect = switch (type_expect) {
+                    .none => unreachable,//type_expect,
+                    .type => |type_index| b: {
+                        const pointer_type = try unit.getPointerType(context, .{
+                            .type = type_index,
+                            .mutability = .@"const",
+                            .many = false, // TODO
+                            .termination = .none, // TODO
+                            .nullable = false,
+                        });
+                        const result = Type.Expect{
+                            .type = pointer_type,
+                        };
+                        break :b result;
+                    }, 
+                };
+
+                // TODO: is this right? .right
+                const pointer_value = try builder.resolveRuntimeValue(unit, context, pointer_type_expect, node.left, .right);
+
+                const load = try unit.instructions.append(context.allocator, .{
+                    .load = .{
+                        .value = pointer_value,
+                    },
+                });
+                try builder.appendInstruction(unit, context, load);
+
+                const load_type = switch (type_expect) {
+                    .none => unreachable,
+                    .type => |type_index| type_index,
+                };
+
+                return .{
+                    .value = .{
+                        .runtime = load,
+                    },
+                    .type = load_type,
+                };
+            },
+            .add, .mul => {
+                const left_node_index = node.left;
+                const right_node_index = node.left;
+                const binary_operation_id: BinaryOperationId = switch (node.id) {
+                    .add => .add,
+                    .sub => .sub,
+                    .bit_and => .bit_and,
+                    .bit_xor => .bit_xor,
+                    .bit_or => .bit_or,
+                    .mul => .mul,
+                    .div => .div,
+                    .mod => .mod,
+                    .shift_left => .shift_left,
+                    .shift_right => .shift_right,
+                    .compare_equal => .compare_equal,
+                    .compare_not_equal => .compare_not_equal,
+                    .compare_greater => .compare_greater,
+                    .compare_greater_equal => .compare_greater_equal,
+                    .compare_less => .compare_less,
+                    .compare_less_equal => .compare_less_equal,
+                    else => |t| @panic(@tagName(t)),
+                };
+
+                const left_expect_type: Type.Expect = switch (binary_operation_id) {
+                    .compare_equal,
+                    .compare_not_equal,
+                    .compare_less,
+                    .compare_less_equal,
+                    .compare_greater,
+                    .compare_greater_equal,
+                    => Type.Expect.none,
+                    else => type_expect,
+                };
+
+                const left_value = try builder.resolveRuntimeValue(unit, context, left_expect_type, left_node_index, .right);
+                const left_type = left_value.type;
+
+                const right_expect_type: Type.Expect = switch (type_expect) {
+                    .none => Type.Expect{
+                        .type = left_type,
+                    },
+                    .type => switch (binary_operation_id) {
+                        .add,
+                        .sub,
+                        .bit_and,
+                        .bit_xor,
+                        .bit_or,
+                        .mul,
+                        .div,
+                        .mod,
+                        .shift_left,
+                        .shift_right,
+                        => type_expect,
+                        // .shift_left,
+                        // .shift_right,
+                        // => ExpectType{
+                        //     .type_index = Type.u8,
+                        // },
+                        .compare_equal,
+                        .compare_not_equal,
+                        .compare_less,
+                        .compare_greater,
+                        .compare_greater_equal,
+                        .compare_less_equal,
+                        => Type.Expect{
+                            .type = left_type,
+                        },
+                        },
+                    // else => |t| @panic(@tagName(t)),
+                };
+                const right_value = try builder.resolveRuntimeValue(unit, context, right_expect_type, right_node_index, .right);
+
+                const type_index = switch (type_expect) {
+                    .none => switch (binary_operation_id) {
+                        .bit_and,
+                        .bit_or,
+                        .shift_right,
+                        .add,
+                        .sub,
+                        .mul,
+                        .div,
+                        .mod,
+                        => left_type,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    .type => |type_index| type_index,
+                    // else => |t| @panic(@tagName(t)),
+                };
+
+                const instruction = switch (unit.types.get(left_type).*) {
+                    .integer => |integer| b: {
+                        const id: Instruction.IntegerBinaryOperation.Id = switch (binary_operation_id) {
+                            .add => .add,
+                            .mul => .mul,
+                            else => |t| @panic(@tagName(t)),
+                        };
+
+                        const i = try unit.instructions.append(context.allocator, .{
+                            .integer_binary_operation = .{
+                                .left = left_value,
+                                .right = right_value,
+                                .id = id,
+                                .signedness = integer.signedness,
+                            },
+                            });
+                        break :b i;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+
+                try builder.appendInstruction(unit, context, instruction);
+
+                return .{
+                    .value = .{
+                        .runtime = instruction,
+                    },
+                    .type = type_index,
+                };
+            },
+            .call => {
+                return try builder.resolveCall(unit, context, node_index);
+            },
+            .field_access => {
+                const result = try builder.resolveFieldAccess(unit, context, type_expect, node_index);
+                return result;
+            },
+            .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(node.token, .number_literal))) {
+                .int => |integer| {
+                    const type_index = switch (type_expect) {
+                        .type => |type_index| b: {
+                            const ty = unit.types.get(type_index);
+                            break :b switch (ty.*) {
+                                .integer => type_index,
+                                else => |t| @panic(@tagName(t)),
+                            };
+                        },
+                        .none => Type.Index.comptime_int,
+                        //else => |t| @panic(@tagName(t)),
+                    };
+
+                    return .{
+                        .value = .{
+                            .@"comptime" = .{
+                                .integer = integer,
+                            },
+                        },
+                        .type = type_index,
+                    };
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .assign, .add_assign => {
+                assert(type_expect == .none or type_expect.type == .void);
+                const result = try builder.resolveAssignment(unit, context, node_index);
+                return result;
+            },
+            .block => {
+                assert(type_expect == .none or type_expect.type == .void);
+                const block = try builder.resolveBlock(unit, context, node_index);
+                const block_i = try unit.instructions.append(context.allocator, .{
+                    .block = block,
+                });
+
+                // if (builder.current_basic_block != .null) {
+                //     try builder.appendInstruction(unit, context, block_i);
+                // }
+
+                return .{
+                    .value = .{
+                        .runtime = block_i,
+                    },
+                    .type = .void,
+                };
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+    }
+
+    fn resolveCall(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !V{
+        const node = unit.getNode(node_index);
+
+        assert(node.left != .null);
+        assert(node.right != .null);
+        const left_node = unit.getNode(node.left);
+        const is_field_access = switch (left_node.id) {
+            .field_access => true,
+            else => false,
+        };
+        _ = is_field_access; // autofix
+        const left = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
+        switch (left.value) {
+            .function_reference => |function_declaration| {
+                const function_definition_index = function_declaration.getFunctionDefinitionIndex();
+                const function = unit.function_definitions.get(function_definition_index);
+                const function_type = unit.types.get( function.type);
+                const function_prototype = unit.function_prototypes.get(function_type.function);
+                const argument_nodes = unit.getNodeList(node.right);
+                const argument_declaration_count = function.scope.scope.declarations.count();
+                //
+                if (argument_nodes.len != argument_declaration_count) {
+                    @panic("Argument count mismatch");
+                }
+
+                var list = try ArrayList(V).initCapacity(context.allocator, argument_declaration_count);
+
+                for (argument_nodes, function.scope.scope.declarations.values()) |arg_ni, argument_declaration| {
+                    const argument_node = unit.getNode(arg_ni);
+                    const arg_type_expect = Type.Expect{
+                        .type = argument_declaration.type,
+                    };
+                    const argument_node_index = switch (argument_node.id) {
+                        .named_argument => argument_node.right,
+                        else => arg_ni,
+                    };
+                    const argument_value = try builder.resolveRuntimeValue(unit, context, arg_type_expect, argument_node_index, .right);
+                    list.appendAssumeCapacity(argument_value);
+                }
+
+                const instruction = try unit.instructions.append(context.allocator, .{
+                    .call = .{
+                        .callable = .{
+                            .function_definition = function_declaration,
+                        },
+                        .function_type = function.type,
+                        .arguments = list.items,
+                    },
+                });
+                try builder.appendInstruction(unit, context, instruction);
+
+                return .{
+                    .value = .{
+                        .runtime = instruction,
+                    },
+                    .type = function_prototype.return_type,
+                };
+            },
+            // .@"comptime" => |ct| switch (ct) {
+            //     .function_definition => |function_definition_index| {
+            //     },
+            //     else => |t| @panic(@tagName(t)),
+            // },
+            .runtime => unreachable,
+            else => unreachable,
+        }
+
+    }
+
+    fn resolveBlock(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) anyerror!Debug.Block.Index {
+        const block_node = unit.getNode(node_index);
+        assert(block_node.id == .block);
+        const token_debug_info = builder.getTokenDebugInfo(unit, block_node.token);
+        const block_index = try unit.blocks.append(context.allocator, .{
+            .scope = .{
+                .scope = .{
+                    .line = token_debug_info.line,
+                    .column = token_debug_info.column,
+                    .kind = .block,
+                    .level = builder.current_scope.level + 1,
+                    .local = builder.current_scope.local,
+                    .file = builder.current_file,
+                },
+            },
+        });
+
+        const block = unit.blocks.get(block_index);
+        try builder.pushScope(unit, context, &block.scope.scope);
+        defer builder.popScope(unit, context) catch unreachable;
+
+        const statement_node_list = unit.getNodeList(block_node.left);
+
+        for (statement_node_list) |statement_node_index| {
+            const statement_node = unit.getNode(statement_node_index);
+
+            try builder.insertDebugCheckPoint(unit, context, statement_node.token);
+
+            switch (statement_node.id) {
+                .assign, .add_assign => {
+                    _ = try builder.resolveAssignment(unit, context, statement_node_index);
+                },
+                .if_else => {
+                    // TODO: typecheck
+                    _ = try builder.resolveIfElse(unit, context, Type.Expect{
+                        .type = .void,
+                    }, statement_node_index);
+                },
+                .intrinsic => {
+                    _ = try builder.resolveIntrinsic(unit, context, Type.Expect{
+                        .type = .void,
+                    }, statement_node_index);
+                },
+                .constant_symbol_declaration,
+                .variable_symbol_declaration, => {
+                    // All variables here are local
+                    assert(builder.current_scope.local);
+                    const expected_identifier_token_index = Token.addInt(statement_node.token, 1);
+                    const identifier = unit.getExpectedTokenBytes(expected_identifier_token_index, .identifier);
+                    logln(.compilation, .identifier, "Analyzing local declaration {s}", .{identifier});
+                    const identifier_hash = try unit.processIdentifier(context, identifier);
+
+                    const look_in_parent_scopes = true;
+                    if (builder.current_scope.lookupDeclaration(identifier_hash, look_in_parent_scopes)) |lookup| {
+                        _ = lookup; // autofix
+                        std.debug.panic("Identifier '{s}' already declarared on scope", .{identifier});
+                    }
+
+                    const metadata_node_index = statement_node.left;
+                    const value_node_index = statement_node.right;
+                    assert(value_node_index != .null);
+
+                    const type_expect = switch (metadata_node_index) {
+                        .null => Type.Expect.none,
+                        else => b: {
+                            const metadata_node = unit.getNode(metadata_node_index);
+                            const type_node_index = metadata_node.left;
+                            assert(metadata_node.right == .null);
+                            const type_expect = Type.Expect{
+                            .type = try builder.resolveType(unit, context, type_node_index),
+                            };
+                            break :b type_expect;
+                        },
+                    };
+
+                    const initialization = try builder.resolveRuntimeValue(unit, context, type_expect, value_node_index, .right);
+
+                    const declaration_type = switch (type_expect) {
+                        .none => initialization.type,
+                        .type => |type_index| type_index,
+                    };
+
+                    const mutability: Mutability = switch (statement_node.id) {
+                        .constant_symbol_declaration => .@"const",
+                        .variable_symbol_declaration => .@"var",
+                        else => unreachable,
+                    };
+                    
+                    const declaration_index = try unit.local_declarations.append(context.allocator, .{
+                        .declaration = .{
+                            .scope = builder.current_scope,
+                            .name = identifier_hash,
+                            .type = declaration_type,
+                            .mutability = mutability,
+                            .line = token_debug_info.line,
+                            .column = token_debug_info.column,
+                            .kind = .local,
+                        },
+                    });
+
+                    const local_declaration = unit.local_declarations.get(declaration_index);
+                    try builder.current_scope.declarations.putNoClobber(context.allocator, identifier_hash, &local_declaration.declaration);
+                    
+                    if (!(mutability == .@"const" and initialization.value == .@"comptime")) {
+                        const stack = try unit.instructions.append(context.allocator, .{
+                            .stack_slot = .{
+                                .type = declaration_type,
+                            },
+                        });
+
+                        try builder.appendInstruction(unit, context, stack);
+                        
+                        try block.scope.local_declaration_map.putNoClobber(context.allocator, local_declaration, stack);
+                        
+                        const store = try unit.instructions.append(context.allocator, .{
+                            .store = .{
+                                .destination = .{
+                                    .value = .{
+                                        .runtime = stack,
+                                    },
+                                    .type = declaration_type,
+                                },
+                                .source = initialization,
+                            },
+                        });
+
+                        try builder.appendInstruction(unit, context, store);
+                    }
+                },
+                .@"return" => {
+                    assert(statement_node.left != .null);
+                    assert(statement_node.right == .null);
+                    const return_value_node_index = statement_node.left;
+                    const return_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{
+                        .type = unit.getReturnType(builder.current_function),
+                    }, return_value_node_index, .right);
+
+                    const ret = try unit.instructions.append(context.allocator, .{
+                        .ret = return_value,
+                    });
+                    try builder.appendInstruction(unit, context, ret);
+                },
+                .call =>  {
+                    const result = try builder.resolveCall(unit, context, statement_node_index);
+                    assert(result.type == .void or result.type == .@"noreturn");
+                },
+                .@"switch" => {
+                    const expression_to_switch_on = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, statement_node.left, .right);
+                    const case_nodes = unit.getNodeList(statement_node.right);
+
+                    switch (expression_to_switch_on.value) {
+                        .@"comptime" => |ct| switch (ct) {
+                            .enum_value => |enum_field_index| {
+                                const enum_field = unit.enum_fields.get(enum_field_index);
+                                const enum_type_general = unit.types.get(enum_field.parent);
+                                const enum_type = unit.enums.get(enum_type_general.@"enum");
+                                const typecheck_enum_result = try unit.typecheckSwitchEnums(context, enum_type.*, case_nodes);
+
+                                const group_index = for (typecheck_enum_result.switch_case_groups.items, 0..) |switch_case_group, switch_case_group_index| {
+                                    break for (switch_case_group.items) |field_index| {
+                                        if (enum_field_index == field_index) {
+                                            break switch_case_group_index;
+                                        }
+                                    } else {
+                                        continue;
+                                    };
+                                } else typecheck_enum_result.else_switch_case_group_index orelse unreachable;
+                                const true_switch_case_node = unit.getNode(case_nodes[group_index]);
+                                _ = try builder.resolveRuntimeValue(unit, context, Type.Expect { .type = .void }, true_switch_case_node.right, .right);
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        .runtime => todo(),
+                        else => |t| @panic(@tagName(t)),
+                    }
+                },
+                .@"unreachable" => {
+                    const instruction = try unit.instructions.append(context.allocator, .@"unreachable");
+                    try builder.appendInstruction(unit, context, instruction);
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+        }
+
+        return block_index;
+    }
+
+    fn resolveSwitch(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) !V {
+        const node = unit.getNode(node_index);
+        assert(node.id == .@"switch");
+        const expression_to_switch_on = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .right);
+        const case_nodes = unit.getNodeList(node.right);
+
+        switch (expression_to_switch_on.value) {
+            .@"comptime" => |ct| switch (ct) {
+                .enum_value => |enum_field_index| {
+                    const enum_field = unit.enum_fields.get(enum_field_index);
+                    const enum_type_general = unit.types.get(enum_field.parent);
+                    const enum_type = unit.enums.get(enum_type_general.@"enum");
+                    const typecheck_enum_result = try unit.typecheckSwitchEnums(context, enum_type.*, case_nodes);
+
+                    const group_index = for (typecheck_enum_result.switch_case_groups.items, 0..) |switch_case_group, switch_case_group_index| {
+                        break for (switch_case_group.items) |field_index| {
+                            if (enum_field_index == field_index) {
+                                break switch_case_group_index;
+                            }
+                        } else {
+                            continue;
+                        };
+                    } else typecheck_enum_result.else_switch_case_group_index orelse unreachable;
+                    const true_switch_case_node = unit.getNode(case_nodes[group_index]);
+                    return try builder.resolveRuntimeValue(unit, context, type_expect, true_switch_case_node.right, .right);
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .runtime => todo(),
+            else => |t| @panic(@tagName(t)),
+        }
+    }
+
+    fn resolveFieldAccess(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) !V {
+        const node = unit.getNode(node_index);
+        const right_node = unit.getNode(node.right);
+        assert(right_node.id == .identifier);
+        const identifier = unit.getExpectedTokenBytes(right_node.token,.identifier);
+        const identifier_hash = try unit.processIdentifier(context, identifier);
+
+        const left_node_index = node.left;
+        const left = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, left_node_index, .right);
+
+        const result = switch (left.value) {
+            .@"comptime" => |ct| switch (ct) {
+                .type => |type_index| b: {
+                    const left_type = unit.types.get(type_index);
+                    const scope = left_type.getScope(unit);
+                    const look_in_parent_scopes = false;
+
+                    const result = if (scope.lookupDeclaration(identifier_hash, look_in_parent_scopes)) |lookup| blk: {
+                        const global_decl_ref = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration);
+                        break :blk global_decl_ref;
+                    } else switch (left_type.*) {
+                        .@"enum" => |enum_index| blk: {
+                            const enum_type = unit.enums.get(enum_index);
+                            const field_index = for (enum_type.fields.items) |enum_field_index| {
+                                const enum_field = unit.enum_fields.get(enum_field_index);
+                                if (enum_field.name == identifier_hash) {
+                                    break enum_field_index;
+                                }
+                            } else @panic("identifier not found");
+                            break :blk V{
+                                .value = .{
+                                    .@"comptime" = .{
+                                        .enum_value = field_index,
+                                    },
+                                },
+                                .type = type_index,
+                            };
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    };
+
+                    break :b result;
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .runtime => unreachable,
+            else => |t| @panic(@tagName(t)),
+        };
+
+        switch (type_expect) {
+            .none => return result,
+            .type => |ti| {
+                const typecheck_result = try builder.typecheck(unit, context, ti, result.type);
+                switch (typecheck_result) {
+                    .success => return result,
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+        }
+    }
+
+    fn resolveIfElse(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) !V{
+        const node = unit.getNode(node_index);
+        assert(node.left != .null);
+        assert(node.right != .null);
+
+        const if_node_index = node.left;
+        const if_node = unit.getNode(if_node_index);
+        const condition_node_index = if_node.left;
+        const taken_expression_node_index = if_node.right;
+        const not_taken_expression_node_index = node.right;
+        const not_taken_expression_node = unit.getNode(not_taken_expression_node_index);
+        _ = not_taken_expression_node; // autofix
+        assert(if_node.id == .@"if");
+        const result: V = if (builder.resolveComptimeValue(unit, context, Type.Expect{
+            .type = .bool,
+        }, .{}, condition_node_index)) |comptime_value| switch (comptime_value) {
+                .bool => |boolean| switch (boolean) {
+                    true => try builder.resolveRuntimeValue(unit, context, type_expect, taken_expression_node_index, .right),
+                    false => try builder.resolveRuntimeValue(unit, context, type_expect, not_taken_expression_node_index, .right),
+                },
+                else => |t| @panic(@tagName(t)),
+        } else |err| {
+            std.debug.print("Foo err: {}", .{err});
+            try builder.insertDebugCheckPoint(unit, context, if_node.token);
+            unreachable;
+        };
+        return result;
     }
 };
 
 pub const Enum = struct {
-    scope: Scope,
+    scope: Debug.Scope.Global,
     fields: ArrayList(Enum.Field.Index) = .{},
     backing_type: Type.Index,
 
@@ -3054,47 +2954,47 @@ pub const Enum = struct {
 
 pub const Unit = struct {
     node_buffer: Node.List = .{},
-    files: File.List = .{},
-    values: Value.List = .{},
+    files: Debug.File.List = .{},
+    // values: Value.List = .{},
     types: Type.List = .{},
     structs: Struct.List = .{},
     enums: Enum.List = .{},
     enum_fields: Enum.Field.List = .{},
     function_definitions: Function.Definition.List = .{},
-    blocks: Block.List = .{},
-    declarations: Declaration.List = .{},
+    blocks: Debug.Block.List = .{},
+    global_declarations: Debug.Declaration.Global.List = .{},
+    local_declarations: Debug.Declaration.Local.List = .{},
+    argument_declarations: Debug.Declaration.Argument.List = .{},
+    // declarations: Declaration.List = .{},
     assembly_instructions: InlineAssembly.Instruction.List = .{},
     function_prototypes: Function.Prototype.List = .{},
-    intrinsics: Intrinsic.List = .{},
-    unary_operations: UnaryOperation.List = .{},
-    binary_operations: BinaryOperation.List = .{},
-    assignments: Assignment.List = .{},
-    returns: Return.List = .{},
-    calls: Call.List = .{},
     inline_assembly: InlineAssembly.List = .{},
     instructions: Instruction.List = .{},
     basic_blocks: BasicBlock.List = .{},
-    global_variables: GlobalVariable.List = .{},
-    global_variable_map: AutoHashMap(Declaration.Index, GlobalVariable.Index) = .{},
+    // global_variables: GlobalVariable.List = .{},
+    // global_variable_map: AutoHashMap(Declaration.Index, GlobalVariable.Index) = .{},
     token_buffer: Token.Buffer = .{},
     node_lists: ArrayList(ArrayList(Node.Index)) = .{},
-    file_token_offsets: AutoArrayHashMap(Token.Range, File.Index) = .{},
-    file_map: StringArrayHashMap(File.Index) = .{},
+    file_token_offsets: AutoArrayHashMap(Token.Range, Debug.File.Index) = .{},
+    file_map: StringArrayHashMap(Debug.File.Index) = .{},
     identifiers: StringKeyMap([]const u8) = .{},
     pointers: AutoHashMap(Type.Pointer, Type.Index) = .{},
-    function_declaration_map: AutoHashMap(Function.Definition.Index, Declaration.Index) = .{},
-    type_declaration_map: AutoHashMap(Type.Index, Declaration.Index) = .{},
+
+    code_to_emit: ArrayList(*Debug.Declaration.Global) = .{},
+    data_to_emit: ArrayList(*Debug.Declaration.Global) = .{},
+    // function_declaration_map: AutoHashMap(Function.Definition.Index, Declaration.Index) = .{},
+    // type_declaration_map: AutoHashMap(Type.Index, Declaration.Index) = .{},
     // TODO
-    value_to_instruction_map: AutoHashMap(Value.Index, Instruction.Index) = .{},
-    constant_int_map: AutoHashMap(Value.Integer, Instruction.Index) = .{},
     struct_type_map: AutoHashMap(Struct.Index, Type.Index) = .{},
-    scope: Scope = .{
-        .file = .null,
-        .kind = .compilation_unit,
-        .line = 0,
-        .column = 0,
-        .level = 0,
-        .local = false,
+    scope: Debug.Scope.Global = .{
+        .scope = .{
+            .file = .null,
+            .kind = .compilation_unit,
+            .line = 0,
+            .column = 0,
+            .level = 0,
+            .local = false,
+        },
     },
     main_package: *Package = undefined,
     descriptor: Descriptor,
@@ -3190,32 +3090,6 @@ pub const Unit = struct {
         }
     }
 
-    pub fn unwrapValueCopy(unit: *Unit, value_index: Value.Index) Value.Index{
-        var i = value_index;
-        while (true) {
-            const value = unit.values.get(i);
-            switch (value.*) {
-                .copy => |new_value_index| {
-                    i = new_value_index;
-                },
-                else => return i,
-            }
-        }
-    }
-
-    pub fn unwrapTypeCopy(unit: *Unit, type_index: Type.Index) Type.Index{
-        var i = type_index;
-        while (true) {
-            const ty = unit.types.get(i);
-            switch (ty.*) {
-                .copy => |new_type_index| {
-                    i = new_type_index;
-                },
-                else => return i,
-            }
-        }
-    }
-
     fn getNode(unit: *Unit, node_index: Node.Index) *const Node {
         const node = unit.node_buffer.get(node_index);
         return node;
@@ -3235,7 +3109,7 @@ pub const Unit = struct {
     }
 
     // TODO: make this fast
-    fn findTokenFile(unit: *Unit, token_index: Token.Index) File.Index{
+    fn findTokenFile(unit: *Unit, token_index: Token.Index) Debug.File.Index{
         const ti = @intFromEnum(token_index);
         for (unit.file_token_offsets.keys(), unit.file_token_offsets.values()) |range, file_index| {
             const i = @intFromEnum(range.start);
@@ -3267,42 +3141,21 @@ pub const Unit = struct {
         return string_literal_bytes;
     }
 
-    fn evaluateAtComptime(unit: *Unit, original_value_index: Value.Index) Value.Index{
-        const value_index = unit.unwrapValueCopy(original_value_index);
-        const value = unit.values.get(value_index);
-        return switch (value.*) {
-            .bool => value_index,
-            .enum_field => value_index,
-            .integer => value_index,
-            else => |t| @panic(@tagName(t)),
-        };
-    }
-
-    fn evaluateBooleanAtComptime(unit: *Unit, value_index: Value.Index) ?bool {
-        const comptime_condition = unit.evaluateAtComptime(value_index);
-        if (comptime_condition != .null) {
-            const value = unit.values.get(comptime_condition);
-            return value.bool;
-        } else {
-            return null;
-        }
-    }
-
-    fn getPointerType(unit: *Unit, context: *const Context, pointer: Type.Pointer, type_index: Type.Index) !void {
+    fn getPointerType(unit: *Unit, context: *const Context, pointer: Type.Pointer) !Type.Index {
         if (unit.pointers.get(pointer)) |existing_type_index| {
-            unit.copyType(type_index, existing_type_index);
+            return existing_type_index;
         } else {
-            assert(unit.types.get(type_index).* == .unresolved);
-            unit.types.get(type_index).* = .{
+            const type_index = try unit.types.append(context.allocator, .{
                 .pointer = pointer,
-            };
+            });
             try unit.pointers.putNoClobber(context.allocator, pointer, type_index);
-            assert(unit.types.get(type_index).* != .copy);
-            assert(unit.types.get(type_index).* != .unresolved);
+
+            return type_index;
         }
     }
 
-    fn getIntegerType(unit: *Unit, context: *const Context, integer: Type.Integer, type_index: Type.Index) !void {
+    fn getIntegerType(unit: *Unit, context: *const Context, integer: Type.Integer) !Type.Index {
+        _ = unit; // autofix
         _ = context; // autofix
         const existing_type_index: Type.Index = switch (integer.bit_count) {
             8 => switch (integer.signedness) {
@@ -3324,23 +3177,7 @@ pub const Unit = struct {
             else => unreachable,
         };
 
-        unit.copyType(type_index, existing_type_index);
-    }
-
-    fn copyType(unit: *Unit, destination: Type.Index, source: Type.Index) void {
-        if (destination != source) {
-            unit.types.get(destination).* = .{
-                .copy = source,
-            };
-        } else unreachable;
-    }
-
-    fn copyValue(unit: *Unit, destination: Value.Index, source: Value.Index) void {
-        if (destination != source) {
-            unit.values.get(destination).* = .{
-                .copy = source,
-            };
-        }
+        return existing_type_index;
     }
 
     fn processIdentifier(unit: *Unit, context: *const Context, string: []const u8) !u32 {
@@ -3357,7 +3194,7 @@ pub const Unit = struct {
         builder.* = .{
             .generate_debug_info = unit.descriptor.generate_debug_information,
             .emit_ir = true,
-            .current_scope = &unit.scope,
+            .current_scope = &unit.scope.scope,
         };
 
         inline for (@typeInfo(Type.Common).Enum.fields) |enum_field| {
@@ -3366,17 +3203,10 @@ pub const Unit = struct {
             _ = try unit.types.append(context.allocator, type_value);
         }
 
-        inline for (@typeInfo(Value.Common).Enum.fields) |enum_field| {
-            const e = @field(Value.Common, enum_field.name);
-            const value = Value.Common.map.get(e);
-            _ = try unit.values.append(context.allocator, value);
-        }
-
-
         try builder.analyzePackage(unit, context, main_package);
     }
 
-    pub fn generateAbstractSyntaxTreeForFile(unit: *Unit, context: *const Context, file_index: File.Index) !void {
+    pub fn generateAbstractSyntaxTreeForFile(unit: *Unit, context: *const Context, file_index: Debug.File.Index) !void {
         const file = unit.files.get(file_index);
         const source_file = file.package.directory.handle.openFile(file.relative_path, .{}) catch |err| {
             std.debug.panic("Can't find file {s} in directory {s} for error {s}", .{ file.relative_path, file.package.directory.path, @errorName(err) });
@@ -3403,7 +3233,7 @@ pub const Unit = struct {
         }, file_index);
 
         logln(.parser, .file, "[START PARSING FILE #{} {s}]", .{ file_index, file.package.source_path });
-        file.parser = try parser.analyze(context.allocator, file.lexer, file.source_code, file_index, &unit.token_buffer, &unit.node_buffer, &unit.node_lists);
+        file.parser = try parser.analyze(context.allocator, file.lexer, file.source_code, &unit.token_buffer, &unit.node_buffer, &unit.node_lists);
         logln(.parser, .file, "[END PARSING FILE #{} {s}]", .{ file_index, file.package.source_path });
         assert(file.status == .lexed);
         file.status = .parsed;
@@ -3420,7 +3250,7 @@ pub const Unit = struct {
         };
     }
 
-    pub fn importFile(unit: *Unit, context:*const Context, current_file_index: File.Index, import_name: []const u8) !ImportPackageResult {
+    pub fn importFile(unit: *Unit, context:*const Context, current_file_index: Debug.File.Index, import_name: []const u8) !ImportPackageResult {
         logln(.compilation, .import, "import: '{s}'\n", .{import_name});
 
         if (equal(u8, import_name, "std")) {
@@ -3467,16 +3297,18 @@ pub const Unit = struct {
         const index = switch (path_lookup.found_existing) {
             true => path_lookup.value_ptr.*,
             false => blk: {
-                const file_index = try unit.files.append(context.allocator, File{
+                const file_index = try unit.files.append(context.allocator, Debug.File{
                     .relative_path = relative_path,
                     .package = package,
                     .scope = .{
-                        .file = .null,
-                        .kind = .file,
-                        .line = 0,
-                        .column = 0,
-                        .local = false,
-                        .level = 1,
+                        .scope = .{
+                            .file = .null,
+                            .kind = .file,
+                            .line = 0,
+                            .column = 0,
+                            .local = false,
+                            .level = 1,
+                        }
                     },
                 });
                 logln(.compilation, .new_file, "Adding file #{}: {s}\n", .{ file_index, full_path });
@@ -3582,16 +3414,6 @@ pub const Unit = struct {
             try unit.analyze(context, packages[0]);
 
             try llvm.codegen(unit, context);
-        }
-    }
-
-    fn getConstantInt(unit: *Unit, context: *const Context, integer: Value.Integer) !Instruction.Index{
-        if (unit.constant_int_map.get(integer)) |r| return r else {
-            const const_int = try unit.instructions.append(context.allocator, .{
-                .constant_int = integer,
-            });
-            try unit.constant_int_map.putNoClobber(context.allocator, integer, const_int);
-            return const_int;
         }
     }
 };
@@ -3827,4 +3649,40 @@ pub const Token = struct {
     };
 
     pub usingnamespace data_structures.getIndexForType(@This(), enum{});
+};
+
+pub const InlineAssembly = struct {
+    instructions: []const InlineAssembly.Instruction.Index,
+
+    pub const List = BlockList(@This(), enum{});
+    pub usingnamespace List.Index;
+
+    pub const Instruction = struct {
+        id: u32,
+        operands: []const Operand,
+
+        pub const List = BlockList(@This(), enum{});
+        pub usingnamespace @This().List.Index;
+    };
+
+    pub const Operand = union(enum) {
+        register: u32,
+        number_literal: u64,
+        value: V,
+    };
+
+    pub const x86_64 = struct {
+        pub const Instruction = enum {
+            @"and",
+            call,
+            mov,
+            xor,
+        };
+
+        pub const Register = enum {
+            ebp,
+            rsp,
+            rdi,
+        };
+    };
 };
