@@ -27,7 +27,7 @@ pub const LLVM = struct {
     context: *LLVM.Context,
     module: *LLVM.Module,
     builder: *LLVM.Builder,
-    debug_info_builder: ?*LLVM.DebugInfo.Builder,
+    debug_info_builder: *LLVM.DebugInfo.Builder,
     debug_info_file_map: AutoHashMap(Compilation.Debug.File.Index, *LLVM.DebugInfo.File) = .{},
     debug_type_map: AutoHashMap(Compilation.Type.Index, *LLVM.DebugInfo.Type) = .{},
     type_name_map: AutoHashMap(Compilation.Type.Index, []const u8) = .{},
@@ -43,10 +43,10 @@ pub const LLVM = struct {
     sema_function: *Compilation.Debug.Declaration.Global = undefined,
     alloca_map: AutoHashMap(Compilation.Instruction.Index, *LLVM.Value) = .{},
     argument_allocas: AutoHashMap(Compilation.Instruction.Index, *LLVM.Value) = .{},
-    // declaration_names: AutoHashMap(Compilation.Declaration.Index, []const u8) = .{},
     return_phi_node: ?*LLVM.Value.Instruction.PhiNode = null,
     scope: *LLVM.DebugInfo.Scope = undefined,
     file: *LLVM.DebugInfo.File = undefined,
+    subprogram: *LLVM.DebugInfo.Subprogram = undefined,
     arg_index: u32 = 0,
     inside_branch: bool = false,
 
@@ -191,6 +191,8 @@ pub const LLVM = struct {
             const createLexicalBlock = bindings.NativityLLVMDebugInfoBuilderCreateLexicalBlock;
             const createParameterVariable = bindings.NativityLLVMDebugInfoBuilderCreateParameterVariable;
             const createAutoVariable = bindings.NativityLLVMDebugInfoBuilderCreateAutoVariable;
+            const createGlobalVariableExpression = bindings.NativityLLVMDebugInfoBuilderCreateGlobalVariableExpression;
+            const createExpression = bindings.NativityLLVMDebugInfoBuilderCreateExpression;
             const createBasicType = bindings.NativityLLVMDebugInfoBuilderCreateBasicType;
             const createPointerType = bindings.NativityLLVMDebugInfoBuilderCreatePointerType;
             const createStructType = bindings.NativityLLVMDebugInfoBuilderCreateStructType;
@@ -221,6 +223,10 @@ pub const LLVM = struct {
                 none = 2,
             };
         };
+
+        pub const Expression = opaque{};
+
+        pub const GlobalVariableExpression = opaque{};
 
         pub const LocalVariable = opaque {};
         pub const LexicalBlock = opaque {
@@ -324,6 +330,10 @@ pub const LLVM = struct {
 
         pub const SubroutineType = opaque {};
         pub const Type = opaque {
+            fn toScope(this: *@This()) *Scope {
+                return @ptrCast(this);
+            }
+
             pub const Derived = opaque {
                 fn toType(this: *@This()) *LLVM.DebugInfo.Type {
                     return @ptrCast(this);
@@ -345,6 +355,7 @@ pub const LLVM = struct {
 
     pub const Metadata = opaque {
         pub const Node = opaque {};
+        pub const Tuple = opaque{};
     };
 
     pub const Attribute = enum(u32) {
@@ -1085,35 +1096,6 @@ pub const LLVM = struct {
 
     // fn emitDeclaration(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, declaration_index: Compilation.Declaration.Index, maybe_argument: ?*LLVM.Value.Argument) !*LLVM.Value {
     //     _ = unit; // autofix
-    //     const sema_declaration = llvm.sema.values.declarations.get(declaration_index);
-    //     const declaration_name = llvm.sema.getName(sema_declaration.name).?;
-    //
-    //     const sema_declaration_type_index = sema_declaration.getType();
-    //
-    //     const declaration_type = if (maybe_argument) |argument| blk: {
-    //         const argument_value: *LLVM.Value = argument.toValue();
-    //         break :blk argument_value.getType();
-    //     } else try llvm.getType(sema_declaration_type_index);
-    //     const is_volatile = false;
-    //
-    //     const initial_value: ?*LLVM.Value = if (maybe_argument) |argument| blk: {
-    //         assert(sema_declaration.init_value.invalid);
-    //         const argument_value: *LLVM.Value = argument.toValue();
-    //         argument_value.setName(declaration_name.ptr, declaration_name.len);
-    //         break :blk argument_value;
-    //     } else blk: {
-    //         if (!sema_declaration.init_value.invalid) {
-    //             assert(maybe_argument == null);
-    //             break :blk switch (llvm.sema.values.array.get(sema_declaration.init_value).*) {
-    //                 .undefined => null,
-    //                 else => try llvm.emitValue(sema_declaration.init_value, sema_declaration.scope_type),
-    //             };
-    //         } else {
-    //             assert(maybe_argument != null);
-    //             break :blk null;
-    //         }
-    //     };
-    //
     //     const declaration_value: *Value = switch (sema_declaration.scope_type) {
     //         .local => blk: {
     //             const sema_declaration_type = llvm.sema.types.array.get(sema_declaration_type_index);
@@ -1129,50 +1111,6 @@ pub const LLVM = struct {
     //             const declaration_alloca = llvm.builder.createAlloca(declaration_type, address_space, alloca_array_size, declaration_name.ptr, declaration_name.len) orelse return LLVM.Value.Instruction.Error.alloca;
     //             const alloca_value: *LLVM.Value = declaration_alloca.toValue();
     //
-    //             const debug_declaration_type = try llvm.getDebugType(sema_declaration.getType());
-    //             const always_preserve = true;
-    //             const flags = LLVM.DebugInfo.Node.Flags{
-    //                 .visibility = .none,
-    //                 .forward_declaration = false,
-    //                 .apple_block = false,
-    //                 .block_by_ref_struct = false,
-    //                 .virtual = false,
-    //                 .artificial = false,
-    //                 .explicit = false,
-    //                 .prototyped = false,
-    //                 .objective_c_class_complete = false,
-    //                 .object_pointer = false,
-    //                 .vector = false,
-    //                 .static_member = false,
-    //                 .lvalue_reference = false,
-    //                 .rvalue_reference = false,
-    //                 .reserved = false,
-    //                 .inheritance = .none,
-    //                 .introduced_virtual = false,
-    //                 .bit_field = false,
-    //                 .no_return = false,
-    //                 .type_pass_by_value = false,
-    //                 .type_pass_by_reference = false,
-    //                 .enum_class = false,
-    //                 .thunk = false,
-    //                 .non_trivial = false,
-    //                 .big_endian = false,
-    //                 .little_endian = false,
-    //                 .all_calls_described = false,
-    //             };
-    //             const local_variable = if (maybe_argument) |argument| b: {
-    //                 const argument_index = argument.getIndex();
-    //                 const parameter_variable = llvm.debug_info_builder.createParameterVariable(llvm.scope, declaration_name.ptr, declaration_name.len, argument_index + 1, llvm.file, sema_declaration.line, debug_declaration_type, always_preserve, flags) orelse unreachable;
-    //                 break :b parameter_variable;
-    //             } else b: {
-    //                 // TODO:
-    //                 const alignment = 0;
-    //                 const auto_variable = llvm.debug_info_builder.createAutoVariable(llvm.scope, declaration_name.ptr, declaration_name.len, llvm.file, sema_declaration.line, debug_declaration_type, always_preserve, flags, alignment) orelse unreachable;
-    //                 break :b auto_variable;
-    //             };
-    //
-    //             const insert_declare = llvm.debug_info_builder.insertDeclare(alloca_value, local_variable, llvm.context, sema_declaration.line, sema_declaration.column, (llvm.function.getSubprogram() orelse unreachable).toLocalScope().toScope(), llvm.builder.getInsertBlock() orelse unreachable);
-    //             _ = insert_declare;
     //
     //             if (initial_value) |init_value| {
     //                 const store = llvm.builder.createStore(init_value, alloca_value, is_volatile) orelse return LLVM.Value.Instruction.Error.store;
@@ -2447,7 +2385,7 @@ pub const LLVM = struct {
         llvm.scope = previous_scope;
     }
 
-    fn getDebugInfoFile(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_file_index: Compilation.File.Index) !*DebugInfo.File {
+    fn getDebugInfoFile(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_file_index: Compilation.Debug.File.Index) !*DebugInfo.File {
         if (llvm.debug_info_file_map.get(sema_file_index)) |file| {
             return file;
         } else {
@@ -2455,7 +2393,7 @@ pub const LLVM = struct {
             const sub_path = std.fs.path.dirname(sema_file.relative_path) orelse "";
             const file_path = std.fs.path.basename(sema_file.relative_path);
             const directory_path = try std.fs.path.join(context.allocator, &.{ sema_file.package.directory.path, sub_path });
-            const debug_file = llvm.debug_info_builder.?.createFile(file_path.ptr, file_path.len, directory_path.ptr, directory_path.len) orelse unreachable;
+            const debug_file = llvm.debug_info_builder.createFile(file_path.ptr, file_path.len, directory_path.ptr, directory_path.len) orelse unreachable;
             try llvm.debug_info_file_map.putNoClobber(context.allocator, sema_file_index, debug_file);
             return debug_file;
         }
@@ -2487,17 +2425,21 @@ pub const LLVM = struct {
                     try name.appendSlice(context.allocator, element_type_name);
                     break :b name.items;
                 },
-                .@"enum",
-                .@"struct",
-                => b: {
-                    if (unit.type_declaration_map.get(sema_type_index)) |type_declaration_index| {
-                        const declaration = unit.declarations.get(type_declaration_index);
-                        const name = unit.getIdentifier(declaration.name);
-                        break :b name;
-                    } else {
-                        unreachable;
-                    }
+                .@"struct" => b: {
+                    // TODO:
+                    break :b "anon1";
                 },
+                // .@"enum",
+                // .@"struct",
+                // => b: {
+                //     if (unit.type_declaration_map.get(sema_type_index)) |type_declaration_index| {
+                //         const declaration = unit.declarations.get(type_declaration_index);
+                //         const name = unit.getIdentifier(declaration.name);
+                //         break :b name;
+                //     } else {
+                //         unreachable;
+                //     }
+                // },
                 // .optional => |optional| b: {
                 //     var name = ArrayList(u8){};
                 //     const element_type_name = try llvm.renderTypeName(optional.element_type);
@@ -2572,186 +2514,187 @@ pub const LLVM = struct {
     }
 
     fn getDebugType(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_type_index: Compilation.Type.Index) !*LLVM.DebugInfo.Type {
-        if (llvm.debug_info_builder) |di_builder| {
-            if (llvm.debug_type_map.get(sema_type_index)) |t| {
-                return t;
-            } else {
-                const name = try llvm.renderTypeName(unit, context, sema_type_index);
-                const sema_type = unit.types.get(sema_type_index);
-                const result: *LLVM.DebugInfo.Type = switch (sema_type.*) {
-                    .integer => |integer| b: {
-                        const dwarf_encoding: LLVM.DebugInfo.AttributeType = switch (integer.signedness) {
-                            .unsigned => .unsigned,
-                            .signed => .signed,
-                        };
-                        const flags = LLVM.DebugInfo.Node.Flags{
-                            .visibility = .none,
-                            .forward_declaration = false,
-                            .apple_block = false,
-                            .block_by_ref_struct = false,
-                            .virtual = false,
-                            .artificial = false,
-                            .explicit = false,
-                            .prototyped = false,
-                            .objective_c_class_complete = false,
-                            .object_pointer = false,
-                            .vector = false,
-                            .static_member = false,
-                            .lvalue_reference = false,
-                            .rvalue_reference = false,
-                            .reserved = false,
-                            .inheritance = .none,
-                            .introduced_virtual = false,
-                            .bit_field = false,
-                            .no_return = false,
-                            .type_pass_by_value = false,
-                            .type_pass_by_reference = false,
-                            .enum_class = false,
-                            .thunk = false,
-                            .non_trivial = false,
-                            .big_endian = false,
-                            .little_endian = false,
-                            .all_calls_described = false,
-                        };
-                        const integer_type = di_builder.createBasicType(name.ptr, name.len, integer.bit_count, dwarf_encoding, flags) orelse unreachable;
-                        break :b integer_type;
-                    },
-                    .pointer => |pointer| b: {
-                        const element_type = try llvm.getDebugType(unit, context, pointer.type);
-                        const pointer_width = @bitSizeOf(usize);
-                        const alignment = 0;
-                        const pointer_type = di_builder.createPointerType(element_type, pointer_width, alignment, name.ptr, name.len) orelse unreachable;
-                        break :b pointer_type.toType();
-                    },
-                    .bool => {
-                        const flags = LLVM.DebugInfo.Node.Flags{
-                            .visibility = .none,
-                            .forward_declaration = false,
-                            .apple_block = false,
-                            .block_by_ref_struct = false,
-                            .virtual = false,
-                            .artificial = false,
-                            .explicit = false,
-                            .prototyped = false,
-                            .objective_c_class_complete = false,
-                            .object_pointer = false,
-                            .vector = false,
-                            .static_member = false,
-                            .lvalue_reference = false,
-                            .rvalue_reference = false,
-                            .reserved = false,
-                            .inheritance = .none,
-                            .introduced_virtual = false,
-                            .bit_field = false,
-                            .no_return = false,
-                            .type_pass_by_value = false,
-                            .type_pass_by_reference = false,
-                            .enum_class = false,
-                            .thunk = false,
-                            .non_trivial = false,
-                            .big_endian = false,
-                            .little_endian = false,
-                            .all_calls_described = false,
-                        };
-                        const boolean_type = di_builder.createBasicType("bool", "bool".len, 1, .boolean, flags) orelse unreachable;
-                        return boolean_type;
-                    },
-                    // // .@"struct" => |struct_index| b: {
-                    // //     const sema_struct_type = unit.structs.get(struct_index);
-                    // //
-                    // //     var field_types = try ArrayList(*LLVM.DebugInfo.Type).initCapacity(context.allocator, sema_struct_type.fields.items.len);
-                    // //     for (sema_struct_type.fields.items) |struct_field_index| {
-                    // //         const struct_field = llvm.sema.types.container_fields.get(struct_field_index);
-                    // //         const field_type = try llvm.getDebugType(struct_field.type);
-                    // //         field_types.appendAssumeCapacity(field_type);
-                    // //     }
-                    // //     const sema_declaration_index = llvm.sema.map.types.get(sema_type_index) orelse unreachable;
-                    // //     const sema_declaration = llvm.sema.values.declarations.get(sema_declaration_index);
-                    // //     const file = try llvm.getDebugInfoFile(llvm.sema.values.scopes.get(sema_declaration.scope).file);
-                    // //     const line = sema_declaration.line + 1;
-                    // //     const struct_type = llvm.createDebugStructType(.{ .scope = null, .name = name, .file = file, .line = line, .bitsize = sema_type.getBitSize(llvm.sema), .alignment = 0, .field_types = field_types.items });
-                    // //     break :b struct_type.toType();
-                    // // },
-                    // .@"enum" => |enum_index| b: {
-                    //     const enum_type = llvm.sema.types.enums.get(enum_index);
-                    //     var enumerators = try ArrayList(*LLVM.DebugInfo.Type.Enumerator).initCapacity(context.allocator, enum_type.fields.items.len);
-                    //     for (enum_type.fields.items) |enum_field_index| {
-                    //         const enum_field = llvm.sema.types.enum_fields.get(enum_field_index);
-                    //         const enum_field_name = llvm.sema.getName(enum_field.name).?;
-                    //
-                    //         const is_unsigned = true;
-                    //         const enumerator = llvm.debug_info_builder.createEnumerator(enum_field_name.ptr, enum_field_name.len, enum_field.value, is_unsigned) orelse unreachable;
-                    //         enumerators.appendAssumeCapacity(enumerator);
-                    //     }
-                    //
-                    //     const sema_declaration_index = llvm.sema.map.types.get(sema_type_index) orelse unreachable;
-                    //     const sema_declaration = llvm.sema.values.declarations.get(sema_declaration_index);
-                    //     const file = try llvm.getDebugInfoFile(llvm.sema.values.scopes.get(sema_declaration.scope).file);
-                    //     const bit_size = llvm.sema.types.array.get(enum_type.backing_type).getBitSize(llvm.sema);
-                    //     const backing_type = try llvm.getDebugType(enum_type.backing_type);
-                    //     const alignment = 0;
-                    //     const line = sema_declaration.line + 1;
-                    //     const enumeration_type = llvm.debug_info_builder.createEnumerationType(llvm.scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.items.ptr, enumerators.items.len, backing_type) orelse unreachable;
-                    //     break :b enumeration_type.toType();
-                    // },
-                    // .optional => |optional| {
-                    //     const element_type = try llvm.getDebugType(optional.element_type);
-                    //     const bool_type = try llvm.getDebugType(Compilation.Type.boolean);
-                    //     const field_types = [2]*LLVM.DebugInfo.Type{ element_type, bool_type };
-                    //     const struct_type = llvm.createDebugStructType(.{
-                    //         .scope = null,
-                    //         .name = name,
-                    //         .file = null,
-                    //         .line = 1,
-                    //         .bitsize = sema_type.getBitSize(llvm.sema),
-                    //         .alignment = 0,
-                    //         .field_types = &field_types,
-                    //     });
-                    //     return struct_type.toType();
-                    // },
-                    // .slice => |slice| b: {
-                    //     const pointer_type = try llvm.getDebugType(llvm.sema.map.pointers.get(.{
-                    //         .element_type = slice.element_type,
-                    //         .many = true,
-                    //         .@"const" = slice.@"const",
-                    //         .termination = slice.termination,
-                    //     }).?);
-                    //     const len_type = try llvm.getDebugType(Compilation.Type.usize);
-                    //     const scope = null;
-                    //     const file = null;
-                    //     const line = 1;
-                    //     // const forward_declared_type = llvm.debug_info_builder.createReplaceableCompositeType(tag_count, name.ptr, name.len, scope, file, line) orelse unreachable;
-                    //     // tag_count += 1;
-                    //
-                    //     const field_types = [2]*LLVM.DebugInfo.Type{ pointer_type, len_type };
-                    //     const struct_type = llvm.createDebugStructType(.{
-                    //         .scope = scope,
-                    //         .name = name,
-                    //         .file = file,
-                    //         .line = line,
-                    //         .bitsize = 2 * @bitSizeOf(usize),
-                    //         .alignment = @alignOf(usize),
-                    //         .field_types = &field_types,
-                    //     });
-                    //     break :b struct_type.toType();
-                    // },
-                    // .array => |array| b: {
-                    //     const byte_size = array.element_count * llvm.sema.types.array.get(array.element_type).getSize();
-                    //     const bit_size = byte_size * 8;
-                    //     const element_type = try llvm.getDebugType(array.element_type);
-                    //     // extern fn bindings.NativityLLVMDebugInfoBuilderCreateArrayType(builder: *LLVM.DebugInfo.Builder, bit_size: u64, alignment: u32, type: *LLVM.DebugInfo.Type, element_count: usize) ?*LLVM.DebugInfo.Type.Composite;
-                    //     const array_type = llvm.debug_info_builder.createArrayType(bit_size, 1, element_type, array.element_count) orelse unreachable;
-                    //     break :b array_type.toType();
-                    // },
-                    else => |t| @panic(@tagName(t)),
-                };
-
-                try llvm.debug_type_map.putNoClobber(context.allocator, sema_type_index, result);
-
-                return result;
-            }
+        if (llvm.debug_type_map.get(sema_type_index)) |t| {
+            return t;
         } else {
-            unreachable;
+            const name = try llvm.renderTypeName(unit, context, sema_type_index);
+            const sema_type = unit.types.get(sema_type_index);
+            const result: *LLVM.DebugInfo.Type = switch (sema_type.*) {
+                .integer => |integer| b: {
+                    const dwarf_encoding: LLVM.DebugInfo.AttributeType = switch (integer.signedness) {
+                        .unsigned => .unsigned,
+                        .signed => .signed,
+                    };
+                    const flags = LLVM.DebugInfo.Node.Flags{
+                        .visibility = .none,
+                        .forward_declaration = false,
+                        .apple_block = false,
+                        .block_by_ref_struct = false,
+                        .virtual = false,
+                        .artificial = false,
+                        .explicit = false,
+                        .prototyped = false,
+                        .objective_c_class_complete = false,
+                        .object_pointer = false,
+                        .vector = false,
+                        .static_member = false,
+                        .lvalue_reference = false,
+                        .rvalue_reference = false,
+                        .reserved = false,
+                        .inheritance = .none,
+                        .introduced_virtual = false,
+                        .bit_field = false,
+                        .no_return = false,
+                        .type_pass_by_value = false,
+                        .type_pass_by_reference = false,
+                        .enum_class = false,
+                        .thunk = false,
+                        .non_trivial = false,
+                        .big_endian = false,
+                        .little_endian = false,
+                        .all_calls_described = false,
+                    };
+                    const integer_type = llvm.debug_info_builder.createBasicType(name.ptr, name.len, integer.bit_count, dwarf_encoding, flags) orelse unreachable;
+                    break :b integer_type;
+                },
+                .pointer => |pointer| b: {
+                    const element_type = try llvm.getDebugType(unit, context, pointer.type);
+                    const pointer_width = @bitSizeOf(usize);
+                    const alignment = 0;
+                    const pointer_type = llvm.debug_info_builder.createPointerType(element_type, pointer_width, alignment, name.ptr, name.len) orelse unreachable;
+                    break :b pointer_type.toType();
+                },
+                .bool => {
+                    const flags = LLVM.DebugInfo.Node.Flags{
+                        .visibility = .none,
+                        .forward_declaration = false,
+                        .apple_block = false,
+                        .block_by_ref_struct = false,
+                        .virtual = false,
+                        .artificial = false,
+                        .explicit = false,
+                        .prototyped = false,
+                        .objective_c_class_complete = false,
+                        .object_pointer = false,
+                        .vector = false,
+                        .static_member = false,
+                        .lvalue_reference = false,
+                        .rvalue_reference = false,
+                        .reserved = false,
+                        .inheritance = .none,
+                        .introduced_virtual = false,
+                        .bit_field = false,
+                        .no_return = false,
+                        .type_pass_by_value = false,
+                        .type_pass_by_reference = false,
+                        .enum_class = false,
+                        .thunk = false,
+                        .non_trivial = false,
+                        .big_endian = false,
+                        .little_endian = false,
+                        .all_calls_described = false,
+                    };
+                    const boolean_type = llvm.debug_info_builder.createBasicType("bool", "bool".len, 1, .boolean, flags) orelse unreachable;
+                    return boolean_type;
+                },
+                .@"struct" => |struct_index| b: {
+                    const sema_struct_type = unit.structs.get(struct_index);
+
+                    assert(sema_struct_type.fields.items.len == 0);
+                    // var field_types = try ArrayList(*LLVM.DebugInfo.Type).initCapacity(context.allocator, sema_struct_type.fields.items.len);
+                    for (sema_struct_type.fields.items) |struct_field_index| {
+                        _ = struct_field_index; // autofix
+                        unreachable;
+                        // const struct_field = unit. .get(struct_field_index);
+                        // const field_type = try llvm.getDebugType(struct_field.type);
+                        // field_types.appendAssumeCapacity(field_type);
+                    }
+
+                    const fields = &.{};
+                    // const sema_declaration_index = llvm.sema.map.types.get(sema_type_index) orelse unreachable;
+                    // const sema_declaration = llvm.sema.values.declarations.get(sema_declaration_index);
+                    const file = try llvm.getDebugInfoFile(unit, context, sema_struct_type.scope.scope.file);
+                    // const line = sema_declaration.line + 1;
+                    const line = 0;
+                    const struct_type = llvm.createDebugStructType(.{ .scope = null, .name = name, .file = file, .line = line, .bitsize = 0, .alignment = 0, .field_types = fields });
+                    break :b struct_type.toType();
+                },
+                // .@"enum" => |enum_index| b: {
+                //     const enum_type = llvm.sema.types.enums.get(enum_index);
+                //     var enumerators = try ArrayList(*LLVM.DebugInfo.Type.Enumerator).initCapacity(context.allocator, enum_type.fields.items.len);
+                //     for (enum_type.fields.items) |enum_field_index| {
+                //         const enum_field = llvm.sema.types.enum_fields.get(enum_field_index);
+                //         const enum_field_name = llvm.sema.getName(enum_field.name).?;
+                //
+                //         const is_unsigned = true;
+                //         const enumerator = llvm.debug_info_builder.createEnumerator(enum_field_name.ptr, enum_field_name.len, enum_field.value, is_unsigned) orelse unreachable;
+                //         enumerators.appendAssumeCapacity(enumerator);
+                //     }
+                //
+                //     const sema_declaration_index = llvm.sema.map.types.get(sema_type_index) orelse unreachable;
+                //     const sema_declaration = llvm.sema.values.declarations.get(sema_declaration_index);
+                //     const file = try llvm.getDebugInfoFile(llvm.sema.values.scopes.get(sema_declaration.scope).file);
+                //     const bit_size = llvm.sema.types.array.get(enum_type.backing_type).getBitSize(llvm.sema);
+                //     const backing_type = try llvm.getDebugType(enum_type.backing_type);
+                //     const alignment = 0;
+                //     const line = sema_declaration.line + 1;
+                //     const enumeration_type = llvm.debug_info_builder.createEnumerationType(llvm.scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.items.ptr, enumerators.items.len, backing_type) orelse unreachable;
+                //     break :b enumeration_type.toType();
+                // },
+                // .optional => |optional| {
+                //     const element_type = try llvm.getDebugType(optional.element_type);
+                //     const bool_type = try llvm.getDebugType(Compilation.Type.boolean);
+                //     const field_types = [2]*LLVM.DebugInfo.Type{ element_type, bool_type };
+                //     const struct_type = llvm.createDebugStructType(.{
+                //         .scope = null,
+                //         .name = name,
+                //         .file = null,
+                //         .line = 1,
+                //         .bitsize = sema_type.getBitSize(llvm.sema),
+                //         .alignment = 0,
+                //         .field_types = &field_types,
+                //     });
+                //     return struct_type.toType();
+                // },
+                // .slice => |slice| b: {
+                //     const pointer_type = try llvm.getDebugType(llvm.sema.map.pointers.get(.{
+                //         .element_type = slice.element_type,
+                //         .many = true,
+                //         .@"const" = slice.@"const",
+                //         .termination = slice.termination,
+                //     }).?);
+                //     const len_type = try llvm.getDebugType(Compilation.Type.usize);
+                //     const scope = null;
+                //     const file = null;
+                //     const line = 1;
+                //     // const forward_declared_type = llvm.debug_info_builder.createReplaceableCompositeType(tag_count, name.ptr, name.len, scope, file, line) orelse unreachable;
+                //     // tag_count += 1;
+                //
+                //     const field_types = [2]*LLVM.DebugInfo.Type{ pointer_type, len_type };
+                //     const struct_type = llvm.createDebugStructType(.{
+                //         .scope = scope,
+                //         .name = name,
+                //         .file = file,
+                //         .line = line,
+                //         .bitsize = 2 * @bitSizeOf(usize),
+                //         .alignment = @alignOf(usize),
+                //         .field_types = &field_types,
+                //     });
+                //     break :b struct_type.toType();
+                // },
+                // .array => |array| b: {
+                //     const byte_size = array.element_count * llvm.sema.types.array.get(array.element_type).getSize();
+                //     const bit_size = byte_size * 8;
+                //     const element_type = try llvm.getDebugType(array.element_type);
+                //     // extern fn bindings.NativityLLVMDebugInfoBuilderCreateArrayType(builder: *LLVM.DebugInfo.Builder, bit_size: u64, alignment: u32, type: *LLVM.DebugInfo.Type, element_count: usize) ?*LLVM.DebugInfo.Type.Composite;
+                //     const array_type = llvm.debug_info_builder.createArrayType(bit_size, 1, element_type, array.element_count) orelse unreachable;
+                //     break :b array_type.toType();
+                // },
+                else => |t| @panic(@tagName(t)),
+            };
+
+            try llvm.debug_type_map.putNoClobber(context.allocator, sema_type_index, result);
+            return result;
         }
     }
 
@@ -2836,64 +2779,10 @@ pub const LLVM = struct {
         _ = basic_block_index; // autofix
     }
 
-    fn getGlobal(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, global_variable_index: Compilation.GlobalVariable.Index) !*LLVM.Value.Constant.GlobalVariable {
-        if (llvm.global_variable_map.get(global_variable_index)) |result| {
-            return result;
-        } else {
-            const global_variable_descriptor = unit.global_variables.get(global_variable_index);
-            const is_constant = switch (global_variable_descriptor.mutability) {
-                .@"const" => true,
-                .@"var" => false,
-            };
-            const global_type = try llvm.getType(unit, context, global_variable_descriptor.symbol.type);
-            const name = unit.getIdentifier(global_variable_descriptor.symbol.name);
-            // TODO:
-            const linkage = LLVM.Linkage.@"extern";
-            // Manual lower here to make sure the expression is constant?
-            const initializer = switch (unit.values.get(global_variable_descriptor.value).*) {
-                // .integer => |integer| b: {
-                //     const constant_int = try llvm.emitInteger(unit, integer);
-                //     const constant = constant_int.toConstant();
-                //     break :b constant;
-                // },
-                .undefined => b: {
-                    const undefined_value = global_type.getUndefined() orelse unreachable;
-                    break :b undefined_value.toConstant();
-                },
-                else => |t| @panic(@tagName(t)),
-            };
-    
-            const thread_local_mode = LLVM.ThreadLocalMode.not_thread_local;
-            const externally_initialized = false;
-            const global_variable = llvm.module.addGlobalVariable(global_type, is_constant, linkage, initializer, name.ptr, name.len, null, thread_local_mode, address_space, externally_initialized) orelse return LLVM.Value.Error.constant_int;
-
-            try llvm.global_variable_map.putNoClobber(context.allocator, global_variable_index, global_variable);
-
-            return global_variable;
-        }
-    }
-
-    fn getDeclarationAlloca(llvm: *LLVM, unit: *Compilation.Unit, declaration_index: Compilation.Declaration.Index) !*LLVM.Value {
-        _ = llvm; // autofix
-        _ = unit; // autofix
-        _ = declaration_index; // autofix
-        unreachable;
-    }
-    
-    fn getScope(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_scope: *Compilation.Scope) !*LLVM.DebugInfo.Scope {
-        _ = unit; // autofix
-        _ = context; // autofix
+    fn getScope(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_scope: *Compilation.Debug.Scope) !*LLVM.DebugInfo.Scope {
         switch (sema_scope.kind) {
-            .function => {
-                if (llvm.scope.toSubprogram()) |_| {
-                    return llvm.scope;
-                } else {
-                    unreachable;
-                }
-            },
-            .block => {
-                const scope = llvm.scope_map.get(sema_scope).?;
-                return scope;
+            .function, .block, .compilation_unit, => {
+                return llvm.scope_map.get(sema_scope).?;
             },
             .file => {
                 unreachable;
@@ -2902,13 +2791,14 @@ pub const LLVM = struct {
                 if (llvm.scope_map.get(sema_scope)) |scope| {
                     return scope;
                 } else {
-                    // unit.struct_type_map.get();
-                    unreachable;
+                    const global_scope = @fieldParentPtr(Compilation.Debug.Scope.Global, "scope", sema_scope);
+                    const struct_type = @fieldParentPtr(Compilation.Struct, "scope", global_scope);
+                    const struct_t = try llvm.getDebugType(unit, context, struct_type.type);
+                    return struct_t.toScope();
                 }
             },
             else => |t| @panic(@tagName(t)),
         }
-        // const lexical_block = llvm.debug_info_builder.createLexicalBlock(previous_scope, llvm.file, block.line + 1, block.column + 1) orelse unreachable;
         unreachable;
     }
 };
@@ -2937,19 +2827,18 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     const module = LLVM.Module.create(@ptrCast(unit.descriptor.name.ptr), unit.descriptor.name.len, llvm_context) orelse return Error.module;
     // TODO:
     const builder = LLVM.Builder.create(llvm_context) orelse return Error.builder;
-    const generate_debug_info = false;
 
     var llvm = LLVM{
         .context = llvm_context,
         .module = module,
         .builder = builder,
-        .debug_info_builder = if (generate_debug_info) module.createDebugInfoBuilder() orelse return Error.debug_info_builder else null,
+        .debug_info_builder = module.createDebugInfoBuilder() orelse return Error.debug_info_builder,
     };
 
-    if (llvm.debug_info_builder) |debug_info_builder| {
+    if (unit.descriptor.generate_debug_information) {
         const filename = "main";
         const directory = ".";
-        const debug_info_file = debug_info_builder.createFile(filename, filename.len, directory, directory.len) orelse unreachable;
+        const debug_info_file = llvm.debug_info_builder.createFile(filename, filename.len, directory, directory.len) orelse unreachable;
         const producer = "nativity";
         const is_optimized = false;
         const flags = "";
@@ -2963,8 +2852,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         const ranges_base_address = false;
         const sysroot = "";
         const sdk = "";
-        const compile_unit = debug_info_builder.createCompileUnit(LLVM.DebugInfo.Language.c, debug_info_file, producer, producer.len, is_optimized, flags, flags.len, runtime_version, splitname, splitname.len, debug_info_kind, DWOId, split_debug_inlining, debug_info_for_profiling, name_table_kind, ranges_base_address, sysroot, sysroot.len, sdk, sdk.len) orelse unreachable;
+        const compile_unit = llvm.debug_info_builder.createCompileUnit(LLVM.DebugInfo.Language.c, debug_info_file, producer, producer.len, is_optimized, flags, flags.len, runtime_version, splitname, splitname.len, debug_info_kind, DWOId, split_debug_inlining, debug_info_for_profiling, name_table_kind, ranges_base_address, sysroot, sysroot.len, sdk, sdk.len) orelse unreachable;
         llvm.scope = compile_unit.toScope();
+
+        try llvm.scope_map.putNoClobber(context.allocator, &unit.scope.scope, llvm.scope);
     }
 
     // First, cache all the global variables
@@ -2984,6 +2875,20 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         const externally_initialized = false;
         const global_variable = llvm.module.addGlobalVariable(global_type, constant, linkage, initializer, name.ptr, name.len, null, thread_local_mode, address_space, externally_initialized) orelse return LLVM.Value.Error.constant_int;
         try llvm.global_variable_map.putNoClobber(context.allocator, global_declaration, global_variable);
+
+        if (unit.descriptor.generate_debug_information) {
+            const scope = try llvm.getScope(unit, context, global_declaration.declaration.scope);
+            const file = try llvm.getDebugInfoFile(unit, context, global_declaration.declaration.scope.file);
+            const debug_type = try llvm.getDebugType(unit, context, global_declaration.declaration.type);
+            const is_local_to_unit = !global_declaration.attributes.contains(.@"export");
+            const is_defined = true;
+            const expression = null;
+            const declaration = null;
+            const template_parameters = null;
+            const alignment = 0;
+            const debug_global_variable = llvm.debug_info_builder.createGlobalVariableExpression(scope, name.ptr, name.len, name.ptr, name.len, file, global_declaration.declaration.line, debug_type, is_local_to_unit, is_defined, expression, declaration, template_parameters, alignment) orelse unreachable;
+            _ = debug_global_variable; // autofix
+        }
     }
 
     for (llvm.global_variable_map.keys(), llvm.global_variable_map.values()) |global_declaration, global_variable| {
@@ -3052,63 +2957,69 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         llvm.sema_function = function_declaration;
         llvm.inside_branch = false;
         const function_prototype = unit.function_prototypes.get(unit.types.get(function_definition.type).function);
-        // if (llvm.debug_info_builder) |di_builder| {
-        //     const debug_file = try llvm.getDebugInfoFile(unit, context, sema_declaration.scope.file);
-        //     var parameter_types = try ArrayList(*LLVM.DebugInfo.Type).initCapacity(context.allocator, function_prototype.argument_types.len);
-        //     for (function_prototype.argument_types) |argument_type_index| {
-        //         const argument_type = try llvm.getDebugType(unit, context, argument_type_index);
-        //         parameter_types.appendAssumeCapacity(argument_type);
-        //     }
-        //     const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
-        //         .visibility = .none,
-        //         .forward_declaration = false,
-        //         .apple_block = false,
-        //         .block_by_ref_struct = false,
-        //         .virtual = false,
-        //         .artificial = false,
-        //         .explicit = false,
-        //         .prototyped = false,
-        //         .objective_c_class_complete = false,
-        //         .object_pointer = false,
-        //         .vector = false,
-        //         .static_member = false,
-        //         .lvalue_reference = false,
-        //         .rvalue_reference = false,
-        //         .reserved = false,
-        //         .inheritance = .none,
-        //         .introduced_virtual = false,
-        //         .bit_field = false,
-        //         .no_return = false,
-        //         .type_pass_by_value = false,
-        //         .type_pass_by_reference = false,
-        //         .enum_class = false,
-        //         .thunk = false,
-        //         .non_trivial = false,
-        //         .big_endian = false,
-        //         .little_endian = false,
-        //         .all_calls_described = false,
-        //     };
-        //     const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
-        //     const subroutine_type = di_builder.createSubroutineType(parameter_types.items.ptr, parameter_types.items.len, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
-        //     const scope_line = 0;
-        //     const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
-        //         .virtuality = .none,
-        //         .local_to_unit = true,
-        //         .definition = true,
-        //         .optimized = false,
-        //         .pure = false,
-        //         .elemental = false,
-        //         .recursive = false,
-        //         .main_subprogram = false,
-        //         .deleted = false,
-        //         .object_c_direct = false,
-        //     };
-        //     const subprogram_declaration = null;
-        //     const subprogram = di_builder.createFunction(debug_file.toScope(), name.ptr, name.len, name.ptr, name.len, debug_file, sema_declaration.line + 1, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration) orelse unreachable;
-        //     llvm.function.setSubprogram(subprogram);
-        //     llvm.file = subprogram.getFile() orelse unreachable;
-        //     llvm.scope = subprogram.toLocalScope().toScope();
-        // }
+
+        if (unit.descriptor.generate_debug_information) {
+            const debug_file = try llvm.getDebugInfoFile(unit, context, function_declaration.declaration.scope.file);
+            var parameter_types = try ArrayList(*LLVM.DebugInfo.Type).initCapacity(context.allocator, function_prototype.argument_types.len);
+            for (function_prototype.argument_types) |argument_type_index| {
+                const argument_type = try llvm.getDebugType(unit, context, argument_type_index);
+                parameter_types.appendAssumeCapacity(argument_type);
+            }
+            const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
+                .visibility = .none,
+                .forward_declaration = false,
+                .apple_block = false,
+                .block_by_ref_struct = false,
+                .virtual = false,
+                .artificial = false,
+                .explicit = false,
+                .prototyped = false,
+                .objective_c_class_complete = false,
+                .object_pointer = false,
+                .vector = false,
+                .static_member = false,
+                .lvalue_reference = false,
+                .rvalue_reference = false,
+                .reserved = false,
+                .inheritance = .none,
+                .introduced_virtual = false,
+                .bit_field = false,
+                .no_return = false,
+                .type_pass_by_value = false,
+                .type_pass_by_reference = false,
+                .enum_class = false,
+                .thunk = false,
+                .non_trivial = false,
+                .big_endian = false,
+                .little_endian = false,
+                .all_calls_described = false,
+            };
+            const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
+            const subroutine_type = llvm.debug_info_builder.createSubroutineType(parameter_types.items.ptr, parameter_types.items.len, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
+            const scope_line = 0;
+            const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
+                .virtuality = .none,
+                .local_to_unit = true,
+                .definition = true,
+                .optimized = false,
+                .pure = false,
+                .elemental = false,
+                .recursive = false,
+                .main_subprogram = false,
+                .deleted = false,
+                .object_c_direct = false,
+            };
+            const subprogram_declaration = null;
+            const name = unit.getIdentifier(function_declaration.declaration.name);
+            const subprogram = llvm.debug_info_builder.createFunction(debug_file.toScope(), name.ptr, name.len, name.ptr, name.len, debug_file, function_declaration.declaration.line + 1, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration) orelse unreachable;
+            llvm.function.setSubprogram(subprogram);
+            llvm.file = subprogram.getFile() orelse unreachable;
+            llvm.subprogram = subprogram;
+            llvm.scope = subprogram.toLocalScope().toScope();
+
+            try llvm.scope_map.putNoClobber(context.allocator, &function_definition.scope.scope, llvm.scope);
+        }
+
         llvm.arg_index = 0;
         llvm.alloca_map.clearRetainingCapacity();
 
@@ -3122,17 +3033,32 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
             switch (sema_instruction.*) {
                 .push_scope => |push_scope| {
-                    _ = push_scope; // autofix
-                    // const old_scope = try llvm.getScope(unit, context, push_scope.old);
-                    // const lexical_block = llvm.debug_info_builder.createLexicalBlock(old_scope, llvm.file, push_scope.new.line + 1, push_scope.new.column + 1) orelse unreachable;
-                    // try llvm.scope_map.putNoClobber(context.allocator, push_scope.new, lexical_block.toScope());
-                    // llvm.scope = lexical_block.toScope();
+                    const old_scope = try llvm.getScope(unit, context, push_scope.old);
+                    assert(@intFromEnum(push_scope.old.kind) >= @intFromEnum(Compilation.Debug.Scope.Kind.function));
+
+                    const lexical_block = llvm.debug_info_builder.createLexicalBlock(old_scope, llvm.file, push_scope.new.line + 1, push_scope.new.column + 1) orelse unreachable;
+                    try llvm.scope_map.putNoClobber(context.allocator, push_scope.new, lexical_block.toScope());
+                    llvm.scope = lexical_block.toScope();
+                },
+                .pop_scope => |pop_scope| {
+                    const old = try llvm.getScope(unit, context, pop_scope.old);
+                    assert(llvm.scope == old);
+                    const new = try llvm.getScope(unit, context, pop_scope.new);
+                    if (pop_scope.new.kind == .function) {
+                        assert(new.toSubprogram() orelse unreachable == llvm.subprogram);
+                    }
+                    llvm.scope = new;
+                    var scope = pop_scope.old;
+                    while (scope.kind != .function) {
+                        scope = scope.parent.?;
+                    }
+                    const subprogram_scope = try llvm.getScope(unit, context, scope);
+                    assert(llvm.subprogram == subprogram_scope.toSubprogram() orelse unreachable);
                 },
                 .debug_checkpoint => |debug_checkpoint| {
-                    _ = debug_checkpoint; // autofix
-                    // const scope = try llvm.getScope(unit, context, debug_checkpoint.scope);
-                    // assert(scope == llvm.scope);
-                    // llvm.builder.setCurrentDebugLocation(llvm.context, debug_checkpoint.line + 1, debug_checkpoint.column + 1, scope, llvm.function);
+                    const scope = try llvm.getScope(unit, context, debug_checkpoint.scope);
+                    assert(scope == llvm.scope);
+                    llvm.builder.setCurrentDebugLocation(llvm.context, debug_checkpoint.line + 1, debug_checkpoint.column + 1, scope, llvm.function);
                 },
                 .inline_assembly => |inline_assembly_index| {
                     const assembly_block = unit.inline_assembly.get(inline_assembly_index);
@@ -3209,37 +3135,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, assembly_statements.items.ptr, assembly_statements.items.len, constraints.items.ptr, constraints.items.len, has_side_effects, is_align_stack, dialect, can_throw) orelse return LLVM.Value.Error.inline_assembly;
                     const call = llvm.builder.createCall(function_type, inline_assembly.toValue(), operand_values.items.ptr, operand_values.items.len, "", "".len, null) orelse return LLVM.Value.Instruction.Error.call;
                     try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, call.toValue());
-                },
-                .pop_scope => {},
-                .argument_declaration => |argument_declaration| {
-                    var argument_buffer: [16]*LLVM.Value.Argument = undefined;
-                    var argument_count: usize = argument_buffer.len;
-                    llvm.function.getArguments(&argument_buffer, &argument_count);
-                    const arguments = argument_buffer[0..argument_count];
-                    const argument = arguments[llvm.arg_index];
-                    llvm.arg_index += 1;
-                    const name = unit.getIdentifier(argument_declaration.name);
-                    argument.toValue().setName(name.ptr, name.len);
-                    const argument_type_index = argument_declaration.type;
-                    switch (unit.types.get(argument_type_index).*) {
-                        .void, .noreturn, .type => unreachable,
-                        .comptime_int => unreachable,
-                        .bool => unreachable,
-                        .@"struct" => {},
-                        .@"enum" => {},
-                        .function => unreachable,
-                        .integer => {},
-                        .pointer => {},
-                    }
-                    const argument_type = argument.toValue().getType();
-                    const alloca_array_size: ?*LLVM.Value = null;
-                    const argument_value = argument.toValue();
-                    const declaration_alloca = llvm.builder.createAlloca(argument_type, address_space, alloca_array_size, "", "".len) orelse return LLVM.Value.Instruction.Error.alloca;
-                    const is_volatile = false;
-                    const store = llvm.builder.createStore(argument_value, declaration_alloca.toValue(), is_volatile) orelse return LLVM.Value.Instruction.Error.store;
-                    _ = store; // autofix
-                    try llvm.argument_allocas.putNoClobber(context.allocator, instruction_index, declaration_alloca.toValue());
-                    try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, declaration_alloca.toValue());
                 },
                 .stack_slot => |stack_slot| {
                     switch (unit.types.get(stack_slot.type).*) {
@@ -3401,6 +3296,124 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                 .@"unreachable" => {
                     _ = llvm.builder.createUnreachable() orelse return LLVM.Value.Instruction.Error.@"unreachable";
                 },
+                .argument_declaration => |argument_declaration| {
+                    var argument_buffer: [16]*LLVM.Value.Argument = undefined;
+                    var argument_count: usize = argument_buffer.len;
+                    llvm.function.getArguments(&argument_buffer, &argument_count);
+                    const arguments = argument_buffer[0..argument_count];
+                    const argument_index = llvm.arg_index;
+                    llvm.arg_index += 1;
+                    const argument = arguments[argument_index];
+                    const name = unit.getIdentifier(argument_declaration.declaration.name);
+                    argument.toValue().setName(name.ptr, name.len);
+                    const argument_type_index = argument_declaration.declaration.type;
+                    switch (unit.types.get(argument_type_index).*) {
+                        .void, .noreturn, .type => unreachable,
+                        .comptime_int => unreachable,
+                        .bool => unreachable,
+                        .@"struct" => {},
+                        .@"enum" => {},
+                        .function => unreachable,
+                        .integer => {},
+                        .pointer => {},
+                    }
+                    const argument_type = argument.toValue().getType();
+                    const alloca_array_size: ?*LLVM.Value = null;
+                    const argument_value = argument.toValue();
+                    const declaration_alloca = llvm.builder.createAlloca(argument_type, address_space, alloca_array_size, "", "".len) orelse return LLVM.Value.Instruction.Error.alloca;
+
+                    if (unit.descriptor.generate_debug_information) {
+                        const debug_declaration_type = try llvm.getDebugType(unit, context, argument_declaration.declaration.type);
+                        const always_preserve = true;
+                        const flags = LLVM.DebugInfo.Node.Flags{
+                            .visibility = .none,
+                            .forward_declaration = false,
+                            .apple_block = false,
+                            .block_by_ref_struct = false,
+                            .virtual = false,
+                            .artificial = false,
+                            .explicit = false,
+                            .prototyped = false,
+                            .objective_c_class_complete = false,
+                            .object_pointer = false,
+                            .vector = false,
+                            .static_member = false,
+                            .lvalue_reference = false,
+                            .rvalue_reference = false,
+                            .reserved = false,
+                            .inheritance = .none,
+                            .introduced_virtual = false,
+                            .bit_field = false,
+                            .no_return = false,
+                            .type_pass_by_value = false,
+                            .type_pass_by_reference = false,
+                            .enum_class = false,
+                            .thunk = false,
+                            .non_trivial = false,
+                            .big_endian = false,
+                            .little_endian = false,
+                            .all_calls_described = false,
+                        };
+                        const declaration_name = unit.getIdentifier(argument_declaration.declaration.name);
+                        const line = argument_declaration.declaration.line;
+                        const column = argument_declaration.declaration.column;
+                        const debug_parameter_variable = llvm.debug_info_builder.createParameterVariable(llvm.scope, declaration_name.ptr, declaration_name.len, argument_index, llvm.file, line, debug_declaration_type, always_preserve, flags) orelse unreachable;
+
+                        const insert_declare = llvm.debug_info_builder.insertDeclare(declaration_alloca.toValue(), debug_parameter_variable, llvm.context, line, column, (llvm.function.getSubprogram() orelse unreachable).toLocalScope().toScope(), llvm.builder.getInsertBlock() orelse unreachable);
+                        _ = insert_declare;
+                    }
+
+                    const is_volatile = false;
+                    const store = llvm.builder.createStore(argument_value, declaration_alloca.toValue(), is_volatile) orelse return LLVM.Value.Instruction.Error.store;
+                    _ = store; // autofix
+                    try llvm.argument_allocas.putNoClobber(context.allocator, instruction_index, declaration_alloca.toValue());
+                    try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, declaration_alloca.toValue());
+                },
+                .debug_declare_local_variable => |declare_local_variable| {
+                    const local_variable = declare_local_variable.variable;
+                    const debug_declaration_type = try llvm.getDebugType(unit, context, local_variable.declaration.type);
+                    const always_preserve = true;
+                    const flags = LLVM.DebugInfo.Node.Flags{
+                        .visibility = .none,
+                        .forward_declaration = false,
+                        .apple_block = false,
+                        .block_by_ref_struct = false,
+                        .virtual = false,
+                        .artificial = false,
+                        .explicit = false,
+                        .prototyped = false,
+                        .objective_c_class_complete = false,
+                        .object_pointer = false,
+                        .vector = false,
+                        .static_member = false,
+                        .lvalue_reference = false,
+                        .rvalue_reference = false,
+                        .reserved = false,
+                        .inheritance = .none,
+                        .introduced_virtual = false,
+                        .bit_field = false,
+                        .no_return = false,
+                        .type_pass_by_value = false,
+                        .type_pass_by_reference = false,
+                        .enum_class = false,
+                        .thunk = false,
+                        .non_trivial = false,
+                        .big_endian = false,
+                        .little_endian = false,
+                        .all_calls_described = false,
+                    };
+
+                    const alignment = 0;
+                    const declaration_name = unit.getIdentifier(local_variable.declaration.name);
+                    const line = local_variable.declaration.line;
+                    const column = local_variable.declaration.column;
+                    const debug_local_variable = llvm.debug_info_builder.createAutoVariable(llvm.scope, declaration_name.ptr, declaration_name.len, llvm.file, line, debug_declaration_type, always_preserve, flags, alignment) orelse unreachable;
+
+                    const local = llvm.alloca_map.get(declare_local_variable.stack).?;
+
+                    const insert_declare = llvm.debug_info_builder.insertDeclare(local, debug_local_variable, llvm.context, line, column, (llvm.function.getSubprogram() orelse unreachable).toLocalScope().toScope(), llvm.builder.getInsertBlock() orelse unreachable);
+                    _ = insert_declare;
+                },
                 else => |t| @panic(@tagName(t)),
             }
         }
@@ -3416,25 +3429,23 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             }
         }
 
-        const verify_function = true;
-        if (verify_function) {
-            var message_ptr: [*]const u8 = undefined;
-            var message_len: usize = 0;
-            const result = llvm.function.verify(&message_ptr, &message_len);
-
-            if (!result) {
-                var function_len: usize = 0;
-                const function_ptr = llvm.function.toString(&function_len);
-                const function_ir = function_ptr[0..function_len];
-                const error_message = message_ptr[0..message_len];
-                std.debug.panic("\n{s}. LLVM verification for the function above failed:\n{s}\n", .{ function_ir, error_message });
-            }
-        }
+        // const verify_function = true;
+        // if (verify_function) {
+        //     var message_ptr: [*]const u8 = undefined;
+        //     var message_len: usize = 0;
+        //     const result = llvm.function.verify(&message_ptr, &message_len);
+        //
+        //     if (!result) {
+        //         var function_len: usize = 0;
+        //         const function_ptr = llvm.function.toString(&function_len);
+        //         const function_ir = function_ptr[0..function_len];
+        //         const error_message = message_ptr[0..message_len];
+        //         std.debug.panic("\n{s}. LLVM verification for the function above failed:\n{s}\n", .{ function_ir, error_message });
+        //     }
+        // }
     }
 
-    if (llvm.debug_info_builder) |di_builder| {
-        di_builder.finalize();
-    }
+    llvm.debug_info_builder.finalize();
 
     var module_len: usize = 0;
     const module_ptr = llvm.module.toString(&module_len);
@@ -3447,6 +3458,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         var message_len: usize = 0;
         const result = llvm.module.verify(&message_ptr, &message_len);
         if (!result) {
+            std.debug.print("{s}\n", .{module_string});
             std.debug.panic("LLVM module verification failed:\n{s}\n", .{message_ptr[0..message_len]});
         }
     }
@@ -3485,8 +3497,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         try arguments.append(context.allocator, "14");
         try arguments.append(context.allocator, "-arch");
         try arguments.append(context.allocator, "arm64");
-        try arguments.append(context.allocator, "-lSystem");
-
     }
 
     var stdout_ptr: [*]const u8 = undefined;

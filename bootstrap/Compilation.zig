@@ -505,7 +505,7 @@ pub const Type = union(enum) {
 };
 
 pub const Instruction = union(enum) {
-    argument_declaration: ArgumentDeclaration,
+    argument_declaration: *Debug.Declaration.Argument,
     block: Debug.Block.Index,
     // TODO
     call: Instruction.Call,
@@ -516,6 +516,7 @@ pub const Instruction = union(enum) {
         type: Type.Index,
     },
     debug_checkpoint: DebugCheckPoint,
+    debug_declare_local_variable: DebugDeclareLocalVariable,
     global: *Debug.Declaration.Global,
     inline_assembly: InlineAssembly.Index,
     integer_binary_operation: Instruction.IntegerBinaryOperation,
@@ -530,6 +531,10 @@ pub const Instruction = union(enum) {
     syscall: Syscall,
     @"unreachable",
 
+    const DebugDeclareLocalVariable = struct{
+        variable: *Debug.Declaration.Local,
+        stack: Instruction.Index,
+    };
 
     const Syscall = struct{
         arguments: []const V,
@@ -654,12 +659,13 @@ pub const Function = struct{
 
 };
 
-const Struct = struct{
+pub const Struct = struct{
     fields: ArrayList(Field) = .{},
     scope: Debug.Scope.Global,
     backing_type: Type.Index,
+    type: Type.Index,
 
-    const Field = struct{
+    pub const Field = struct{
         name: u32,
         type: u32,
         value: V.Comptime,
@@ -780,14 +786,16 @@ pub const Debug = struct{
             declaration: *Declaration,
         };
 
-        const Local = struct{
+        pub const Local = struct{
             scope: Scope,
             local_declaration_map: AutoArrayHashMap(*Debug.Declaration.Local, Instruction.Index) = .{},
         };
-        const Global = struct{
+
+        pub const Global = struct{
             scope: Scope,
         };
-        const Function = struct{
+
+        pub const Function = struct{
             scope: Scope,
             argument_map: AutoArrayHashMap(*Debug.Declaration.Argument, Instruction.Index) = .{},
         };
@@ -820,7 +828,7 @@ pub const Debug = struct{
 
         }
 
-        const Kind = enum{
+        pub const Kind = enum{
             compilation_unit,
             file,
             file_container,
@@ -1138,13 +1146,16 @@ pub const Builder = struct {
     fn pushScope(builder: *Builder, unit: *Unit, context: *const Context, new_scope: *Debug.Scope) !void {
         const old_scope = builder.current_scope;
 
+        assert(@intFromEnum(old_scope.kind) <= @intFromEnum(new_scope.kind));
+
         if (builder.current_basic_block != .null) {
+            assert(@intFromEnum(old_scope.kind) >= @intFromEnum(Debug.Scope.Kind.function));
             const instruction = try unit.instructions.append(context.allocator, .{
                 .push_scope = .{
                     .old = old_scope,
                     .new = new_scope,
                 },
-                });
+            });
             try builder.appendInstruction(unit, context, instruction);
         }
 
@@ -1155,6 +1166,8 @@ pub const Builder = struct {
     fn popScope(builder: *Builder, unit: *Unit, context: *const Context) !void {
         const old_scope = builder.current_scope;
         const new_scope = old_scope.parent.?;
+
+        assert(@intFromEnum(old_scope.kind) >= @intFromEnum(new_scope.kind));
 
         if (builder.current_basic_block != .null) {
             const instruction = try unit.instructions.append(context.allocator, .{
@@ -1178,6 +1191,14 @@ pub const Builder = struct {
     }
 
     fn analyzeFile(builder: *Builder, unit: *Unit, context: *const Context, file_index: Debug.File.Index) !void {
+        const old_function = builder.current_function;
+        builder.current_function = .null;
+        defer builder.current_function = old_function;
+
+        const old_basic_block = builder.current_basic_block;
+        defer builder.current_basic_block = old_basic_block;
+        builder.current_basic_block = .null;
+
         const old_scope = builder.current_scope;
         builder.current_scope = &unit.scope.scope;
         defer builder.current_scope = old_scope;
@@ -1471,13 +1492,16 @@ pub const Builder = struct {
                 const function = unit.function_definitions.get(builder.current_function);
 
                 builder.last_check_point = .{};
-
+                assert(builder.current_scope.kind == .file_container or builder.current_scope.kind == .file);
                 try builder.pushScope(unit, context, &function.scope.scope);
                 defer builder.popScope(unit, context) catch unreachable;
 
                 const entry_basic_block = try builder.newBasicBlock(unit, context);
                 builder.current_basic_block = entry_basic_block;
                 defer builder.current_basic_block = .null;
+
+                const body_node = unit.getNode(body_node_index);
+                try builder.insertDebugCheckPoint(unit, context, body_node.token);
 
                 // Get argument declarations into scope
                 const function_prototype_node = unit.getNode(function_prototype_node_index);
@@ -1516,10 +1540,7 @@ pub const Builder = struct {
                         try builder.current_scope.declarations.putNoClobber(context.allocator, argument_name_hash, &argument.declaration);
 
                         const argument_instruction = try unit.instructions.append(context.allocator, .{
-                            .argument_declaration = .{
-                                .name = argument.declaration.name,
-                                .type = argument.declaration.type,
-                            },
+                            .argument_declaration = argument,
                         });
 
                         try builder.appendInstruction(unit, context, argument_instruction);
@@ -1527,8 +1548,6 @@ pub const Builder = struct {
                         try function.scope.argument_map.putNoClobber(context.allocator, argument, argument_instruction);
                     }
                 }
-
-                const body_node = unit.getNode(body_node_index);
 
                 if (body_node.id == .block) {
                     function.body = try builder.resolveBlock(unit, context, body_node_index);
@@ -1548,7 +1567,7 @@ pub const Builder = struct {
                                     log(.compilation, .ir, "{}, {}", .{checkpoint.line, checkpoint.column});
                                 },
                                 .argument_declaration => |arg|{
-                                    log(.compilation, .ir, "\"{s}\"", .{unit.getIdentifier(arg.name)});
+                                    log(.compilation, .ir, "\"{s}\"", .{unit.getIdentifier(arg.declaration.name)});
                                 },
                                 .cast => |cast| {
                                     log(.compilation, .ir, "{s}", .{@tagName(cast.id)});
@@ -2056,12 +2075,14 @@ pub const Builder = struct {
                         },
                     },
                     .backing_type = backing_type,
+                    .type = .null,
                 });
                 const struct_type = unit.structs.get(struct_index);
 
                 const type_index = try unit.types.append(context.allocator, .{
                     .@"struct" = struct_index,
                 });
+                struct_type.type = type_index;
 
                 // Save file type
                 switch (builder.current_scope.kind) {
@@ -2641,6 +2662,10 @@ pub const Builder = struct {
         });
 
         const block = unit.blocks.get(block_index);
+        if (builder.current_basic_block != .null) {
+            assert(builder.current_scope.kind == .block or builder.current_scope.kind == .function);
+        }
+
         try builder.pushScope(unit, context, &block.scope.scope);
         defer builder.popScope(unit, context) catch unreachable;
 
@@ -2681,6 +2706,12 @@ pub const Builder = struct {
                         std.debug.panic("Identifier '{s}' already declarared on scope", .{identifier});
                     }
 
+                    const mutability: Mutability = switch (statement_node.id) {
+                        .constant_symbol_declaration => .@"const",
+                        .variable_symbol_declaration => .@"var",
+                        else => unreachable,
+                    };
+
                     const metadata_node_index = statement_node.left;
                     const value_node_index = statement_node.right;
                     assert(value_node_index != .null);
@@ -2700,15 +2731,11 @@ pub const Builder = struct {
 
                     const initialization = try builder.resolveRuntimeValue(unit, context, type_expect, value_node_index, .right);
 
+                    const emit = !(mutability == .@"const" and initialization.value == .@"comptime");
+
                     const declaration_type = switch (type_expect) {
                         .none => initialization.type,
                         .type => |type_index| type_index,
-                    };
-
-                    const mutability: Mutability = switch (statement_node.id) {
-                        .constant_symbol_declaration => .@"const",
-                        .variable_symbol_declaration => .@"var",
-                        else => unreachable,
                     };
                     
                     const declaration_index = try unit.local_declarations.append(context.allocator, .{
@@ -2726,7 +2753,7 @@ pub const Builder = struct {
                     const local_declaration = unit.local_declarations.get(declaration_index);
                     try builder.current_scope.declarations.putNoClobber(context.allocator, identifier_hash, &local_declaration.declaration);
                     
-                    if (!(mutability == .@"const" and initialization.value == .@"comptime")) {
+                    if (emit) {
                         const stack = try unit.instructions.append(context.allocator, .{
                             .stack_slot = .{
                                 .type = declaration_type,
@@ -2736,7 +2763,16 @@ pub const Builder = struct {
                         try builder.appendInstruction(unit, context, stack);
                         
                         try block.scope.local_declaration_map.putNoClobber(context.allocator, local_declaration, stack);
-                        
+
+                        const debug_declare_local = try unit.instructions.append(context.allocator, .{
+                            .debug_declare_local_variable = .{
+                                .variable = local_declaration,
+                                .stack = stack,
+                            },
+                        });
+
+                        try builder.appendInstruction(unit, context, debug_declare_local);
+
                         const store = try unit.instructions.append(context.allocator, .{
                             .store = .{
                                 .destination = .{
