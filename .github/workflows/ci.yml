@@ -24,7 +24,7 @@ jobs:
         with:
           version: master
       - name: Test
-        run: zig build test -Dllvm_path=../../../../../dev/llvm/llvm-static-release-zen4-17.0.6/out/x86_64-linux-musl-native -Dself_hosted_ci=true
+        run: zig build test -Dself_hosted_ci=true -Dllvm_path=../../../../../dev/llvm/llvm-static-release-zen4-17.0.6/out/x86_64-linux-musl-native
   macos_m1:
     runs-on: macos-14
     timeout-minutes: 15
@@ -35,9 +35,7 @@ jobs:
         uses: davidgm94/setup-zig@foo
         with:
           version: master
-      - name: Test zig
-        run: zig version
-      - name: Test macos
+      - name: Build
         run: zig build -Dthird_party_ci=true -Dtarget=aarch64-macos-none -Dcpu=apple_m1
   linux_x86_64_v3:
     runs-on: ubuntu-latest
@@ -49,9 +47,7 @@ jobs:
         uses: davidgm94/setup-zig@foo
         with:
           version: master
-      - name: Test zig
-        run: zig version
-      - name: Test macos
+      - name: Build
         run: zig build -Dthird_party_ci=true -Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3
   windows_x86_64_v3:
     runs-on: windows-latest
@@ -63,7 +59,5 @@ jobs:
         uses: davidgm94/setup-zig@foo
         with:
           version: master
-      - name: Test zig
-        run: zig version
-      - name: Test macos
+      - name: Build
         run: zig build -Dthird_party_ci=true -Dtarget=x86_64-windows-gnu -Dcpu=x86_64_v3
