@@ -558,7 +558,15 @@ pub const Instruction = union(enum) {
 
         const Id = enum{
             add,
+            div,
+            mod,
             mul,
+            sub,
+            bit_and,
+            bit_or,
+            bit_xor,
+            shift_left,
+            shift_right,
         };
     };
 
@@ -578,6 +586,7 @@ pub const Instruction = union(enum) {
         type: Type.Index,
 
         const Id = enum{
+            bitcast,
             enum_to_int,
             int_to_pointer,
             sign_extend,
@@ -760,6 +769,7 @@ pub const Debug = struct{
 
         pub const Local = struct{
             declaration: Declaration,
+            init_value: V,
             pub const List = BlockList(@This(), enum{});
             pub usingnamespace List.Index;
         };
@@ -976,7 +986,8 @@ pub const Builder = struct {
                                 else => |t| @panic(@tagName(t)),
                             },
                             .identifier => b: {
-                                const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, operand_node_index, .left);
+                                const identifier = unit.getExpectedTokenBytes(operand_node.token, .identifier);
+                                const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, identifier, .left);
 
                                 break :b .{
                                     .value = result,
@@ -1052,7 +1063,8 @@ pub const Builder = struct {
                                                 .unsigned => .sign_extend,
                                             };
                                         } else {
-                                            unreachable;
+                                            assert(destination_integer.signedness != source_integer.signedness);
+                                            break :b .bitcast;
                                         }
                                     },
                                     else => |t| @panic(@tagName(t)),
@@ -1660,14 +1672,16 @@ pub const Builder = struct {
 
         const local_declaration = @fieldParentPtr(Debug.Declaration.Local, "declaration", declaration);
         const local_scope = @fieldParentPtr(Debug.Scope.Local, "scope", scope);
-        const instruction_index = local_scope.local_declaration_map.get(local_declaration).?;
-
-        return .{
-            .value = .{
-                .runtime = instruction_index,
-            },
-            .type = declaration.type,
-        };
+        if (local_scope.local_declaration_map.get(local_declaration)) |instruction_index| {
+            return .{
+                .value = .{
+                    .runtime = instruction_index,
+                },
+                .type = declaration.type,
+            };
+        } else {
+            return local_declaration.init_value;
+        }
     }
 
     const TypeCheckResult = enum{
@@ -1709,6 +1723,20 @@ pub const Builder = struct {
                         else =>|t| @panic(@tagName(t)),
                     }
                 },
+                .integer => |destination_integer| {
+                    switch (source.*) {
+                        .integer => |source_integer| {
+                            if (destination_integer.signedness == source_integer.signedness) {
+                                if (destination_integer.bit_count == source_integer.bit_count) {
+                                    unreachable;
+                                }
+                            }
+
+                            unreachable;
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                },
                 else => |t| @panic(@tagName(t)),
             }
             unreachable;
@@ -1720,10 +1748,7 @@ pub const Builder = struct {
         right,
     };
 
-    fn resolveIdentifier(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) !V {
-        const node = unit.getNode(node_index);
-        const identifier = unit.getExpectedTokenBytes(node.token, .identifier);
-
+    fn resolveIdentifier(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, identifier: []const u8, side: Side) !V {
         const hash = try unit.processIdentifier(context, identifier);
 
         const look_in_parent_scopes = true;
@@ -2350,7 +2375,8 @@ pub const Builder = struct {
         const node = unit.getNode(node_index);
         switch (node.id) {
             .identifier => {
-                const result = try builder.resolveIdentifier(unit, context, type_expect, node_index, side);
+                const identifier = unit.getExpectedTokenBytes(node.token, .identifier);
+                const result = try builder.resolveIdentifier(unit, context, type_expect, identifier, side);
                 return result;
             },
             .intrinsic => {
@@ -2397,18 +2423,18 @@ pub const Builder = struct {
                     .type = load_type,
                 };
             },
-            .add, .mul => {
+            .add, .sub, .mul, .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right => {
                 const left_node_index = node.left;
                 const right_node_index = node.left;
                 const binary_operation_id: BinaryOperationId = switch (node.id) {
                     .add => .add,
                     .sub => .sub,
-                    .bit_and => .bit_and,
-                    .bit_xor => .bit_xor,
-                    .bit_or => .bit_or,
                     .mul => .mul,
                     .div => .div,
                     .mod => .mod,
+                    .bit_and => .bit_and,
+                    .bit_xor => .bit_xor,
+                    .bit_or => .bit_or,
                     .shift_left => .shift_left,
                     .shift_right => .shift_right,
                     .compare_equal => .compare_equal,
@@ -2490,7 +2516,15 @@ pub const Builder = struct {
                     .integer => |integer| b: {
                         const id: Instruction.IntegerBinaryOperation.Id = switch (binary_operation_id) {
                             .add => .add,
+                            .div => .div,
+                            .mod => .mod,
                             .mul => .mul,
+                            .sub => .sub,
+                            .bit_and => .bit_and,
+                            .bit_or => .bit_or,
+                            .bit_xor => .bit_xor,
+                            .shift_left => .shift_left,
+                            .shift_right => .shift_right,
                             else => |t| @panic(@tagName(t)),
                         };
 
@@ -2748,9 +2782,11 @@ pub const Builder = struct {
                             .column = token_debug_info.column,
                             .kind = .local,
                         },
+                        .init_value = initialization,
                     });
 
                     const local_declaration = unit.local_declarations.get(declaration_index);
+                    assert(builder.current_scope.kind == .block);
                     try builder.current_scope.declarations.putNoClobber(context.allocator, identifier_hash, &local_declaration.declaration);
                     
                     if (emit) {

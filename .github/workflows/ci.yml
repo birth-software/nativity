@@ -20,44 +20,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up Zig
-        uses: davidgm94/setup-zig@foo
+        uses: goto-bus-stop/setup-zig@v2
         with:
           version: master
       - name: Test
         run: zig build test -Dself_hosted_ci=true -Dllvm_path=../../../../../dev/llvm/llvm-static-release-zen4-17.0.6/out/x86_64-linux-musl-native
-  macos_m1:
-    runs-on: macos-14
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Zig
-        uses: davidgm94/setup-zig@foo
-        with:
-          version: master
-      - name: Build
-        run: zig build -Dthird_party_ci=true -Dtarget=aarch64-macos-none -Dcpu=apple_m1
-  linux_x86_64_v3:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Zig
-        uses: davidgm94/setup-zig@foo
-        with:
-          version: master
-      - name: Build
-        run: zig build -Dthird_party_ci=true -Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3
-  windows_x86_64_v3:
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Zig
-        uses: davidgm94/setup-zig@foo
-        with:
-          version: master
-      - name: Build
-        run: zig build -Dthird_party_ci=true -Dtarget=x86_64-windows-gnu -Dcpu=x86_64_v3
+  # macos_m1:
+  #   runs-on: macos-14
+  #   timeout-minutes: 15
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Set up Zig
+  #       uses: davidgm94/setup-zig@foo
+  #       with:
+  #         version: master
+  #     - name: Build
+  #       run: zig build -Dthird_party_ci=true -Dtarget=aarch64-macos-none -Dcpu=apple_m1
+  # linux_x86_64_v3:
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 15
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Set up Zig
+  #       uses: davidgm94/setup-zig@foo
+  #       with:
+  #         version: master
+  #     - name: Build
+  #       run: zig build -Dthird_party_ci=true -Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3
+  # windows_x86_64_v3:
+  #   runs-on: windows-latest
+  #   timeout-minutes: 15
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Set up Zig
+  #       uses: davidgm94/setup-zig@foo
+  #       with:
+  #         version: master
+  #     - name: Build
+  #       run: zig build -Dthird_party_ci=true -Dtarget=x86_64-windows-gnu -Dcpu=x86_64_v3

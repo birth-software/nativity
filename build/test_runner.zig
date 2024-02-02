@@ -55,10 +55,10 @@ pub fn main() !void {
         };
         std.debug.print("[{s}]\n", .{if (success) "OK" else "FAIL"});
         if (process_run.stdout.len > 0) {
-            std.debug.print("\tSTDOUT:\n{s}\n\n", .{process_run.stdout});
+            std.debug.print("STDOUT:\n\n{s}\n\n", .{process_run.stdout});
         }
         if (process_run.stderr.len > 0) {
-            std.debug.print("\tSTDERR:\n{s}\n\n", .{process_run.stderr});
+            std.debug.print("STDERR:\n\n{s}\n\n", .{process_run.stderr});
         }
     }
 

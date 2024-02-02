@@ -3,5 +3,5 @@ const main = fn() s32 {
     x = x << 5;
     x = x >> 5;
     const b: u32 = 1;
-    return x - b;
+    return #cast(x - b);
 }
