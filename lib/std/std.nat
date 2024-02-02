@@ -18,7 +18,7 @@ const print = fn(bytes: []const u8) void {
     const file_writer = FileWriter{
         .descriptor = file_descriptor,
     };
-    _ = file_writer.writeAll(bytes);
+    _ = file_writer.write_all(bytes);
 }
 
 const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
@@ -46,7 +46,7 @@ const print_usize = fn(n: usize) void {
     const file_writer = FileWriter{
         .descriptor = file_descriptor,
     };
-    _ = file_writer.writeAll(bytes);
+    _ = file_writer.write_all(bytes);
 }
 
 const print_u8 = fn(n: u8) void {
@@ -145,7 +145,7 @@ const FileWriter = struct{
         return file_writer.descriptor.write(bytes);
     }
 
-    const writeAll = fn(file_writer: FileWriter, bytes: []const u8) bool {
+    const write_all = fn(file_writer: FileWriter, bytes: []const u8) bool {
         var bytes_written: usize = 0;
 
         while (bytes_written < bytes.len) {

@@ -1,0 +1,19 @@
+const main = fn () s32 {
+    const a = foo(5142);
+    const b = foo(5142);
+    return #cast(a - b);
+}
+
+const foo = fn (arg: u32) u32 {
+    var i: u32 = 0;
+    while (i < arg) {
+        if (i < 2500) {
+            i += 1;
+        } else {
+            return i - 100;
+        }
+
+    }
+
+    return 321;
+}

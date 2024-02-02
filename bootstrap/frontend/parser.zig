@@ -1583,7 +1583,7 @@ const Analyzer = struct {
             else => unreachable,
         };
 
-        const type_node = if (analyzer.peekToken() == .operator_left_parenthesis) b: {
+        const type_node = if (analyzer.hasTokens() and analyzer.peekToken() == .operator_left_parenthesis) b: {
             analyzer.consumeToken();
             const result = try analyzer.typeExpression();
             _ = try analyzer.expectToken(.operator_right_parenthesis);

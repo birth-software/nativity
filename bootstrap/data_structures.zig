@@ -171,6 +171,11 @@ pub fn enumFromString(comptime E: type, string: []const u8) ?E {
     } else null;
 }
 
+pub fn hash(string: []const u8) u32 {
+    const string_key: u32 = @truncate(std.hash.Wyhash.hash(0, string));
+    return string_key;
+}
+
 pub fn StringKeyMap(comptime Value: type) type {
     return struct {
         list: std.MultiArrayList(Data) = .{},

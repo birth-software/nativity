@@ -49,8 +49,9 @@ pub extern fn NativityLLVMFunctionGetReturnType(function: *LLVM.Value.Function) 
 pub extern fn NativityLLVMBuilderCreateAlloca(builder: *LLVM.Builder, type: *LLVM.Type, address_space: c_uint, array_size: ?*LLVM.Value, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value.Instruction.Alloca;
 pub extern fn NativityLLVMBuilderCreateStore(builder: *LLVM.Builder, value: *LLVM.Value, pointer: *LLVM.Value, is_volatile: bool) ?*LLVM.Value.Instruction.Store;
 pub extern fn NativityLLVMContextGetConstantInt(context: *LLVM.Context, bit_count: c_uint, value: u64, is_signed: bool) ?*LLVM.Value.Constant.Int;
-pub extern fn NativityLLVMContextGetConstString(context: *LLVM.Context, name_ptr: [*]const u8, name_len: usize, null_terminate: bool) ?*LLVM.Value.Constant;
-pub extern fn NativityLLVMContextGetConstArray(array_type: *LLVM.Type.Array, value_ptr: [*]const *LLVM.Value.Constant, value_count: usize) ?*LLVM.Value.Constant;
+pub extern fn NativityLLVMContextGetConstantString(context: *LLVM.Context, name_ptr: [*]const u8, name_len: usize, null_terminate: bool) ?*LLVM.Value.Constant;
+pub extern fn NativityLLVMGetConstantArray(array_type: *LLVM.Type.Array, value_ptr: [*]const *LLVM.Value.Constant, value_count: usize) ?*LLVM.Value.Constant;
+pub extern fn NativityLLVMGetConstantStruct(struct_type: *LLVM.Type.Struct, constant_ptr: [*]const *LLVM.Value.Constant, constant_len: usize) ?*LLVM.Value.Constant;
 pub extern fn NativityLLVMBuilderCreateICmp(builder: *LLVM.Builder, integer_comparison: LLVM.Value.Instruction.ICmp.Kind, left: *LLVM.Value, right: *LLVM.Value, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value;
 pub extern fn NativityLLVMBuilderCreateLoad(builder: *LLVM.Builder, type: *LLVM.Type, value: *LLVM.Value, is_volatile: bool, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value.Instruction.Load;
 pub extern fn NativityLLVMBuilderCreateRet(builder: *LLVM.Builder, value: ?*LLVM.Value) ?*LLVM.Value.Instruction.Ret;
@@ -90,6 +91,7 @@ pub extern fn NativityLLVMFunctionToString(function: *LLVM.Value.Function, messa
 
 pub extern fn NativityLLVMBuilderIsCurrentBlockTerminated(builder: *LLVM.Builder) bool;
 pub extern fn NativityLLVMGetUndefined(type: *LLVM.Type) ?*LLVM.Value.Constant.Undefined;
+pub extern fn NativityLLVMGetPoisonValue(type: *LLVM.Type) ?*LLVM.Value.Constant.Poison;
 pub extern fn NativityLLVMFunctionSetCallingConvention(function: *LLVM.Value.Function, calling_convention: LLVM.Value.Function.CallingConvention) void;
 pub extern fn NativityLLVMFunctionGetCallingConvention(function: *LLVM.Value.Function) LLVM.Value.Function.CallingConvention;
 pub extern fn NativityLLVMFunctionSetSubprogram(function: *LLVM.Value.Function, subprogram: *LLVM.DebugInfo.Subprogram) void;
@@ -114,9 +116,11 @@ pub extern fn NativityLLVMModuleGetIntrinsicDeclaration(module: *LLVM.Module, in
 pub extern fn NativityLLVMContextGetIntrinsicType(context: *LLVM.Context, intrinsic_id: LLVM.Value.IntrinsicID, parameter_type_ptr: [*]const *LLVM.Type, parameter_type_count: usize) ?*LLVM.Type.Function;
 pub extern fn NativityLLVMBuilderCreateExtractValue(builder: *LLVM.Builder, aggregate: *LLVM.Value, indices_ptr: [*]const c_uint, indices_len: usize, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value;
 pub extern fn NativityLLVMBuilderCreateInsertValue(builder: *LLVM.Builder, aggregate: *LLVM.Value, value: *LLVM.Value, indices_ptr: [*]const c_uint, indices_len: usize, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value;
-pub extern fn NativityLLVMContextCreateGlobalStringPointer(builder: *LLVM.Builder, string_ptr: [*]const u8, string_len: usize, name_ptr: [*]const u8, name_len: usize, address_space: c_uint, module: *LLVM.Module) ?*LLVM.Value.Constant;
+pub extern fn NativityLLVMBuilderCreateGlobalString(builder: *LLVM.Builder, string_ptr: [*]const u8, string_len: usize, name_ptr: [*]const u8, name_len: usize, address_space: c_uint, module: *LLVM.Module) ?*LLVM.Value.Constant.GlobalVariable;
+pub extern fn NativityLLVMBuilderCreateGlobalStringPointer(builder: *LLVM.Builder, string_ptr: [*]const u8, string_len: usize, name_ptr: [*]const u8, name_len: usize, address_space: c_uint, module: *LLVM.Module) ?*LLVM.Value.Constant;
 pub extern fn NativityLLVMCompareTypes(a: *LLVM.Type, b: *LLVM.Type) bool;
-pub extern fn NativityLLVMCreatePhiNode(type: *LLVM.Type, reserved_value_count: c_uint, name_ptr: [*]const u8, name_len: usize, basic_block: ?*LLVM.Value.BasicBlock) ?*LLVM.Value.Instruction.PhiNode;
+pub extern fn NativityLLVMBuilderCreatePhi(builder: *LLVM.Builder, type: *LLVM.Type, reserved_value_count: c_uint, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value.Instruction.PhiNode;
+pub extern fn NativityLLVMPhiAddIncoming(phi: *LLVM.Value.Instruction.PhiNode, value: *LLVM.Value, basic_block: *LLVM.Value.BasicBlock) void;
 
 pub extern fn NativityLLVMAllocatGetAllocatedType(alloca: *LLVM.Value.Instruction.Alloca) *LLVM.Type;
 pub extern fn NativityLLVMValueToAlloca(value: *LLVM.Value) ?*LLVM.Value.Instruction.Alloca;

@@ -1,0 +1,19 @@
+const main = fn () s32 {
+    const a = foo(5);
+    if (a != 6) {
+        return 1;
+    }
+    const b = foo(5);
+    if (b != 6) {
+        return 1;
+    }
+    return a - b;
+}
+
+const foo = fn (arg: s32) s32 {
+    if (arg > 1) {
+        return 6;
+    } else {
+        return 0;
+    }
+}
