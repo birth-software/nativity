@@ -26,5 +26,6 @@ const main = fn () s32 {
     const expected_result: usize = a.len + b.len;
     const result = count_slice_byte_count(slices = .{a.&, b.&}.&);
     print_values(slice = a.&);
-    return #cast(expected_result - result);
+    const main_result: u32 = #cast(expected_result - result);
+    return #cast(main_result);
 }

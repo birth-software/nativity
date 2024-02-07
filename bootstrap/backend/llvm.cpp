@@ -254,12 +254,11 @@ extern "C" ArrayType* NativityLLVMGetArrayType(Type* element_type, uint64_t elem
     return array_type;
 }
 
-extern "C" StructType* NativityLLVMCreateStructType(LLVMContext& context, Type** type_ptr, size_t type_count, const char* name_ptr, size_t name_len, bool is_packed)
+extern "C" StructType* NativityLLVMGetStructType(LLVMContext& context, Type** type_ptr, size_t type_count, bool is_packed)
 {
     auto types = ArrayRef<Type*>(type_ptr, type_count);
-    auto name = StringRef(name_ptr, name_len);
 
-    auto* struct_type = StructType::create(context, types, name, is_packed);
+    auto* struct_type = StructType::get(context, types, is_packed);
     return struct_type;
 }
 extern "C" Function* NativityLLVMModuleGetFunction(Module& module, const char* name_ptr, size_t name_len)
@@ -745,6 +744,12 @@ extern "C" ArrayType* NativityLLVMTypeToArray(Type* type)
 {
     auto* array_type = dyn_cast<ArrayType>(type);
     return array_type;
+}
+
+extern "C" PointerType* NativityLLVMTypeToPointer(Type* type)
+{
+    auto* pointer_type = dyn_cast<PointerType>(type);
+    return pointer_type;
 }
 
 extern "C" Type* NativityLLVMArrayTypeGetElementType(ArrayType* array_type)
