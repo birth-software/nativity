@@ -288,11 +288,16 @@ extern "C" BasicBlock* NativityLLVMCreateBasicBlock(LLVMContext& context, const 
     return basic_block;
 }
 
-extern "C" PHINode* NativityLLVMCreatePhiNode(Type* type, unsigned reserved_value_count, const char* name_ptr, size_t name_len, BasicBlock* basic_block)
+extern "C" PHINode* NativityLLVMBuilderCreatePhi(IRBuilder<> builder, Type* type, unsigned reserved_value_count, const char* name_ptr, size_t name_len)
 {
     auto name = StringRef(name_ptr, name_len);
-    auto* phi_node = PHINode::Create(type, reserved_value_count, name, basic_block);
-    return phi_node;
+    auto* phi = builder.CreatePHI(type, reserved_value_count, name);
+    return phi;
+}
+
+extern "C" void NativityLLVMPhiAddIncoming(PHINode& node, Value* value, BasicBlock* basic_block)
+{
+    node.addIncoming(value, basic_block);
 }
 
 extern "C" void NativityLLVMBasicBlockRemoveFromParent(BasicBlock* basic_block)
@@ -315,6 +320,12 @@ extern "C" Type* NativityLLVMValueGetType(Value* value)
 {
     auto* type = value->getType();
     return type;
+}
+
+extern "C" PoisonValue* NativityLLVMGetPoisonValue(Type* type)
+{
+    auto* poison_value = PoisonValue::get(type);
+    return poison_value;
 }
 
 extern "C" void NativityLLVMFunctionGetArguments(Function& function, Argument** argument_ptr, size_t* argument_count)
@@ -588,21 +599,36 @@ extern "C" ConstantInt* NativityLLVMContextGetConstantInt(LLVMContext& context, 
     return constant_int;
 }
 
-extern "C" Constant* NativityLLVMContextGetConstString(LLVMContext& context, const char* string_ptr, size_t string_len, bool null_terminate)
+extern "C" Constant* NativityLLVMContextGetConstantString(LLVMContext& context, const char* string_ptr, size_t string_len, bool null_terminate)
 {
     auto string = StringRef(string_ptr, string_len);
     auto* constant = ConstantDataArray::getString(context, string, null_terminate);
     return constant;
 }
 
-extern "C" Constant* NativityLLVMContextGetConstArray(ArrayType* array_type, Constant** value_ptr, size_t value_count)
+extern "C" Constant* NativityLLVMGetConstantArray(ArrayType* array_type, Constant** value_ptr, size_t value_count)
 {
     auto values = ArrayRef<Constant*>(value_ptr, value_count);
     auto* constant_array = ConstantArray::get(array_type, values);
     return constant_array;
 }
 
-extern "C" Constant* NativityLLVMContextCreateGlobalStringPointer(IRBuilder<>& builder, const char* string_ptr, size_t string_len, const char* name_ptr, size_t name_len, unsigned address_space, Module* module)
+extern "C" Constant* NativityLLVMGetConstantStruct(StructType* struct_type, Constant** constant_ptr, size_t constant_len)
+{
+    auto values = ArrayRef<Constant*>(constant_ptr, constant_len);
+    auto* constant_struct = ConstantStruct::get(struct_type, values);
+    return constant_struct;
+}
+
+extern "C" GlobalVariable* NativityLLVMBuilderCreateGlobalString(IRBuilder<>& builder, const char* string_ptr, size_t string_len, const char* name_ptr, size_t name_len, unsigned address_space, Module* module)
+{
+    auto string = StringRef(string_ptr, string_len);
+    auto name = StringRef(name_ptr, name_len);
+    auto* string_global_variable = builder.CreateGlobalString(string, name, address_space, module);
+    return string_global_variable;
+}
+
+extern "C" Constant* NativityLLVMBuilderCreateGlobalStringPointer(IRBuilder<>& builder, const char* string_ptr, size_t string_len, const char* name_ptr, size_t name_len, unsigned address_space, Module* module)
 {
     auto string = StringRef(string_ptr, string_len);
     auto name = StringRef(name_ptr, name_len);
@@ -768,13 +794,6 @@ extern "C" CallingConv::ID NativityLLVMFunctionGetCallingConvention(Function& fu
 extern "C" void NativityLLVMCallSetCallingConvention(CallBase& call_instruction, CallingConv::ID calling_convention)
 {
     call_instruction.setCallingConv(calling_convention);
-}
-
-extern "C" Constant* NativityLLVMGetStruct(StructType* struct_type, Constant** constants_ptr, size_t constant_count)
-{
-    auto constants = ArrayRef(constants_ptr, constant_count);
-    auto* named_struct = ConstantStruct::get(struct_type, constants);
-    return named_struct;
 }
 
 namespace lld {

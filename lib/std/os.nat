@@ -30,7 +30,7 @@ const FileDescriptor = struct{
             switch (current) {
                 .linux => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                    if (linux.unwrapSyscall(syscall_result = #syscall(#cast(linux.Syscall.read), #cast(file_descriptor.handle), #cast(bytes.ptr), len))) |byte_count| {
+                    if (linux.unwrap_syscall(syscall_result = #syscall(#cast(linux.Syscall.read), #cast(file_descriptor.handle), #cast(bytes.ptr), len))) |byte_count| {
                         return byte_count;
                     } else {
                         return null;
@@ -48,7 +48,7 @@ const FileDescriptor = struct{
             .linux => {
                 const len: usize = #min(max_file_operation_byte_count, bytes.len);
                 const raw_result = #syscall(#cast(linux.Syscall.write), #cast(file_descriptor.handle), #cast(bytes.ptr), len);
-                if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
+                if (linux.unwrap_syscall(syscall_result = raw_result)) |byte_count| {
                     return byte_count;
                 } else {
                     return null;
@@ -93,7 +93,7 @@ const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_prote
 
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.mmap(address, length, protection_flags, map_flags, fd = -1, offset = 0))) |result_address| {
+            if (linux.unwrap_syscall(syscall_result = linux.mmap(address, length, protection_flags, map_flags, fd = -1, offset = 0))) |result_address| {
                 const pointer: [&]u8 = #cast(result_address);
                 return pointer;
             } else {
@@ -108,7 +108,7 @@ const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_prote
 const free_virtual_memory = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.munmap(bytes_ptr, bytes_len))) |result| {
+            if (linux.unwrap_syscall(syscall_result = linux.munmap(bytes_ptr, bytes_len))) |result| {
                 return result == 0;
             } else {
                 return false;
@@ -123,7 +123,7 @@ const readlink = fn(file_path: [&:0]const u8, buffer: []u8) ?[]u8 {
         .linux => {
             const raw_result = linux.readlink(file_path, bytes_ptr = buffer.ptr, bytes_len = buffer.len);
 
-            if (linux.unwrapSyscall(syscall_result = raw_result)) |byte_count| {
+            if (linux.unwrap_syscall(syscall_result = raw_result)) |byte_count| {
                 const bytes = buffer[0..byte_count];
                 return bytes;
             } else {
@@ -159,7 +159,7 @@ const Process = struct{
 const duplicate_process = fn () ?Process.Id {
     switch (current) {
         .linux =>  {
-            if (linux.unwrapSyscall(syscall_result = linux.fork())) |fork_result| {
+            if (linux.unwrap_syscall(syscall_result = linux.fork())) |fork_result| {
                 return #cast(fork_result);
             } else {
                 return null;
@@ -181,7 +181,7 @@ const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env:
 const event_file_descriptor = fn(initial_value: u32, flags: u32) ?s32 {
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.event_file_descriptor(count = initial_value, flags))) |raw_result| {
+            if (linux.unwrap_syscall(syscall_result = linux.event_file_descriptor(count = initial_value, flags))) |raw_result| {
                 const result: s32 = #cast(raw_result);
                 return result;
             } else {
@@ -195,7 +195,7 @@ const event_file_descriptor = fn(initial_value: u32, flags: u32) ?s32 {
 const dup2 = fn(old_file_descriptor: system.FileDescriptor, new_file_descriptor: system.FileDescriptor) bool {
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.dup2(old = old_file_descriptor, new = new_file_descriptor))) |_| {
+            if (linux.unwrap_syscall(syscall_result = linux.dup2(old = old_file_descriptor, new = new_file_descriptor))) |_| {
                 return true;
             } else {
                 return false;
@@ -208,7 +208,7 @@ const dup2 = fn(old_file_descriptor: system.FileDescriptor, new_file_descriptor:
 const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) ?FileDescriptor{
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.open(path, flags, permissions))) |raw_result| {
+            if (linux.unwrap_syscall(syscall_result = linux.open(path, flags, permissions))) |raw_result| {
                 const file_descriptor = FileDescriptor{
                     .handle = #cast(raw_result),
                 };
@@ -225,7 +225,7 @@ const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) ?FileDescript
 const close = fn(file_descriptor: s32) bool {
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.close(file_descriptor))) |_| {
+            if (linux.unwrap_syscall(syscall_result = linux.close(file_descriptor))) |_| {
                 return true;
             } else {
                 return false;
@@ -239,7 +239,7 @@ const pipe2 = fn(flags: u32) ?[2]system.FileDescriptor{
     switch (current) {
         .linux => {
             var pipe: [2]s32 = undefined;
-            if (linux.unwrapSyscall(syscall_result = linux.pipe2(pipe_pointer = pipe.&, flags))) |_| {
+            if (linux.unwrap_syscall(syscall_result = linux.pipe2(pipe_pointer = pipe.&, flags))) |_| {
                 return pipe;
             } else {
                 return null;
@@ -268,7 +268,7 @@ const PollFileDescriptor = system.PollFileDescriptor;
 const poll = fn(file_descriptors: []PollFileDescriptor, timeout: s32) ?usize {
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.poll(file_descriptors = file_descriptors.ptr, file_descriptor_count = file_descriptors.len, timeout = timeout))) |result| {
+            if (linux.unwrap_syscall(syscall_result = linux.poll(file_descriptors = file_descriptors.ptr, file_descriptor_count = file_descriptors.len, timeout = timeout))) |result| {
                 return result;
             } else {
                 return null;
@@ -339,7 +339,7 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
                 const raw_syscall_result = linux.waitpid(pid, status = status.&, flags, resource_usage = 0);
                 const signed_syscall_result: ssize = #cast(raw_syscall_result);
                 if (raw_syscall_result != -4) {
-                    if (linux.unwrapSyscall(syscall_result = raw_syscall_result)) |_| {
+                    if (linux.unwrap_syscall(syscall_result = raw_syscall_result)) |_| {
                         return status;
                     } else {
                         return null;
@@ -355,7 +355,7 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
 const memfd_create = fn(name: [&:0]const u8, flags: u32) ?FileDescriptor{
     switch (current) {
         .linux => {
-            if (linux.unwrapSyscall(syscall_result = linux.memfd_create(path, flags))) |raw_result| {
+            if (linux.unwrap_syscall(syscall_result = linux.memfd_create(path, flags))) |raw_result| {
                 const file_descriptor = FileDescriptor{
                     .handle = #cast(raw_result),
                 };

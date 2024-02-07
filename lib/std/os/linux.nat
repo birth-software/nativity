@@ -490,7 +490,7 @@ const memfd_create = fn(name: [&:0]const u8, flags: u32) usize {
     return result;
 }
 
-const unwrapSyscall = fn(syscall_result: usize) ?usize {
+const unwrap_syscall = fn(syscall_result: usize) ?usize {
     const signed_syscall_result: ssize = #cast(syscall_result);
     if (signed_syscall_result >= 0) {
         return syscall_result;
