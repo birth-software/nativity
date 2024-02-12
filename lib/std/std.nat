@@ -42,6 +42,7 @@ const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
 const print_usize = fn(n: usize) void {
     var buffer: [65]u8 = undefined;
     const bytes = format_usize(n, buffer = buffer.&);
+    #assert(bytes.len < buffer.len);
     const file_descriptor = os.StdFileDescriptor.get(descriptor = .stdout);
     const file_writer = FileWriter{
         .descriptor = file_descriptor,

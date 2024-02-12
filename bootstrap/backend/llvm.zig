@@ -3179,7 +3179,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         }
                     },
                     .ret => |return_value| {
-                        const value = try llvm.emitRightValue(unit, context, return_value);
+                        const value = switch (return_value.type) {
+                            .void => null,
+                            else => try llvm.emitRightValue(unit, context, return_value),
+                        };
                         // const value = llvm.llvm_value_map.get(return_value).?;
                         const ret = llvm.builder.createRet(value) orelse return LLVM.Value.Instruction.Error.ret;
                         _ = ret; // autofix
@@ -3463,17 +3466,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         }
 
         if (!builder.isCurrentBlockTerminated()) {
-            const return_type = function_prototype.return_type;
-            if (return_type == Compilation.Type.Index.noreturn) {
-                _ = builder.createUnreachable() orelse return LLVM.Value.Instruction.Error.@"unreachable";
-            } else if (return_type == Compilation.Type.Index.void) {
-                _ = builder.createRet(null) orelse unreachable;
-            } else {
-                var message_len: usize = 0;
-                const function_str = llvm.function.toString(&message_len);
-                const function_dump = function_str[0..message_len];
-                std.debug.panic("Function block with no termination:\n{s}\n", .{function_dump});
-            }
+            var message_len: usize = 0;
+            const function_str = llvm.function.toString(&message_len);
+            const function_dump = function_str[0..message_len];
+            std.debug.panic("Function block with no termination:\n{s}\n", .{function_dump});
         }
 
         const verify_function = true;
