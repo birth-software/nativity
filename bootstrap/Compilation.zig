@@ -1024,6 +1024,7 @@ pub const Mutability = enum(u1) {
 };
 
 pub const IntrinsicId = enum{
+    assert,
     @"asm", //this is processed separately as it need special parsing
     cast,
     enum_to_int,
@@ -1454,6 +1455,37 @@ pub const Builder = struct {
                 };
                 _ = expected_type; // autofix
                 unreachable;
+            },
+            .assert => {
+                assert(argument_node_list.len == 1);
+                const boolean = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .bool }, argument_node_list[0], .right);
+                switch (boolean.value) {
+                    .@"comptime" => |ct| switch (ct) {
+                        .bool => |value| switch (value) {
+                            true => {},
+                            false => {
+                                @panic("Assert failed at comptime");
+                            },
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    .runtime => |instruction_index| {
+                        const true_block = try builder.newBasicBlock(unit, context);
+                        const false_block = try builder.newBasicBlock(unit, context);
+
+                        try builder.branch(unit, context, instruction_index, true_block, false_block);
+
+                        builder.current_basic_block = false_block;
+                        const unreachable_instruction = try unit.instructions.append(context.allocator, .@"unreachable");
+                        // TODO: terminate block properly
+                        try builder.appendInstruction(unit, context, unreachable_instruction);
+
+                        builder.current_basic_block = true_block;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+
+                return undefined;
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -4227,6 +4259,42 @@ pub const Builder = struct {
                     },
                     .type = .u8,
                 };
+            },
+            .boolean_not => blk: {
+                switch (type_expect) {
+                    .none => {},
+                    .type => |type_index| assert(type_index == .bool),
+                    else => |t| @panic(@tagName(t)),
+                }
+                const boolean = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .bool }, node.left, .right);
+                switch (boolean.value) {
+                    .runtime => {
+                        const xor = try unit.instructions.append(context.allocator, .{
+                            .integer_binary_operation = .{
+                                .id = .bit_xor,
+                                .signedness = .unsigned,
+                                .left = boolean,
+                                .right = .{
+                                    .value = .{
+                                        .@"comptime" = .{
+                                            .bool = true,
+                                        },
+                                    },
+                                    .type = .bool,
+                                },
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, xor);
+
+                        break :blk .{
+                            .value = .{
+                                .runtime = xor,
+                            },
+                            .type = .bool,
+                        };
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
             },
             else => |t| @panic(@tagName(t)),
         };

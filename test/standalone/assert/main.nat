@@ -1,0 +1,7 @@
+const main = fn() s32 {
+    #assert(true);
+    var a: s32 = 1;
+    const is_not_one = a != 1;
+    #assert(!is_not_one);
+    return 0;
+}
