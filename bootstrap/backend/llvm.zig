@@ -78,7 +78,7 @@ pub const LLVM = struct {
         const getIntegerType = bindings.NativityLLVMGetIntegerType;
         const getFunctionType = bindings.NativityLLVMGetFunctionType;
         const getPointerType = bindings.NativityLLVMGetPointerType;
-        const createStructType = bindings.NativityLLVMCreateStructType;
+        const getStructType = bindings.NativityLLVMGetStructType;
         const getIntrinsicType = bindings.NativityLLVMContextGetIntrinsicType;
     };
 
@@ -452,6 +452,7 @@ pub const LLVM = struct {
         const toStruct = bindings.NativityLLVMTypeToStruct;
         const toFunction = bindings.NativityLLVMTypeToFunction;
         const toArray = bindings.NativityLLVMTypeToArray;
+        const toPointer = bindings.NativityLLVMTypeToPointer;
         const isPointer = bindings.NativityLLVMTypeIsPointer;
         const isInteger = bindings.NativityLLVMTypeIsInteger;
 
@@ -460,7 +461,7 @@ pub const LLVM = struct {
                 return @ptrCast(integer);
             }
             const get = bindings.NativityLLVMGetArrayType;
-            const getConstant = bindings.NativityLLVMContextGetConstArray;
+            const getConstant = bindings.NativityLLVMGetConstantArray;
             const getElementType = bindings.NativityLLVMArrayTypeGetElementType;
         };
 
@@ -1034,20 +1035,11 @@ pub const LLVM = struct {
                     break :blk llvm_integer_type.toType();
                 },
                 .slice => |slice| blk: {
-                    const sema_slice_pointer = Compilation.Type.Pointer{
-                        .type = slice.type,
-                        .many = true,
-                        .mutability = slice.mutability,
-                        .termination = slice.termination,
-                        .nullable = slice.nullable,
-                    };
-                    const sema_pointer_type = unit.pointers.get(sema_slice_pointer).?;
-                    const llvm_pointer_type = try llvm.getType(unit, context, sema_pointer_type);
+                    const llvm_pointer_type = try llvm.getType(unit, context, slice.child_pointer_type);
                     const llvm_usize_type = try llvm.getType(unit, context, .usize);
                     const slice_types = [_]*Type{ llvm_pointer_type, llvm_usize_type };
-                    const name = [_]u8{};
                     const is_packed = false;
-                    const struct_type = llvm.context.createStructType(&slice_types, slice_types.len, &name, name.len, is_packed) orelse return Type.Error.@"struct";
+                    const struct_type = llvm.context.getStructType(&slice_types, slice_types.len, is_packed) orelse return Type.Error.@"struct";
                     break :blk struct_type.toType();
                 },
                 .@"struct" => |struct_type_index| blk: {
@@ -1063,9 +1055,8 @@ pub const LLVM = struct {
                             }
 
                             // TODO:
-                            const name = try llvm.renderTypeName(unit, context, type_index);
                             const is_packed = false;
-                            const struct_type = llvm.context.createStructType(field_type_list.items.ptr, field_type_list.items.len, name.ptr, name.len, is_packed) orelse return Type.Error.@"struct";
+                            const struct_type = llvm.context.getStructType(field_type_list.items.ptr, field_type_list.items.len, is_packed) orelse return Type.Error.@"struct";
 
                             break :blk struct_type.toType();
                         },
@@ -1089,9 +1080,8 @@ pub const LLVM = struct {
                 //     }
                 // },
                 .array => |array| blk: {
-                    if (true) unreachable;
                     const element_type = try llvm.getType(unit, context, array.type);
-                    const array_type = LLVM.Type.Array.get(element_type, array.element_count) orelse return Type.Error.array;
+                    const array_type = LLVM.Type.Array.get(element_type, array.count) orelse return Type.Error.array;
                     break :blk array_type.toType();
                 },
                 else => |t| @panic(@tagName(t)),
@@ -2311,14 +2301,25 @@ pub const LLVM = struct {
                     //     try name.writer(context.allocator).print("[{}]{s}", .{ array.element_count, element_type_name });
                     //     break :b name.items;
                     // },
+                    // TODO: termination
                     .slice => |slice| b: {
                         var name = ArrayList(u8){};
                         try name.appendSlice(context.allocator, "[] ");
                         if (slice.mutability == .@"const") {
                             try name.appendSlice(context.allocator, "const ");
                         }
-                        const element_type_name = try llvm.renderTypeName(unit, context, slice.type);
+                        const element_type_name = try llvm.renderTypeName(unit, context, slice.child_type);
                         try name.appendSlice(context.allocator, element_type_name);
+                        break :b name.items;
+                    },
+                    .array => |array| b: {
+                        var name = ArrayList(u8){};
+                        try name.append(context.allocator, '[');
+                        try name.writer(context.allocator).print("{}", .{array.count});
+                        try name.append(context.allocator, ']');
+                        const element_type_name = try llvm.renderTypeName(unit, context, array.type);
+                        try name.appendSlice(context.allocator, element_type_name);
+
                         break :b name.items;
                     },
                     else => |t| @panic(@tagName(t)),
@@ -2498,13 +2499,7 @@ pub const LLVM = struct {
                     break :b enumeration_type.toType();
                 },
                 .slice => |slice| b: {
-                    const pointer_type = try llvm.getDebugType(unit, context, unit.pointers.get(.{
-                        .type = slice.type,
-                        .many = true,
-                        .mutability = slice.mutability,
-                        .termination = slice.termination,
-                        .nullable = slice.nullable,
-                    }).?);
+                    const pointer_type = try llvm.getDebugType(unit, context, slice.child_pointer_type);
                     const len_type = try llvm.getDebugType(unit, context, .usize);
                     const scope = null;
                     const file = null;
@@ -2539,14 +2534,14 @@ pub const LLVM = struct {
                 //     });
                 //     return struct_type.toType();
                 // },
-                // .array => |array| b: {
-                //     const byte_size = array.element_count * llvm.sema.types.array.get(array.element_type).getSize();
-                //     const bit_size = byte_size * 8;
-                //     const element_type = try llvm.getDebugType(array.element_type);
-                //     // extern fn bindings.NativityLLVMDebugInfoBuilderCreateArrayType(builder: *LLVM.DebugInfo.Builder, bit_size: u64, alignment: u32, type: *LLVM.DebugInfo.Type, element_count: usize) ?*LLVM.DebugInfo.Type.Composite;
-                //     const array_type = llvm.debug_info_builder.createArrayType(bit_size, 1, element_type, array.element_count) orelse unreachable;
-                //     break :b array_type.toType();
-                // },
+                .array => |array| b: {
+                    // TODO: compute
+                    const byte_size = 1; // array.count * unit.types.get(array.element_type).getSize();
+                    const bit_size = byte_size * 8;
+                    const element_type = try llvm.getDebugType(unit, context, array.type);
+                    const array_type = llvm.debug_info_builder.createArrayType(bit_size, 1, element_type, array.count) orelse unreachable;
+                    break :b array_type.toType();
+                },
                 else => |t| @panic(@tagName(t)),
             };
 
@@ -2650,6 +2645,14 @@ pub const LLVM = struct {
                         const constant_bool = llvm.context.getConstantInt(bit_count, @intFromBool(boolean), signed) orelse unreachable; 
                         return constant_bool.toValue();
                     },
+                    .constant_slice => |constant_slice_index| {
+                        const constant_slice = try llvm.getConstantSlice(unit, context, constant_slice_index);
+                        return constant_slice.toValue();
+                    },
+                    .constant_array => |constant_array_index| {
+                        const constant_array = try llvm.getConstantArray(unit, context, constant_array_index);
+                        return constant_array.toValue();
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
             },
@@ -2705,6 +2708,51 @@ pub const LLVM = struct {
         try llvm.llvm_block_map.putNoClobber(context.allocator, basic_block_index, basic_block);
 
         return basic_block_node;
+    }
+
+    fn getConstantSlice(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, constant_slice_index: Compilation.V.Comptime.ConstantSlice.Index) !*LLVM.Value.Constant{
+        const const_slice = unit.constant_slices.get(constant_slice_index);
+        const const_slice_type = try llvm.getType(unit, context, const_slice.type);
+        const slice_struct_type = const_slice_type.toStruct() orelse unreachable;
+        const ptr = llvm.global_variable_map.get(const_slice.ptr).?;
+        const signed = false;
+        const len = llvm.context.getConstantInt(@bitSizeOf(usize), const_slice.len, signed) orelse unreachable;
+        const slice_fields = [2]*LLVM.Value.Constant{
+            ptr.toConstant(),
+            len.toConstant(),
+        };
+
+        const constant_slice = slice_struct_type.getConstant(&slice_fields, slice_fields.len) orelse unreachable;
+        return constant_slice;
+    }
+    
+    fn getConstantArray(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, constant_array_index: Compilation.V.Comptime.ConstantArray.Index) !*LLVM.Value.Constant{
+        const constant_array = unit.constant_arrays.get(constant_array_index);
+        const sema_array_type = unit.types.get(constant_array.type).array;
+        const constant_type = try llvm.getType(unit, context, constant_array.type);
+        const array_type = constant_type.toArray() orelse unreachable;
+        const element_type = array_type.getElementType() orelse unreachable;
+        _ = element_type; // autofix
+        var list = try ArrayList(*LLVM.Value.Constant).initCapacity(context.allocator, constant_array.values.len);
+        for (constant_array.values) |sema_value| { 
+            const value = switch (sema_value) {
+                .constant_int => |const_int| b: {
+                    const integer_type = unit.types.get(sema_array_type.type).integer;
+                    const signed = switch (integer_type.signedness) {
+                        .signed => true,
+                        .unsigned => false,
+                    };
+                    assert(!signed);
+                    const constant_int = llvm.context.getConstantInt(integer_type.bit_count, const_int.value, signed) orelse unreachable;
+                    break :b constant_int.toConstant();
+                },
+                .constant_slice => |constant_slice_index| try llvm.getConstantSlice(unit, context, constant_slice_index),
+                else => |t| @panic(@tagName(t)),
+            };
+            list.appendAssumeCapacity(value);
+        }
+        const result = array_type.getConstant(list.items.ptr, list.items.len) orelse unreachable;
+        return result;
     }
 };
 
@@ -2831,6 +2879,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             },
             // String literal global variables are already initialized
             .string_literal => continue,
+            .constant_array => |constant_array_index| try llvm.getConstantArray(unit, context, constant_array_index),
             else =>|t| @panic(@tagName(t)),
         };
 
@@ -3070,7 +3119,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         switch (unit.types.get(stack_slot.type).*) {
                             .void, .noreturn, .type => unreachable,
                             .comptime_int => unreachable,
-                            .bool => unreachable,
+                            .bool => {},
                             .@"struct" => {},
                             .@"enum" => {},
                             .function => unreachable,
@@ -3103,7 +3152,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 const cast_instruction = llvm.builder.createCast(cast_type, value, value.getType(), cast_name.ptr, cast_name.len) orelse return LLVM.Value.Instruction.Error.cast;
                                 try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, cast_instruction);
                             },
-                            .pointer_var_to_const, .enum_to_int => {
+                            .pointer_var_to_const, .slice_var_to_const, .enum_to_int => {
                                 try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, value);
                             },
                             .sign_extend => {
@@ -3122,12 +3171,22 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 const pointer_to_int = llvm.builder.createCast(.pointer_to_int, value, dest_type, "pointer_to_int", "pointer_to_int".len) orelse return LLVM.Value.Instruction.Error.cast;
                                 try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, pointer_to_int);
                             },
+                            .truncate => {
+                                const truncate = llvm.builder.createCast(.truncate, value, dest_type, "truncate", "truncate".len) orelse return LLVM.Value.Instruction.Error.cast;
+                                try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, truncate);
+                            },
                         }
                     },
                     .load => |load| {
                         const value = if (llvm.llvm_value_map.get(load.value)) |v| v else blk: {
                             const value = switch (load.value.value) {
-                                .runtime => |instr_index| llvm.llvm_instruction_map.get(instr_index).?,
+                                .runtime => |instr_index| llvm.llvm_instruction_map.get(instr_index) orelse switch (unit.instructions.get(instr_index).*) {
+                                    .global => |global| b: {
+                                        const global_variable = llvm.global_variable_map.get(global).?;
+                                        break :b global_variable.toValue();
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                },
                                 else => |t| @panic(@tagName(t)),
                             };
                             try llvm.llvm_value_map.putNoClobber(context.allocator, load.value, value);
@@ -3135,7 +3194,22 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             break :blk value;
                         };
 
-                        const value_type = try llvm.getType(unit, context, load.value.type);
+                        const sema_value_type = switch (load.value.value) {
+                            .runtime => |ii| switch (unit.instructions.get(ii).*) {
+                                .stack_slot => |stack_slot| stack_slot.type,
+                                .get_element_pointer => |gep| gep.base_type,
+                                .argument_declaration => |arg| arg.declaration.type,
+                                .cast => |cast| switch (unit.types.get( cast.value.type).*) {
+                                    .pointer => |pointer| pointer.type,
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                                .global => |global| global.declaration.type,
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        };
+                        const value_type = try llvm.getType(unit, context, sema_value_type);
+                        // const value_type = try llvm.getType(unit, context, load.value.type);
                         const is_volatile = false;
                         const load_i = llvm.builder.createLoad(value_type, value, is_volatile, "", "".len) orelse return LLVM.Value.Instruction.Error.load;
                         try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, load_i.toValue());
@@ -3382,6 +3456,27 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     },
                     .extract_value => |extract_value| {
                         const aggregate = try llvm.emitRightValue(unit, context, extract_value.expression);
+                        // switch (unit.instructions.get(extract_value.expression.value.runtime).*) {
+                        //     .load => |load| switch (unit.instructions.get(load.value.value.runtime).*) {
+                        //         .stack_slot => |stack_slot| {
+                        //             assert(stack_slot.type == extract_value.expression.type);
+                        //         },
+                        //         .argument_declaration => |argument_declaration| {
+                        //             assert(argument_declaration.declaration.type == extract_value.expression.type);
+                        //         },
+                        //         .get_element_pointer => |gep| {
+                        //             assert(gep.base_type == extract_value.expression.type);
+                        //         },
+                        //         else => |t| @panic(@tagName(t)),
+                        //     },
+                        //     else => |t| @panic(@tagName(t)),
+                        // }
+                        // if (aggregate.getType().toPointer()) |pointer_type| {
+                        //     _ = pointer_type; // autofix
+                        // }
+                        const aggregate_type = try llvm.getType(unit, context, extract_value.expression.type);
+                        assert(aggregate_type == aggregate.getType());
+                        assert(!aggregate.getType().isPointer());
                         const indices = [1]c_uint{extract_value.index};
                         const instruction = llvm.builder.createExtractValue(aggregate, &indices, indices.len, "", "".len) orelse unreachable;
                         try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, instruction);

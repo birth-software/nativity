@@ -58,7 +58,8 @@ pub fn main() !void {
             failed_compilation_count += 1;
             break :b false;
         };
-        std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "OK" else "FAILED"});
+
+        std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
         if (compile_run.stdout.len > 0) {
             std.debug.print("STDOUT:\n\n{s}\n\n", .{compile_run.stdout});
         }
@@ -85,7 +86,7 @@ pub fn main() !void {
                 failed_test_count += 1;
                 break :b false;
             };
-            std.debug.print("[TEST {s}]\n", .{if (test_success) "OK" else "FAILED"});
+            std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
             if (test_run.stdout.len > 0) {
                 std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
             }

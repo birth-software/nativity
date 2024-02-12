@@ -1,6 +1,7 @@
 const main = fn () s32{
     const a: [4]u8 = .{1, 2, 3, 4};
     const b: []const []const u8 = .{a.&}.&;
-
-    return #cast(b[0][0] - 1);
+    const c: u8 = b[0][0] - 1;
+    const d: u32 = c;
+    return #cast(c);
 }
