@@ -717,6 +717,7 @@ pub const Instruction = union(enum) {
 
 pub const BasicBlock = struct{
     instructions: ArrayList(Instruction.Index) = .{},
+    useful_instructions: usize = 0,
     predecessor: BasicBlock.Index = .null,
     // TODO: not use a bool
     terminated: bool = false,
@@ -812,6 +813,7 @@ pub const V = struct{
     pub const Comptime = union(enum){
         unresolved: Node.Index,
         undefined,
+        void,
         type: Type.Index,
         bool: bool,
         comptime_int: ComptimeInt,
@@ -1476,9 +1478,7 @@ pub const Builder = struct {
                         try builder.branch(unit, context, instruction_index, true_block, false_block);
 
                         builder.current_basic_block = false_block;
-                        const unreachable_instruction = try unit.instructions.append(context.allocator, .@"unreachable");
-                        // TODO: terminate block properly
-                        try builder.appendInstruction(unit, context, unreachable_instruction);
+                        try builder.buildUnreachable(unit, context);
 
                         builder.current_basic_block = true_block;
                     },
@@ -1639,6 +1639,38 @@ pub const Builder = struct {
     fn appendInstruction(builder: *Builder, unit: *Unit, context: *const Context, instruction_index: Instruction.Index) !void {
         const basic_block = unit.basic_blocks.get(builder.current_basic_block);
         if (!basic_block.terminated) {
+            basic_block.useful_instructions += @intFromBool(switch (unit.instructions.get(instruction_index).*) {
+                .argument_declaration,
+                .branch,
+                .call,
+                .cast,
+                .constant_int,
+                .extract_value,
+                .insert_value,
+                .get_element_pointer,
+                .global,
+                .inline_assembly,
+                .integer_compare,
+                .integer_binary_operation,
+                .jump,
+                .load,
+                .umin,
+                .smin,
+                .phi,
+                .ret,
+                .ret_void,
+                .stack_slot,
+                .store,
+                .syscall,
+                .@"unreachable",
+                => true,
+                .block,
+                .pop_scope,
+                .push_scope,
+                .debug_checkpoint,
+                .debug_declare_local_variable,
+                => false,
+            });
             try basic_block.instructions.append(context.allocator, instruction_index);
         } else {
             const instruction = unit.instructions.get(instruction_index);
@@ -1944,6 +1976,35 @@ pub const Builder = struct {
 
                 if (body_node.id == .block) {
                     function.body = try builder.resolveBlock(unit, context, body_node_index);
+                    if (builder.return_block == .null) {
+                        const cbb = unit.basic_blocks.get(builder.current_basic_block);
+                        const function_prototype = unit.function_prototypes.get(function_prototype_index);
+                        const return_type = function_prototype.return_type;
+
+                        if (!cbb.terminated) {
+                            switch (function_prototype.attributes.naked) {
+                                true => {
+                                    assert(return_type == .noreturn);
+                                    try builder.buildUnreachable(unit, context);
+                                },
+                                false => switch (return_type) {
+                                    .void => {
+                                        try builder.buildRet(unit, context, .{
+                                            .value = .{
+                                                .@"comptime" = .void,
+                                            },
+                                            .type = .void,
+                                        });
+                                    },
+                                    .noreturn => {
+                                        try builder.buildUnreachable(unit, context);
+                                    },
+                                    else => unreachable,
+                                },
+                            }
+
+                        }
+                    }
 
                     const function_definition_index = builder.current_function;
 
@@ -2125,9 +2186,9 @@ pub const Builder = struct {
                                         .unsigned => .zero_extend,
                                     };
                                 }
+                            } else {
+                                unreachable;
                             }
-
-                            unreachable;
                         },
                         .comptime_int => {
                             return .materialize_int;
@@ -3720,6 +3781,17 @@ pub const Builder = struct {
                                 });
                                 try builder.appendInstruction(unit, context, slice_builder);
 
+                                const array_len_value = V{
+                                    .value = .{
+                                        .@"comptime" = .{
+                                            .constant_int = .{
+                                                .value = array.count,
+                                            },
+                                        },
+                                    },
+                                    .type = .usize,
+                                };
+
                                 const final_slice = try unit.instructions.append(context.allocator, .{
                                     .insert_value = .{
                                         .expression = V{
@@ -3729,16 +3801,47 @@ pub const Builder = struct {
                                             .type = expression_to_slice.type,
                                         },
                                         .index = 1,
-                                        .new_value = .{
-                                            .value = .{
-                                                .@"comptime" = .{
-                                                    .constant_int = .{
-                                                        .value = array.count,
+                                        .new_value = switch (range_start.value) {
+                                            .runtime => b: {
+                                                const range_compute = try unit.instructions.append(context.allocator, .{
+                                                    .integer_binary_operation = .{
+                                                        .id = .sub,
+                                                        .left = array_len_value,
+                                                        .right = range_start,
+                                                        .signedness = .unsigned,
                                                     },
-                                                },
+                                                });
+                                                try builder.appendInstruction(unit, context, range_compute);
+
+                                                break :b V{
+                                                    .value = .{
+                                                        .runtime = range_compute,
+                                                    },
+                                                    .type = .usize,
+                                                };
                                             },
-                                            .type = .usize,
+                                            .@"comptime" => |ct| b: {
+                                                const range_start_value = switch (ct) {
+                                                    .constant_int => |const_int| const_int.value,
+                                                    else => |t| @panic(@tagName(t)),
+                                                };
+
+                                                const range = array.count - range_start_value;
+                                                
+                                                break :b V{
+                                                    .value = .{
+                                                        .@"comptime" = .{
+                                                            .constant_int = .{
+                                                                .value = range,
+                                                            },
+                                                        },
+                                                    },
+                                                    .type = .usize,
+                                                };
+                                            },
+                                            else => |t| @panic(@tagName(t)),
                                         },
+                                        // },
                                     },
                                 });
                                 try builder.appendInstruction(unit, context, final_slice);
@@ -4772,24 +4875,18 @@ pub const Builder = struct {
                         const phi = &unit.instructions.get(builder.return_phi).phi;
                         try phi.values.append(context.allocator, return_value);
                         try phi.basic_blocks.append(context.allocator, current_basic_block);
-                        
-                        const ret = try unit.instructions.append(context.allocator, .{
-                            .ret = .{
-                                .value = .{
-                                    .runtime = builder.return_phi,
-                                },
-                                .type = return_type,
+
+                        try builder.buildRet(unit, context, .{
+                            .value = .{
+                                .runtime = builder.return_phi,
                             },
+                            .type = return_type,
                         });
-                        try builder.appendInstruction(unit, context, ret);
                         
                         builder.current_basic_block = current_basic_block;
                         try builder.jump(unit, context, builder.return_block);
                     } else {
-                        const ret = try unit.instructions.append(context.allocator, .{
-                            .ret = return_value,
-                        });
-                        try builder.appendInstruction(unit, context, ret);
+                        try builder.buildRet(unit, context, return_value);
                     }
                 },
                 .call =>  {
@@ -4827,8 +4924,7 @@ pub const Builder = struct {
                     }
                 },
                 .@"unreachable" => {
-                    const instruction = try unit.instructions.append(context.allocator, .@"unreachable");
-                    try builder.appendInstruction(unit, context, instruction);
+                    try builder.buildUnreachable(unit, context);
                 },
                 .@"while" => {
                     assert(statement_node.left != .null);
@@ -5585,6 +5681,20 @@ pub const Builder = struct {
         };
 
         return result;
+    }
+
+    fn buildUnreachable(builder: *Builder, unit: *Unit, context: *const Context) !void {
+        const instruction = try unit.instructions.append(context.allocator, .@"unreachable");
+        try builder.appendInstruction(unit, context, instruction);
+        unit.basic_blocks.get(builder.current_basic_block).terminated = true;
+    }
+
+    fn buildRet(builder: *Builder, unit: *Unit, context: *const Context, value: V) !void {
+        const ret = try unit.instructions.append(context.allocator, .{
+            .ret = value,
+        });
+        try builder.appendInstruction(unit, context, ret);
+        unit.basic_blocks.get(builder.current_basic_block).terminated = true;
     }
 };
 

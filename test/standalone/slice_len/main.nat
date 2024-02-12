@@ -1,0 +1,11 @@
+
+const main = fn() s32 {
+    var buffer: [65]u8 = undefined;
+    const slice = foo(5, buffer.&);
+    #assert(slice.len + 5 == buffer.len);
+    const result: u32 = #cast(slice.len + 5 - buffer.len);
+    return #cast(result);
+}
+const foo = fn(n: usize, buffer: &[65]u8) []u8 {
+    return buffer[n..];
+}
