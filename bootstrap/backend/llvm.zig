@@ -1093,83 +1093,6 @@ pub const LLVM = struct {
         }
     }
 
-    // fn emitDeclaration(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, declaration_index: Compilation.Declaration.Index, maybe_argument: ?*LLVM.Value.Argument) !*LLVM.Value {
-    //     _ = unit; // autofix
-    //     const declaration_value: *Value = switch (sema_declaration.scope_type) {
-    //         .local => blk: {
-    //             const sema_declaration_type = llvm.sema.types.array.get(sema_declaration_type_index);
-    //             const alloca_array_size: ?*LLVM.Value = switch (sema_declaration_type.*) {
-    //                 else => null,
-    //                 .array => |array| b: {
-    //                     const is_signed = false;
-    //                     const array_len = llvm.context.getConstantInt(64, array.element_count, is_signed) orelse unreachable;
-    //                     break :b array_len.toValue();
-    //                 },
-    //             };
-    //
-    //             const declaration_alloca = llvm.builder.createAlloca(declaration_type, address_space, alloca_array_size, declaration_name.ptr, declaration_name.len) orelse return LLVM.Value.Instruction.Error.alloca;
-    //             const alloca_value: *LLVM.Value = declaration_alloca.toValue();
-    //
-    //
-    //             if (initial_value) |init_value| {
-    //                 const store = llvm.builder.createStore(init_value, alloca_value, is_volatile) orelse return LLVM.Value.Instruction.Error.store;
-    //                 _ = store;
-    //             }
-    //
-    //             break :blk alloca_value;
-    //         },
-    //         .global => blk: {
-    //             const is_constant = switch (sema_declaration.mutability) {
-    //                 .@"const" => true,
-    //                 .@"var" => false,
-    //             };
-    //             // TODO:
-    //             const linkage = LLVM.Linkage.@"extern";
-    //             const initializer: *LLVM.Value.Constant = if (initial_value) |value| value.toConstant() orelse unreachable else (declaration_type.getUndefined() orelse unreachable).toConstant();
-    //             const thread_local_mode = LLVM.ThreadLocalMode.not_thread_local;
-    //             const externally_initialized = false;
-    //             const global_variable = llvm.module.addGlobalVariable(declaration_type, is_constant, linkage, initializer, declaration_name.ptr, declaration_name.len, null, thread_local_mode, address_space, externally_initialized) orelse return LLVM.Value.Error.constant_int;
-    //             break :blk global_variable.toValue();
-    //         },
-    //         else => unreachable,
-    //     };
-    //
-    //     try llvm.declaration_map.putNoClobber(context.allocator, declaration_index, declaration_value);
-    //
-    //     return declaration_value;
-    // }
-
-    fn emitLValue(llvm: *LLVM, sema_value_index: Compilation.Value.Index, context: Compilation.ScopeType) anyerror!*LLVM.Value {
-        const sema_value = llvm.sema.values.array.get(sema_value_index);
-
-        switch (sema_value.*) {
-            .declaration_reference => |declaration_reference| {
-                const declaration_index = declaration_reference.value;
-                return try llvm.getDeclaration(declaration_index);
-            },
-            .indexed_access => |indexed_access_index| {
-                const indexed_access = llvm.sema.values.indexed_accesses.get(indexed_access_index);
-                const indexed = try llvm.emitValue(indexed_access.indexed_expression, context);
-                const index = try llvm.emitValue(indexed_access.index_expression, context);
-                const indexed_value = llvm.sema.values.array.get(indexed_access.indexed_expression);
-                const indexed_type = indexed_value.getType(llvm.sema);
-                switch (llvm.sema.types.array.get(indexed_type).*) {
-                    .pointer => |pointer| {
-                        const element_type = try llvm.getType(pointer.element_type);
-                        const is_signed = false;
-                        const index_zero = llvm.context.getConstantInt(32, 0, is_signed) orelse unreachable;
-                        const indices = [2]*LLVM.Value{ index_zero.toValue(), index };
-                        const in_bounds = true;
-                        const gep = llvm.builder.createGEP(element_type, indexed, &indices, indices.len, "gep", "gep".len, in_bounds) orelse return LLVM.Value.Instruction.Error.gep;
-                        return gep;
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-            },
-            else => |t| @panic(@tagName(t)),
-        }
-    }
-
     fn getDeclaration(llvm: *LLVM, declaration_index: Compilation.Declaration.Index) anyerror!*LLVM.Value {
         if (llvm.declaration_map.get(declaration_index)) |declaration_value| {
             return declaration_value;
@@ -2519,21 +2442,6 @@ pub const LLVM = struct {
                     });
                     break :b struct_type.toType();
                 },
-                // .optional => |optional| {
-                //     const element_type = try llvm.getDebugType(optional.element_type);
-                //     const bool_type = try llvm.getDebugType(Compilation.Type.boolean);
-                //     const field_types = [2]*LLVM.DebugInfo.Type{ element_type, bool_type };
-                //     const struct_type = llvm.createDebugStructType(.{
-                //         .scope = null,
-                //         .name = name,
-                //         .file = null,
-                //         .line = 1,
-                //         .bitsize = sema_type.getBitSize(llvm.sema),
-                //         .alignment = 0,
-                //         .field_types = &field_types,
-                //     });
-                //     return struct_type.toType();
-                // },
                 .array => |array| b: {
                     // TODO: compute
                     const byte_size = 1; // array.count * unit.types.get(array.element_type).getSize();
@@ -2731,8 +2639,6 @@ pub const LLVM = struct {
         const sema_array_type = unit.types.get(constant_array.type).array;
         const constant_type = try llvm.getType(unit, context, constant_array.type);
         const array_type = constant_type.toArray() orelse unreachable;
-        const element_type = array_type.getElementType() orelse unreachable;
-        _ = element_type; // autofix
         var list = try ArrayList(*LLVM.Value.Constant).initCapacity(context.allocator, constant_array.values.len);
         for (constant_array.values) |sema_value| { 
             const value = switch (sema_value) {
@@ -3456,24 +3362,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     },
                     .extract_value => |extract_value| {
                         const aggregate = try llvm.emitRightValue(unit, context, extract_value.expression);
-                        // switch (unit.instructions.get(extract_value.expression.value.runtime).*) {
-                        //     .load => |load| switch (unit.instructions.get(load.value.value.runtime).*) {
-                        //         .stack_slot => |stack_slot| {
-                        //             assert(stack_slot.type == extract_value.expression.type);
-                        //         },
-                        //         .argument_declaration => |argument_declaration| {
-                        //             assert(argument_declaration.declaration.type == extract_value.expression.type);
-                        //         },
-                        //         .get_element_pointer => |gep| {
-                        //             assert(gep.base_type == extract_value.expression.type);
-                        //         },
-                        //         else => |t| @panic(@tagName(t)),
-                        //     },
-                        //     else => |t| @panic(@tagName(t)),
-                        // }
-                        // if (aggregate.getType().toPointer()) |pointer_type| {
-                        //     _ = pointer_type; // autofix
-                        // }
                         const aggregate_type = try llvm.getType(unit, context, extract_value.expression.type);
                         assert(aggregate_type == aggregate.getType());
                         assert(!aggregate.getType().isPointer());
