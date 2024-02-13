@@ -3764,6 +3764,22 @@ pub const Builder = struct {
                         true => unreachable,
                         false => switch (unit.types.get(pointer.type).*) {
                             .array => |array| {
+                                const pointer_gep = try unit.instructions.append(context.allocator, .{
+                                    .get_element_pointer = .{
+                                        .pointer = expression_to_slice.value.runtime,
+                                        .base_type = array.type,
+                                        .index = range_start,
+                                    },
+                                });
+                                try builder.appendInstruction(unit, context, pointer_gep);
+
+                                const pointer_type = try unit.getPointerType(context, .{
+                                    .type = array.type,
+                                    .termination = .none,
+                                    .mutability = pointer.mutability,
+                                    .many = false,
+                                    .nullable = false,
+                                });
                                 const slice_builder = try unit.instructions.append(context.allocator, .{
                                     .insert_value = .{
                                         .expression = V{
@@ -3776,7 +3792,12 @@ pub const Builder = struct {
                                             },
                                         },
                                         .index = 0,
-                                        .new_value = expression_to_slice,
+                                        .new_value = .{
+                                            .value = .{
+                                                .runtime = pointer_gep,
+                                            },
+                                            .type = pointer_type,
+                                        },
                                     },
                                 });
                                 try builder.appendInstruction(unit, context, slice_builder);
@@ -4227,9 +4248,25 @@ pub const Builder = struct {
                                 };
                             },
                             .array => |array| b: {
+                                const loaded_array_like = switch (array_like_expression.value) {
+                                    .runtime => |instruction_index| switch (unit.instructions.get(instruction_index).*) {
+                                        .argument_declaration, .stack_slot => arg: {
+                                            const load = try unit.instructions.append(context.allocator, .{
+                                                .load = .{
+                                                    .value = array_like_expression,
+                                                },
+                                            });
+                                            try builder.appendInstruction(unit, context, load);
+                                            break :arg load;
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                };
+
                                 const gep = try unit.instructions.append(context.allocator, .{
                                     .get_element_pointer = .{
-                                        .pointer = array_like_expression.value.runtime,
+                                        .pointer = loaded_array_like,
                                         .base_type = array.type,
                                         .index = index,
                                     },
@@ -4310,6 +4347,38 @@ pub const Builder = struct {
                             .type = gep_type,
                         };
                     },
+                    .array => |array| b: {
+                        switch (array_like_expression.value) {
+                            .runtime => |instruction_index| switch (unit.instructions.get(instruction_index).*) {
+                                .stack_slot => {},
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+
+                        const gep = try unit.instructions.append(context.allocator, .{
+                            .get_element_pointer = .{
+                                .pointer = array_like_expression.value.runtime,
+                                .base_type = array.type,
+                                .index = index,
+                            },
+                        });
+
+                        const gep_type = try unit.getPointerType(context, .{
+                            .type = array.type,
+                            .termination = .none,
+                            .mutability = .@"var",
+                            .many = false,
+                            .nullable = false,
+                        });
+
+                        break :b .{
+                            .value = .{
+                                .runtime = gep,
+                            },
+                            .type = gep_type,
+                        };
+                    },
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -4342,6 +4411,7 @@ pub const Builder = struct {
 
                                     break :b unit.types.get(gep.type).pointer.type;
                                 },
+                                .none => unit.types.get(gep.type).pointer.type,
                                 else => |t| @panic(@tagName(t)),
                             },
                         };

@@ -22,7 +22,7 @@ pub fn main() !void {
 
     while (try standalone_iterator.next()) |entry| {
         switch (entry.kind) {
-            .directory => try standalone_test_names.append(allocator, entry.name),
+            .directory => try standalone_test_names.append(allocator, try allocator.dupe(u8, entry.name)),
             else => return error.junk_in_test_directory,
         }
     }
@@ -38,6 +38,7 @@ pub fn main() !void {
     const total_test_count = standalone_test_names.items.len;
 
     for (standalone_test_names.items) |standalone_test_name| {
+        std.debug.assert(!std.mem.eql(u8, standalone_test_name, "else_ifrld"));
         std.debug.print("{s}... ", .{standalone_test_name});
         const source_file_path = try std.mem.concat(allocator, u8, &.{standalone_test_dir_path, "/", standalone_test_name, "/main.nat"});
         const compile_run = try std.ChildProcess.run(.{

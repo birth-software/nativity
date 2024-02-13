@@ -2459,7 +2459,6 @@ pub const LLVM = struct {
     }
 
     fn emitLeftValue(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, v: Compilation.V) !*LLVM.Value {
-        _ = context; // autofix
         switch (v.value) {
             .runtime => |instruction_index| {
                 if (llvm.llvm_instruction_map.get(instruction_index)) |value| {
@@ -2470,6 +2469,17 @@ pub const LLVM = struct {
                         .global => |global_declaration| {
                             const global_variable =  llvm.global_variable_map.get(global_declaration).?;
                             return global_variable.toValue();
+                        },
+                        .get_element_pointer => |gep| {
+                            const pointer = llvm.llvm_instruction_map.get(gep.pointer).?;
+                            const index = try llvm.emitRightValue(unit, context, gep.index);
+                            const indices = [1]*LLVM.Value{ index };
+                            const base_type = try llvm.getType(unit, context, gep.base_type);
+                            const in_bounds = true;
+                            const get_element_pointer = llvm.builder.createGEP(base_type, pointer, &indices, indices.len, "gep", "gep".len, in_bounds) orelse unreachable;
+                            try llvm.llvm_value_map.putNoClobber(context.allocator, v, get_element_pointer);
+                            try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, get_element_pointer);
+                            return get_element_pointer;
                         },
                         else => |t| @panic(@tagName(t)),
                     }
@@ -3090,6 +3100,15 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                     .global => |global| b: {
                                         const global_variable = llvm.global_variable_map.get(global).?;
                                         break :b global_variable.toValue();
+                                    },
+                                    .get_element_pointer => |gep| b: {
+                                        const index = try llvm.emitRightValue(unit, context, gep.index);
+                                        const pointer = llvm.llvm_instruction_map.get(gep.pointer).?;
+                                        const t = try llvm.getType(unit, context, gep.base_type);
+                                        const indices = [1]*LLVM.Value{index};
+                                        const in_bounds = true;
+                                        const get_element_pointer = llvm.builder.createGEP(t, pointer, &indices, indices.len, "gep", "gep".len, in_bounds) orelse unreachable;
+                                        break :b get_element_pointer;
                                     },
                                     else => |t| @panic(@tagName(t)),
                                 },
