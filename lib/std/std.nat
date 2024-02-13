@@ -28,7 +28,9 @@ const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
     while (true) {
         const digit: u8 = #cast(absolute % 10);
         index -= 1;
-        buffer[index] = '0' + digit;
+        const ch = '0' + digit;
+        buffer[index] = ch;
+        #assert(buffer[index] == ch);
         absolute /= 10;
 
         if (absolute == 0) {

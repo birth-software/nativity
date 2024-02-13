@@ -1,0 +1,14 @@
+const main = fn () s32 {
+    var buffer: [2]u8 = undefined;
+    const expected = 'a';
+    const index: usize = 1;
+    foo(buffer.&, index, expected);
+    const ch = buffer[index];
+    const sub = expected - ch;
+    const result: u32 = sub;
+    return #cast(result);
+}
+
+const foo = fn (buffer: &[2]u8, index: usize, ch: u8) void {
+    buffer[index] = ch;
+}

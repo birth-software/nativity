@@ -1,0 +1,9 @@
+const main = fn () s32 {
+    const ch = 'a';
+    var buffer: [1]u8 = undefined;
+    var index: usize = 0;
+    buffer[index] = ch;
+    const sub: u8 = buffer[index] - ch;
+    const result: u32 = sub;
+    return #cast(result);
+}
