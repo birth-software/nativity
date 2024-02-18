@@ -1282,9 +1282,12 @@ pub const LLVM = struct {
 
     fn renderTypeName(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_type_index: Compilation.Type.Index) ![]const u8 {
         const gop = try llvm.type_name_map.getOrPut(context.allocator, sema_type_index);
-        if (!gop.found_existing) {
+        if (gop.found_existing) {
+            return gop.value_ptr.*;
+        } else {
             if (unit.type_declarations.get(sema_type_index)) |global_declaration| {
                 gop.value_ptr.* = unit.getIdentifier(global_declaration.declaration.name);
+                return gop.value_ptr.*;
             } else {
                 const sema_type = unit.types.get(sema_type_index);
                 const result: []const u8 = switch (sema_type.*) {
@@ -1348,11 +1351,11 @@ pub const LLVM = struct {
                     else => |t| @panic(@tagName(t)),
                 };
 
-                gop.value_ptr.* = result;
+                try llvm.type_name_map.put(context.allocator, sema_type_index, result);
+
+                return result;
             }
         }
-
-        return gop.value_ptr.*;
     }
 
     fn createDebugStructType(llvm: *LLVM, arguments: struct {
@@ -2302,37 +2305,44 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         try llvm.scope_map.putNoClobber(context.allocator, &unit.scope.scope, llvm.scope);
     }
 
-    for (unit.code_to_emit.values()) |function_declaration| {
-        const function_definition_index = function_declaration.getFunctionDefinitionIndex();
-        const function_definition = unit.function_definitions.get(function_definition_index);
-        const function_type = try llvm.getType(unit, context, function_definition.type);
-        const is_export = function_declaration.attributes.contains(.@"export");
-        const linkage: LLVM.Linkage = switch (is_export) {
-            true => .@"extern",
-            false => .internal,
-        };
-        // TODO: Check name collision
-        const mangle_name = !is_export;
-        _ = mangle_name; // autofix
-        const name = unit.getIdentifier(function_declaration.declaration.name);
-        const function = llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, name.ptr, name.len) orelse return Error.function;
+    const functions = unit.code_to_emit.values();
 
-        const function_prototype = unit.function_prototypes.get(unit.types.get(function_definition.type).function);
-        switch (unit.types.get(function_prototype.return_type).*) {
-            .noreturn => {
-                function.addAttributeKey(.NoReturn);
-            },
-            else => {},
+    {
+        var function_i: usize = functions.len;
+        while (function_i > 0) {
+            function_i -= 1;
+            const function_declaration = functions[function_i];
+            const function_definition_index = function_declaration.getFunctionDefinitionIndex();
+            const function_definition = unit.function_definitions.get(function_definition_index);
+            const function_type = try llvm.getType(unit, context, function_definition.type);
+            const is_export = function_declaration.attributes.contains(.@"export");
+            const linkage: LLVM.Linkage = switch (is_export) {
+                true => .@"extern",
+                false => .internal,
+            };
+            // TODO: Check name collision
+            const mangle_name = !is_export;
+            _ = mangle_name; // autofix
+            const name = unit.getIdentifier(function_declaration.declaration.name);
+            const function = llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, name.ptr, name.len) orelse return Error.function;
+
+            const function_prototype = unit.function_prototypes.get(unit.types.get(function_definition.type).function);
+            switch (unit.types.get(function_prototype.return_type).*) {
+                .noreturn => {
+                    function.addAttributeKey(.NoReturn);
+                },
+                else => {},
+            }
+
+            if (function_prototype.attributes.naked) {
+                function.addAttributeKey(.Naked);
+            }
+
+            const calling_convention = getCallingConvention(function_prototype.calling_convention);
+            function.setCallingConvention(calling_convention);
+
+            try llvm.function_definition_map.putNoClobber(context.allocator, function_declaration, function);
         }
-
-        if (function_prototype.attributes.naked) {
-            function.addAttributeKey(.Naked);
-        }
-
-        const calling_convention = getCallingConvention(function_prototype.calling_convention);
-        function.setCallingConvention(calling_convention);
-
-        try llvm.function_definition_map.putNoClobber(context.allocator, function_declaration, function);
     }
 
     // First, cache all the global variables
@@ -3100,22 +3110,27 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
     // TODO: initialize only the target we are going to use
     bindings.NativityLLVMInitializeCodeGeneration();
-    const target_triple = "x86_64-linux-none";
+    // TODO: proper target selection
+    const target_triple = switch (unit.descriptor.target.os.tag) {
+        .linux => "x86_64-linux-none",
+        .macos => "aarch64-apple-macosx-none",
+        else => |t| @panic(@tagName(t)),
+    };
     const cpu = "generic";
     const features = "";
     const target = blk: {
         var error_message: [*]const u8 = undefined;
         var error_message_len: usize = 0;
-        const target = bindings.NativityLLVMGetTarget(target_triple, target_triple.len, &error_message, &error_message_len) orelse unreachable;
+        const target = bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len) orelse unreachable;
         break :blk target;
     };
 
     const jit = false;
     const code_model: LLVM.CodeModel = undefined;
     const is_code_model_present = false;
-    const target_machine = target.createTargetMachine(target_triple, target_triple.len, cpu, cpu.len, features, features.len, LLVM.RelocationModel.static, code_model, is_code_model_present, LLVM.OptimizationLevel.none, jit) orelse unreachable;
+    const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features, features.len, LLVM.RelocationModel.static, code_model, is_code_model_present, LLVM.OptimizationLevel.none, jit) orelse unreachable;
     llvm.module.setTargetMachineDataLayout(target_machine);
-    llvm.module.setTargetTriple(target_triple, target_triple.len);
+    llvm.module.setTargetTriple(target_triple.ptr, target_triple.len);
     const file_path = unit.descriptor.executable_path;
     const object_file_path = try std.mem.joinZ(context.allocator, "", &.{ file_path, ".o" });
     const destination_file_path = try std.mem.joinZ(context.allocator, "", &.{file_path});
