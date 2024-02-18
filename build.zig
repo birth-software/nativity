@@ -388,7 +388,6 @@ pub fn build(b: *std.Build) !void {
             // not tested
             const result = b.addSystemCommand(&.{"lldb"});
             result.addArg("--");
-            result.addArg(compiler_exe_path);
             break :blk result;
         },
         else => @compileError("OS not supported"),
@@ -409,9 +408,13 @@ pub fn build(b: *std.Build) !void {
     test_command.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
+        std.debug.print("Args: {s}", .{args});
         run_command.addArgs(args);
         debug_command.addArgs(args);
         test_command.addArgs(args);
+        for (debug_command.argv.items, 0..) |arg, i| {
+            std.debug.print("Arg #{}: {s}\n", .{i, arg.bytes});
+        }
     }
 
     const run_step = b.step("run", "Test the Nativity compiler");
