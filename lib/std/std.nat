@@ -105,12 +105,12 @@ const PageAllocator = struct{
         if (new_size > 0) {
             const general_protection_flags = os.ProtectionFlags{
                 .read = true,
-                    .write = true,
-                    .execute = false,
+                .write = true,
+                .execute = false,
             };
             const general_map_flags = os.MapFlags{
                 .reserve = true,
-                    .commit = true,
+                .commit = true,
             };
 
             maybe_new_ptr = os.allocate_virtual_memory(address = null, length = new_size, general_protection_flags, general_map_flags);

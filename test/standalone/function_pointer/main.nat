@@ -1,0 +1,11 @@
+const expected_number = 123;
+
+const foo = fn () s32 {
+    return expected_number;
+}
+
+const main = fn () s32 {
+    var function_pointer = foo.&;
+    const result = function_pointer();
+    return result - expected_number;
+}

@@ -1,0 +1,23 @@
+const expected_number = 123;
+
+const foo = fn () s32 {
+    return expected_number;
+}
+
+const Struct = struct{
+    a: s32,
+    handler: &const fn(s: &Struct) s32,
+
+    const handler_function = fn (s: &Struct) s32 {
+        return s.a;
+    }
+};
+
+const main = fn () s32 {
+    var s = Struct{
+        .a = expected_number,
+        .handler = Struct.handler_function.&,
+    };
+
+    return s.handler(s.&) - expected_number;
+}

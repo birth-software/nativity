@@ -100,7 +100,7 @@ pub fn main() !void {
     }
 
     std.debug.print("\nTOTAL COMPILATIONS: {}. FAILED: {}\n", .{total_compilation_count, failed_compilation_count});
-    std.debug.print("\nTOTAL TESTS: {}. RAN: {}. FAILED: {}\n", .{total_test_count, ran_test_count, failed_test_count});
+    std.debug.print("TOTAL TESTS: {}. RAN: {}. FAILED: {}\n", .{total_test_count, ran_test_count, failed_test_count});
 
     if (failed_compilation_count > 0 or failed_test_count > 0) {
         return error.fail;

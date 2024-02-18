@@ -1,0 +1,27 @@
+const BitStruct = struct(u8) {
+    a: bool,
+    b: bool,
+    c: bool,
+    d: u5,
+};
+
+const main = fn () s32 {
+    var bs = BitStruct{
+        .a = false,
+        .b = true,
+        .c = true,
+        .d = 0,
+    };
+    const bitcast_bs: u8 = #cast(bs);
+    #assert(bitcast_bs == 6);
+
+    const const_bs = BitStruct{
+        .a = true,
+        .b = false,
+        .c = true,
+        .d = 0,
+    };
+    const bitcast_const_bs: u8 = #cast(const_bs);
+    #assert(bitcast_const_bs == 5);
+    return 0;
+}

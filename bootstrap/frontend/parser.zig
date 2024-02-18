@@ -1433,6 +1433,7 @@ const Analyzer = struct {
                     }
 
                     logln(.parser, .suffix, "[DEPTH={}] Ending suffix call-like expression", .{analyzer.suffix_depth});
+                    logln(.parser, .suffix, "Callee node: {s}", .{@tagName(analyzer.nodes.get(result).id)});
 
                     _ = try analyzer.expectToken(.operator_right_parenthesis);
                     // const is_comma = analyzer.tokens[analyzer.token_i].id == .comma;

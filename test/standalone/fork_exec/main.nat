@@ -5,7 +5,7 @@ const main = fn() s32 {
         if (pid == 0) {
             std.print(bytes = "Hello from child\n");
             const argv = [_:null] ?[&:0]const u8{"/usr/bin/ls"};
-            std.os.execute(path = "/usr/bin/ls", argv = argv.&, env = std.start.environment_values);
+            _ = std.os.execute(path = "/usr/bin/ls", argv = argv.&, env = std.start.environment_values);
             return 1;
         } else {
             std.print(bytes = "Hello from parent\n");

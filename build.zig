@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) !void {
     const self_hosted_ci = b.option(bool, "self_hosted_ci", "This option enables the self-hosted CI behavior") orelse false;
     const third_party_ci = b.option(bool, "third_party_ci", "This option enables the third-party CI behavior") orelse false;
     const is_ci = self_hosted_ci or third_party_ci;
+    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
     var target_query = b.standardTargetOptionsQueryOnly(.{});
@@ -69,7 +70,7 @@ pub fn build(b: *std.Build) !void {
         }
     };
     const compiler_options = b.addOptions();
-    compiler_options.addOption(bool, "print_stack_trace", is_ci);
+    compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
 
     const compiler = b.addExecutable(.{
         .name = "nat",
@@ -78,8 +79,8 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimization,
     });
     compiler.root_module.addOptions("configuration", compiler_options);
-    compiler.formatted_panics = is_ci;
-    compiler.root_module.unwind_tables = is_ci;
+    compiler.formatted_panics = print_stack_trace;
+    compiler.root_module.unwind_tables = print_stack_trace;
     compiler.root_module.omit_frame_pointer = false;
     compiler.want_lto = false;
 
