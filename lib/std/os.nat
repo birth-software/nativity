@@ -160,7 +160,9 @@ const duplicate_process = fn () ?Process.Id {
     switch (current) {
         .linux =>  {
             if (linux.unwrap_syscall(syscall_result = linux.fork())) |fork_result| {
-                return #cast(fork_result);
+                const unsigned: u32 = #cast(fork_result);
+                const signed: s32 = #cast(unsigned);
+                return signed;
             } else {
                 return null;
             }

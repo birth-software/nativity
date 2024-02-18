@@ -1,0 +1,28 @@
+const A = struct(u8) {
+    a: u4,
+    b: u4,
+};
+const B = struct(u8) {
+    b: u4,
+    a: u4,
+};
+
+const transform = fn (a: A) B {
+    return B{
+        .a = a.a,
+        .b = a.b,
+    };
+}
+
+const main = fn () s32 {
+    var a = A{
+        .a = 3,
+        .b = 8,
+    };
+
+    const b = transform(a);
+    #assert(a.a == b.a);
+    #assert(a.b == b.b);
+
+    return 0;
+}

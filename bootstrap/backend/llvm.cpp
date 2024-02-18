@@ -157,7 +157,15 @@ extern "C" DICompositeType* NativityLLVMDebugInfoBuilderCreateStructType(DIBuild
     auto type_array = ArrayRef<Metadata*>(reinterpret_cast<Metadata**>(element_type_ptr), element_type_count);
 
     auto* struct_type = builder.createStructType(scope, name, file, line_number, bit_count, alignment, flags, derived_from, builder.getOrCreateArray(type_array));
+
     return struct_type;
+}
+
+extern "C" void NativityLLVMDebugInfoBuilderCompositeTypeReplaceTypes(DIBuilder& builder, DICompositeType& type, DIType** element_type_ptr, size_t element_type_count)
+{
+    auto type_array = ArrayRef<Metadata*>(reinterpret_cast<Metadata**>(element_type_ptr), element_type_count);
+    auto node_array = builder.getOrCreateArray(type_array);
+    type.replaceElements(node_array);
 }
 
 extern "C" DICompositeType* NativityLLVMDebugInfoBuilderCreateArrayType(DIBuilder& builder, uint64_t bit_size, uint32_t alignment, DIType* type, size_t element_count)
@@ -173,8 +181,6 @@ extern "C" DICompositeType* NativityLLVMDebugInfoBuilderCreateArrayType(DIBuilde
 
 extern "C" DIEnumerator* NativityLLVMDebugInfoBuilderCreateEnumerator(DIBuilder& builder, const char* name_ptr, size_t name_len, uint64_t value, bool is_unsigned)
 {
-
-    // DIEnumerator *DIBuilder::createEnumerator(StringRef Name, uint64_t Val,
     auto name = StringRef(name_ptr, name_len);
     auto* enumerator = builder.createEnumerator(name, value, is_unsigned);
     return enumerator;
@@ -194,6 +200,19 @@ extern "C" DICompositeType* NativityLLVMDebugInfoBuilderCreateReplaceableComposi
     auto* composite_type = builder.createReplaceableCompositeType(tag, name, scope, file, line);
     return composite_type;
 }
+
+extern "C" DIDerivedType* NativityLLVMDebugInfoBuilderCreateMemberType(DIBuilder& builder, DIScope *scope, const char* name_ptr, size_t name_len, DIFile* file, unsigned line_number, uint64_t bit_size, uint32_t alignment, uint64_t bit_offset, DINode::DIFlags flags, DIType* type)
+{
+    auto name = StringRef(name_ptr, name_len);
+    auto* member_type = builder.createMemberType(scope, name, file, line_number, bit_size, alignment, bit_offset, flags, type);
+    return member_type;
+}
+
+extern "C" bool NativityLLLVMDITypeIsResolved(DIType* type)
+{
+    return type->isResolved();
+}
+
 extern "C" DISubprogram* NativityLLVMDebugInfoScopeToSubprogram(DIScope* scope)
 {
     auto* subprogram = dyn_cast<DISubprogram>(scope);
@@ -418,9 +437,6 @@ extern "C" Value* NativityLLVMBuilderCreateCast(IRBuilder<>& builder, Instructio
 
 extern "C" CallInst* NativityLLVMBuilderCreateCall(IRBuilder<>& builder, FunctionType* function_type, Value* callee, Value** argument_ptr, size_t argument_count, const char* name_ptr, size_t name_len, MDNode* fp_math_tag)
 {
-    if (auto* foo = static_cast<FunctionType*>(callee->getType())) {
-        int k = 0;
-    }
     auto arguments = ArrayRef<Value*>(argument_ptr, argument_count);
     auto name = StringRef(name_ptr, name_len);
     auto* call = builder.CreateCall(function_type, callee, arguments, name, fp_math_tag);
@@ -539,6 +555,13 @@ extern "C" Value* NativityLLVMBuilderCreateGEP(IRBuilder<>& builder, Type* type,
     return GEP;
 }
 
+extern "C" Value* NativityLLVMBuilderCreateStructGEP(IRBuilder<>& builder, Type* type, Value* pointer, unsigned index, const char* name_ptr, size_t name_len)
+{
+    auto name = StringRef(name_ptr, name_len);
+    auto* gep = builder.CreateStructGEP(type, pointer, index, name);
+    return gep;
+}
+
 extern "C" BranchInst* NativityLLVMBuilderCreateBranch(IRBuilder<>& builder, BasicBlock* basic_block)
 {
     auto* conditional_branch = builder.CreateBr(basic_block);
@@ -558,14 +581,6 @@ extern "C" Intrinsic::ID NativityLLVMLookupIntrinsic(const char* name_ptr, size_
     return id;
 }
 
-extern "C" FunctionType* NativityLLVMContextGetIntrinsicType(LLVMContext& context, Intrinsic::ID intrinsic_id, Type** parameter_type_ptr, size_t parameter_type_count)
-{
-    assert(intrinsic_id < Intrinsic::num_intrinsics);
-    auto parameter_types = ArrayRef<Type*>(parameter_type_ptr, parameter_type_count);
-    auto* function_type = Intrinsic::getType(context, intrinsic_id, parameter_types);
-    return function_type;
-}
-
 extern "C" Function* NativityLLVMModuleGetIntrinsicDeclaration(Module* module, Intrinsic::ID intrinsic_id, Type** parameter_types_ptr, size_t parameter_type_count)
 {
     auto parameter_types = ArrayRef<Type*>(parameter_types_ptr, parameter_type_count);
@@ -574,6 +589,23 @@ extern "C" Function* NativityLLVMModuleGetIntrinsicDeclaration(Module* module, I
     return function;
 }
 
+extern "C" FunctionType* NativityLLVMFunctionGetType(Function& function)
+{
+    auto* function_type = function.getFunctionType();
+    return function_type;
+}
+
+extern "C" Type* NativityLLVMFunctionTypeGetReturnType(FunctionType& function_type)
+{
+    auto* return_type = function_type.getReturnType();
+    return return_type;
+}
+
+extern "C" bool NativityLLVMTypeIsVoid(Type& type)
+{
+    bool is_void_type = type.isVoidTy();
+    return is_void_type;
+}
 
 extern "C" Value* NativityLLVMBuilderCreateExtractValue(IRBuilder<>& builder, Value* aggregate, unsigned* indices_ptr, size_t indices_len, const char* name_ptr, size_t name_len)
 {
@@ -672,12 +704,6 @@ extern "C" bool NativityLLVMVerifyModule(const Module& module, const char** mess
     return !result;
 }
 
-extern "C" Type* NativityLLVMFunctionGetReturnType(const Function& function)
-{
-    auto* return_type = function.getReturnType();
-    return return_type;
-}
-
 extern "C" const char* NativityLLVMFunctionToString(const Function& function, size_t* len)
 {
   std::string buf;
@@ -740,6 +766,12 @@ extern "C" FunctionType* NativityLLVMTypeToFunction(Type* type)
     return function_type;
 }
 
+extern "C" Type* NativityLLVMFunctionTypeGetArgumentType(FunctionType& function_type, unsigned argument_index)
+{
+    auto* type = function_type.getParamType(argument_index);
+    return type;
+}
+
 extern "C" ArrayType* NativityLLVMTypeToArray(Type* type)
 {
     auto* array_type = dyn_cast<ArrayType>(type);
@@ -750,6 +782,12 @@ extern "C" PointerType* NativityLLVMTypeToPointer(Type* type)
 {
     auto* pointer_type = dyn_cast<PointerType>(type);
     return pointer_type;
+}
+
+extern "C" ConstantPointerNull* NativityLLVMPointerTypeGetNull(PointerType* pointer_type)
+{
+    auto* constant_pointer_null = ConstantPointerNull::get(pointer_type);
+    return constant_pointer_null;
 }
 
 extern "C" Type* NativityLLVMArrayTypeGetElementType(ArrayType* array_type)
@@ -763,6 +801,17 @@ extern "C" const char* NativityLLVMModuleToString(const Module& module, size_t* 
   std::string buf;
   raw_string_ostream os(buf);
   module.print(os, nullptr);
+  os.flush();
+  *len = buf.size();
+  auto* result = strdup(buf.c_str());
+  return result;
+}
+
+extern "C" const char* NativityLLVMValueToString(const Value& value, size_t* len)
+{
+  std::string buf;
+  raw_string_ostream os(buf);
+  value.print(os, true);
   os.flush();
   *len = buf.size();
   auto* result = strdup(buf.c_str());
@@ -820,45 +869,76 @@ namespace lld {
     }
 }
 
-extern "C" bool NativityLLVMGenerateMachineCode(Module& module, const char* object_file_path_ptr, size_t object_file_path_len, const char* file_path_ptr, size_t file_path_len)
+extern "C" void NativityLLVMInitializeCodeGeneration()
 {
     InitializeAllTargetInfos();
     InitializeAllTargets();
-    InitializeAllTargetMCs(); InitializeAllAsmParsers();
+    InitializeAllTargetMCs();
+    InitializeAllAsmParsers();
     InitializeAllAsmPrinters();
+}
 
-    auto target_triple = "x86_64-linux-none";
-    auto cpu = "generic";
-    auto features = "";
-    TargetOptions target_options;
+extern "C" const Target* NativityLLVMGetTarget(const char* target_triple_ptr, size_t target_triple_len, const char** message_ptr, size_t* message_len)
+{
+    auto target_triple = StringRef(target_triple_ptr, target_triple_len);
+    std::string error_message;
+    const Target* target = TargetRegistry::lookupTarget(target_triple, error_message);
 
-    std::string error;
-    auto* target = TargetRegistry::lookupTarget(target_triple, error);
-    assert(target);
+    if (!target)
+    {
+        char* result = new char[error_message.length()];
+        memcpy(result, error_message.c_str(), error_message.length());
 
-    auto target_machine = target->createTargetMachine(target_triple, cpu, features, target_options, Reloc::Static);
-    assert(target_machine);
-
-    module.setDataLayout(target_machine->createDataLayout());
-    module.setTargetTriple(target_triple);
-
-    std::error_code EC;
-    auto object_file_path = StringRef(object_file_path_ptr, object_file_path_len);
-    raw_fd_ostream stream(object_file_path, EC, sys::fs::OF_None);
-    if (EC) {
-        return false;
+        *message_ptr = result;
+        *message_len = error_message.length();
     }
 
+    return target;
+}
+
+extern "C" TargetMachine* NativityLLVMTargetCreateTargetMachine(Target& target, const char* target_triple_ptr, size_t target_triple_len, const char* cpu_ptr, size_t cpu_len, const char* features_ptr, size_t features_len, Reloc::Model relocation_model, CodeModel::Model maybe_code_model, bool is_code_model_present, CodeGenOpt::Level optimization_level, bool jit)
+{
+    auto target_triple = StringRef(target_triple_ptr, target_triple_len);
+    auto cpu = StringRef(cpu_ptr, cpu_len);
+    auto features = StringRef(features_ptr, features_len);
+    TargetOptions target_options;
+    std::optional<CodeModel::Model> code_model = std::nullopt;
+    if (is_code_model_present) {
+        code_model = maybe_code_model;
+    }
+    TargetMachine* target_machine = target.createTargetMachine(target_triple, cpu, features, target_options, relocation_model, code_model, optimization_level, jit);
+    return target_machine;
+}
+
+extern "C" void NativityLLVMModuleSetTargetMachineDataLayout(Module& module, TargetMachine& target_machine)
+{
+    module.setDataLayout(target_machine.createDataLayout());
+}
+
+extern "C" void NativityLLVMModuleSetTargetTriple(Module& module, const char* target_triple_ptr, size_t target_triple_len)
+{
+    auto target_triple = StringRef(target_triple_ptr, target_triple_len);
+    module.setTargetTriple(target_triple);
+}
+
+extern "C" bool NativityLLVMModuleAddPassesToEmitFile(Module& module, TargetMachine& target_machine, const char* object_file_path_ptr, size_t object_file_path_len, CodeGenFileType codegen_file_type, bool disable_verify)
+{
+    std::error_code error_code;
+    auto object_file_path = StringRef(object_file_path_ptr, object_file_path_len);
+    raw_fd_ostream stream(object_file_path, error_code, sys::fs::OF_None);
+    if (error_code) {
+        return false;
+    }
+   
     legacy::PassManager pass;
-    bool result = target_machine->addPassesToEmitFile(pass, stream, nullptr, llvm::CGFT_ObjectFile, false);
-    if (result) {
-        // We invert the condition because LLVM conventions are just stupid
+    // We invert the condition because LLVM conventions are just stupid
+    if (target_machine.addPassesToEmitFile(pass, stream, nullptr, codegen_file_type, disable_verify)) {
         return false;
     }
 
     pass.run(module);
     stream.flush();
-    
+
     return true;
 }
 
