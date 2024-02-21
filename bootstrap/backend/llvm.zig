@@ -1180,7 +1180,7 @@ pub const LLVM = struct {
                     for (sema_function_prototype.argument_types) |argument_type_index| {
                         switch (unit.types.get(argument_type_index).*) {
                             // TODO: ABI
-                            .integer, .pointer, .@"enum", .@"struct", .slice => try parameter_types.append(context.allocator, try llvm.getType(unit, context, argument_type_index)),
+                            .integer, .pointer, .@"enum", .@"struct", .slice, .bool, => try parameter_types.append(context.allocator, try llvm.getType(unit, context, argument_type_index)),
                             else => |t| @panic(@tagName(t)),
                         }
                         // arg_types.appendAssumeCapacity(llvm_argument_type);
@@ -2878,7 +2878,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         switch (unit.types.get(argument_type_index).*) {
                             .void, .noreturn, .type => unreachable,
                             .comptime_int => unreachable,
-                            .bool => unreachable,
+                            .bool => {},
+                            // .bool => unreachable,
                             .@"struct" => {},
                             .@"enum" => {},
                             .function => unreachable,
