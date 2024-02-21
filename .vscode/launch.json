@@ -12,7 +12,7 @@
             "args": [
                 "exe",
                 "-main_source_file",
-                "test/standalone/first/main.nat"
+                "test/standalone/hello_world/main.nat"
             ],
             "cwd": "${workspaceFolder}",
         },

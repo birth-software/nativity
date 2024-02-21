@@ -32,6 +32,7 @@ pub const LLVM = struct {
     debug_type_map: AutoHashMap(Compilation.Type.Index, *LLVM.DebugInfo.Type) = .{},
     type_name_map: AutoHashMap(Compilation.Type.Index, []const u8) = .{},
     type_map: AutoHashMap(Compilation.Type.Index, *LLVM.Type) = .{},
+    function_declaration_map: AutoArrayHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function) = .{},
     function_definition_map: AutoArrayHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function) = .{},
     llvm_instruction_map: AutoHashMap(Compilation.Instruction.Index, *LLVM.Value) = .{},
     llvm_value_map: AutoArrayHashMap(Compilation.V, *LLVM.Value) = .{},
@@ -47,7 +48,7 @@ pub const LLVM = struct {
     return_phi_node: ?*LLVM.Value.Instruction.PhiNode = null,
     scope: *LLVM.DebugInfo.Scope = undefined,
     file: *LLVM.DebugInfo.File = undefined,
-    subprogram: *LLVM.DebugInfo.Subprogram = undefined,
+    // subprogram: *LLVM.DebugInfo.Subprogram = undefined,
     arg_index: u32 = 0,
     tag_count: c_uint = 0,
     inside_branch: bool = false,
@@ -1281,13 +1282,13 @@ pub const LLVM = struct {
     }
 
     fn renderTypeName(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, sema_type_index: Compilation.Type.Index) ![]const u8 {
-        const gop = try llvm.type_name_map.getOrPut(context.allocator, sema_type_index);
-        if (gop.found_existing) {
-            return gop.value_ptr.*;
+        if (llvm.type_name_map.get(sema_type_index)) |result| {
+            return result;
         } else {
             if (unit.type_declarations.get(sema_type_index)) |global_declaration| {
-                gop.value_ptr.* = unit.getIdentifier(global_declaration.declaration.name);
-                return gop.value_ptr.*;
+                const result = unit.getIdentifier(global_declaration.declaration.name);
+                try llvm.type_name_map.putNoClobber(context.allocator, sema_type_index, result);
+                return result;
             } else {
                 const sema_type = unit.types.get(sema_type_index);
                 const result: []const u8 = switch (sema_type.*) {
@@ -2241,6 +2242,114 @@ pub const LLVM = struct {
         const call = llvm.builder.createCall(intrinsic_type, intrinsic_function.toValue(), intrinsic_arguments.ptr, intrinsic_arguments.len, name.ptr, name.len, null) orelse return LLVM.Value.Instruction.Error.call;
         return call.toValue();
     }
+
+    fn emitFunctionDeclaration(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, declaration: *Compilation.Debug.Declaration.Global) !void {
+        const function_type = try llvm.getType(unit, context, declaration.declaration.type);
+        const is_export = declaration.attributes.contains(.@"export");
+        const is_extern = declaration.attributes.contains(.@"extern");
+        const export_or_extern = is_export or is_extern;
+
+        const linkage: LLVM.Linkage = switch (export_or_extern) {
+            true => .@"extern",
+            false => .internal,
+        };
+        // TODO: Check name collision
+        const mangle_name = !export_or_extern;
+        _ = mangle_name; // autofix
+        const name = unit.getIdentifier(declaration.declaration.name);
+        const function = llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, name.ptr, name.len) orelse return Error.function;
+
+        const function_prototype = unit.function_prototypes.get(unit.types.get(declaration.declaration.type).function);
+        switch (unit.types.get(function_prototype.return_type).*) {
+            .noreturn => {
+                function.addAttributeKey(.NoReturn);
+            },
+            else => {},
+        }
+
+        if (function_prototype.attributes.naked) {
+            function.addAttributeKey(.Naked);
+        }
+
+        const calling_convention = getCallingConvention(function_prototype.calling_convention);
+        function.setCallingConvention(calling_convention);
+
+        switch (declaration.initial_value) {
+            .function_declaration => try llvm.function_declaration_map.putNoClobber(context.allocator, declaration, function),
+            .function_definition => try llvm.function_definition_map.putNoClobber(context.allocator, declaration, function),
+            else => unreachable,
+        }
+
+        if (unit.descriptor.generate_debug_information) {
+            const debug_file = try llvm.getDebugInfoFile(unit, context, declaration.declaration.scope.file);
+            var parameter_types = try ArrayList(*LLVM.DebugInfo.Type).initCapacity(context.allocator, function_prototype.argument_types.len);
+            for (function_prototype.argument_types) |argument_type_index| {
+                const argument_type = try llvm.getDebugType(unit, context, argument_type_index);
+                parameter_types.appendAssumeCapacity(argument_type);
+            }
+
+            const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
+                .visibility = .none,
+                .forward_declaration = is_extern,
+                .apple_block = false,
+                .block_by_ref_struct = false,
+                .virtual = false,
+                .artificial = false,
+                .explicit = false,
+                .prototyped = false,
+                .objective_c_class_complete = false,
+                .object_pointer = false,
+                .vector = false,
+                .static_member = false,
+                .lvalue_reference = false,
+                .rvalue_reference = false,
+                .reserved = false,
+                .inheritance = .none,
+                .introduced_virtual = false,
+                .bit_field = false,
+                .no_return = false,
+                .type_pass_by_value = false,
+                .type_pass_by_reference = false,
+                .enum_class = false,
+                .thunk = false,
+                .non_trivial = false,
+                .big_endian = false,
+                .little_endian = false,
+                .all_calls_described = false,
+            };
+            const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
+            const subroutine_type = llvm.debug_info_builder.createSubroutineType(parameter_types.items.ptr, parameter_types.items.len, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
+            const scope_line = 0;
+            const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
+                .virtuality = .none,
+                .local_to_unit = !export_or_extern,
+                .definition = !is_extern,
+                .optimized = false,
+                .pure = false,
+                .elemental = false,
+                .recursive = false,
+                .main_subprogram = false,
+                .deleted = false,
+                .object_c_direct = false,
+            };
+            const subprogram_declaration = null;
+            const function_name = unit.getIdentifier(declaration.declaration.name);
+            const subprogram = llvm.debug_info_builder.createFunction(debug_file.toScope(), function_name.ptr, function_name.len, function_name.ptr, function_name.len, debug_file, declaration.declaration.line + 1, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration) orelse unreachable;
+            function.setSubprogram(subprogram);
+            
+            switch (declaration.initial_value) {
+                .function_declaration => {},
+                .function_definition => |function_definition_index| {
+                    const function_definition = unit.function_definitions.get(function_definition_index);
+                    const scope = subprogram.toLocalScope().toScope();
+
+                    try llvm.scope_map.putNoClobber(context.allocator, &function_definition.scope.scope, scope);
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+        }
+    }
+
 };
 
 fn getCallingConvention(calling_convention: Compilation.Function.CallingConvention) LLVM.Value.Constant.Function.CallingConvention {
@@ -2305,49 +2414,26 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         try llvm.scope_map.putNoClobber(context.allocator, &unit.scope.scope, llvm.scope);
     }
 
+    for (unit.external_functions.values()) |external_function_declaration| {
+        try llvm.emitFunctionDeclaration(unit, context, external_function_declaration);
+    }
+
     const functions = unit.code_to_emit.values();
 
     {
         var function_i: usize = functions.len;
+        // Emit it in reverse order so the code goes the right order, from entry point to leaves
         while (function_i > 0) {
             function_i -= 1;
             const function_declaration = functions[function_i];
-            const function_definition_index = function_declaration.getFunctionDefinitionIndex();
-            const function_definition = unit.function_definitions.get(function_definition_index);
-            const function_type = try llvm.getType(unit, context, function_definition.type);
-            const is_export = function_declaration.attributes.contains(.@"export");
-            const linkage: LLVM.Linkage = switch (is_export) {
-                true => .@"extern",
-                false => .internal,
-            };
-            // TODO: Check name collision
-            const mangle_name = !is_export;
-            _ = mangle_name; // autofix
-            const name = unit.getIdentifier(function_declaration.declaration.name);
-            const function = llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, name.ptr, name.len) orelse return Error.function;
-
-            const function_prototype = unit.function_prototypes.get(unit.types.get(function_definition.type).function);
-            switch (unit.types.get(function_prototype.return_type).*) {
-                .noreturn => {
-                    function.addAttributeKey(.NoReturn);
-                },
-                else => {},
-            }
-
-            if (function_prototype.attributes.naked) {
-                function.addAttributeKey(.Naked);
-            }
-
-            const calling_convention = getCallingConvention(function_prototype.calling_convention);
-            function.setCallingConvention(calling_convention);
-
-            try llvm.function_definition_map.putNoClobber(context.allocator, function_declaration, function);
+            try llvm.emitFunctionDeclaration(unit, context, function_declaration);
         }
     }
 
     // First, cache all the global variables
     for (unit.data_to_emit.items) |global_declaration| {
         const name = unit.getIdentifier(global_declaration.declaration.name);
+
         switch (global_declaration.initial_value) {
             .string_literal => |hash| {
                 const string_literal = unit.string_literal_values.get(hash).?;
@@ -2402,68 +2488,11 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         llvm.function = function;
         llvm.sema_function = function_declaration;
         llvm.inside_branch = false;
-        const function_prototype = unit.function_prototypes.get(unit.types.get(function_definition.type).function);
-        const function_name = unit.getIdentifier(function_declaration.declaration.name);
 
         if (unit.descriptor.generate_debug_information) {
-            const debug_file = try llvm.getDebugInfoFile(unit, context, function_declaration.declaration.scope.file);
-            var parameter_types = try ArrayList(*LLVM.DebugInfo.Type).initCapacity(context.allocator, function_prototype.argument_types.len);
-            for (function_prototype.argument_types) |argument_type_index| {
-                const argument_type = try llvm.getDebugType(unit, context, argument_type_index);
-                parameter_types.appendAssumeCapacity(argument_type);
-            }
-            const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
-                .visibility = .none,
-                .forward_declaration = false,
-                .apple_block = false,
-                .block_by_ref_struct = false,
-                .virtual = false,
-                .artificial = false,
-                .explicit = false,
-                .prototyped = false,
-                .objective_c_class_complete = false,
-                .object_pointer = false,
-                .vector = false,
-                .static_member = false,
-                .lvalue_reference = false,
-                .rvalue_reference = false,
-                .reserved = false,
-                .inheritance = .none,
-                .introduced_virtual = false,
-                .bit_field = false,
-                .no_return = false,
-                .type_pass_by_value = false,
-                .type_pass_by_reference = false,
-                .enum_class = false,
-                .thunk = false,
-                .non_trivial = false,
-                .big_endian = false,
-                .little_endian = false,
-                .all_calls_described = false,
-            };
-            const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
-            const subroutine_type = llvm.debug_info_builder.createSubroutineType(parameter_types.items.ptr, parameter_types.items.len, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
-            const scope_line = 0;
-            const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
-                .virtuality = .none,
-                .local_to_unit = true,
-                .definition = true,
-                .optimized = false,
-                .pure = false,
-                .elemental = false,
-                .recursive = false,
-                .main_subprogram = false,
-                .deleted = false,
-                .object_c_direct = false,
-            };
-            const subprogram_declaration = null;
-            const subprogram = llvm.debug_info_builder.createFunction(debug_file.toScope(), function_name.ptr, function_name.len, function_name.ptr, function_name.len, debug_file, function_declaration.declaration.line + 1, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration) orelse unreachable;
-            llvm.function.setSubprogram(subprogram);
+            const subprogram = llvm.function.getSubprogram() orelse unreachable;
             llvm.file = subprogram.getFile() orelse unreachable;
-            llvm.subprogram = subprogram;
             llvm.scope = subprogram.toLocalScope().toScope();
-
-            try llvm.scope_map.putNoClobber(context.allocator, &function_definition.scope.scope, llvm.scope);
         }
 
         llvm.arg_index = 0;
@@ -2496,7 +2525,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     .pop_scope => |pop_scope| {
                         const new = try llvm.getScope(unit, context, pop_scope.new);
                         if (pop_scope.new.kind == .function) {
-                            assert(new.toSubprogram() orelse unreachable == llvm.subprogram);
+                            assert(new.toSubprogram() orelse unreachable == llvm.function.getSubprogram() orelse unreachable);
                         }
                         llvm.scope = new;
                         var scope = pop_scope.old;
@@ -2504,7 +2533,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             scope = scope.parent.?;
                         }
                         const subprogram_scope = try llvm.getScope(unit, context, scope);
-                        assert(llvm.subprogram == subprogram_scope.toSubprogram() orelse unreachable);
+                        assert(llvm.function.getSubprogram() orelse unreachable == subprogram_scope.toSubprogram() orelse unreachable);
                     },
                     .debug_checkpoint => |debug_checkpoint| {
                         const scope = try llvm.getScope(unit, context, debug_checkpoint.scope);
@@ -2600,6 +2629,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .slice => {},
                             .array => {},
                         }
+
                         const declaration_type = try llvm.getType(unit, context, stack_slot.type);
                         const alloca_array_size = null;
                         const declaration_alloca = llvm.builder.createAlloca(declaration_type, address_space, alloca_array_size, "", "".len) orelse return LLVM.Value.Instruction.Error.alloca;
@@ -2630,6 +2660,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .enum_to_int,
                             .slice_to_nullable,
                             .slice_to_not_null,
+                            .slice_coerce_to_zero_termination,
                             .pointer_to_nullable,
                             .pointer_const_to_var,
                             .pointer_to_array_to_pointer_to_many,
@@ -2676,7 +2707,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         };
 
                         const value_type = try llvm.getType(unit, context, load.type);
-                        // const value_type = try llvm.getType(unit, context, load.value.type);
                         const is_volatile = false;
                         const load_i = llvm.builder.createLoad(value_type, value, is_volatile, "", "".len) orelse return LLVM.Value.Instruction.Error.load;
                         try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, load_i.toValue());
@@ -2722,11 +2752,18 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         switch (call.callable.value) {
                             .@"comptime" => |ct| switch (ct) {
                                 .global => |call_function_declaration| {
-                                    const call_function_definition_index = call_function_declaration.getFunctionDefinitionIndex();
-                                    const callee = llvm.function_definition_map.get(call_function_declaration).?;
-                                    const call_function_definition = unit.function_definitions.get(call_function_definition_index);
-                                    const call_function_prototype = unit.function_prototypes.get(unit.types.get(call_function_definition.type).function);
-                                    assert(call_function_definition.type == call.function_type);
+                                    const call_function_type = call_function_declaration.declaration.type;
+                                    // const call_function_definition_index = call_function_declaration.getFunctionDefinitionIndex();
+                                    // const callee = llvm.function_definition_map.get(call_function_declaration).?;
+                                    const call_function_prototype = unit.function_prototypes.get(unit.types.get(call_function_type).function);
+                                    assert(call_function_type == call.function_type);
+
+                                    const callee = switch (call_function_declaration.initial_value) {
+                                        .function_definition => llvm.function_definition_map.get(call_function_declaration).?,
+                                        .function_declaration => llvm.function_declaration_map.get(call_function_declaration).?,
+                                        else => |t| @panic(@tagName(t)),
+                                    };
+
 
                                     for (call.arguments, arguments) |argument_value, *argument| {
                                         argument.* = try llvm.emitRightValue(unit, context, argument_value);
@@ -3062,7 +3099,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         }
 
         if (unit.descriptor.generate_debug_information) {
-            llvm.debug_info_builder.finalizeSubprogram(llvm.subprogram, llvm.function);
+            llvm.debug_info_builder.finalizeSubprogram(llvm.function.getSubprogram() orelse unreachable, llvm.function);
         }
 
         const verify_function = true;

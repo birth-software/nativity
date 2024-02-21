@@ -2,7 +2,7 @@ const std = #import("std");
 const print = std.print;
 
 const main = fn() s32 {
-    var buffer: [std.os.max_path_byte_count + 1]u8 = undefined;
+    var buffer: [std.os.max_path_byte_count:0]u8 = undefined;
     if (std.os.current_executable_path(buffer = buffer.&)) |bytes| {
         print(bytes);
         print(bytes = "\n");

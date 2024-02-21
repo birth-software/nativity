@@ -11,16 +11,19 @@ const exit = fn(exit_code: s32) noreturn {
     switch (current) {
         .linux => _ = #syscall(#cast(linux.Syscall.exit_group), #cast(exit_code)),
         .macos => macos.exit(exit_code),
-        .windows => windows.ExitProcess(exit_code),
+        .windows => windows.ExitProcess(#cast(exit_code)),
     }
-    
-    unreachable;
 }
 
 const max_file_operation_byte_count = switch (current) {
     .linux => 0x7ffff000,
+    .macos => 0x7fffffff,
     else => #error("OS not supported"),
 };
+
+const unwrap_syscall_signed = fn(syscall_result: ssize) bool {
+    return syscall_result >= 0;
+}
 
 const FileDescriptor = struct{
     handle: system.FileDescriptor,
@@ -50,6 +53,15 @@ const FileDescriptor = struct{
                 const raw_result = #syscall(#cast(linux.Syscall.write), #cast(file_descriptor.handle), #cast(bytes.ptr), len);
                 if (linux.unwrap_syscall(syscall_result = raw_result)) |byte_count| {
                     return byte_count;
+                } else {
+                    return null;
+                }
+            },
+            .macos => {
+                const raw_result = macos.write(file_descriptor.handle, bytes.ptr, bytes.len);
+                if (unwrap_syscall_signed(raw_result)) {
+                    const bytes_written: usize = #cast(raw_result);
+                    return bytes_written;
                 } else {
                     return null;
                 }
@@ -90,12 +102,23 @@ const MapFlags = struct(u32){
 const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_protection_flags: ProtectionFlags, general_map_flags: MapFlags) ?[&]u8 {
     const protection_flags = system.get_protection_flags(flags = general_protection_flags);
     const map_flags = system.get_map_flags(flags = general_map_flags);
+    const fd = -1;
+    const offset = 0;
 
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.mmap(address, length, protection_flags, map_flags, fd = -1, offset = 0))) |result_address| {
+            if (linux.unwrap_syscall(syscall_result = linux.mmap(address, length, protection_flags, map_flags, fd, offset))) |result_address| {
                 const pointer: [&]u8 = #cast(result_address);
                 return pointer;
+            } else {
+                return null;
+            }
+        },
+        .macos => {
+            const result = macos.mmap(address, length, protection_flags, map_flags, fd, offset);
+            if (result != macos.MAP_FAILED) {
+                const result_address: [&]u8 = #cast(result);
+                return result_address;
             } else {
                 return null;
             }
@@ -113,6 +136,11 @@ const free_virtual_memory = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
             } else {
                 return false;
             }
+        },
+        .macos => {
+            const raw_result = macos.munmap(bytes_ptr, bytes_len);
+            const result = unwrap_syscall_signed(raw_result);
+            return result;
         },
         else => #error("OS not supported"),
     }
@@ -136,14 +164,40 @@ const readlink = fn(file_path: [&:0]const u8, buffer: []u8) ?[]u8 {
 
 const max_path_byte_count = switch (current) {
     .linux => 0x1000,
+    .macos => 1024,
     else => #error("OS not supported"),
 };
 
-const current_executable_path = fn(buffer: []u8) ?[]u8 {
+const current_executable_path = fn(buffer: [:0]u8) ?[]u8 {
     switch (current) {
         .linux => {
             if (readlink(file_path = "/proc/self/exe", buffer)) |bytes| {
                 return bytes;
+            } else {
+                return null;
+            }
+        },
+        .macos => {
+            var symlink_path_buffer: [max_path_byte_count:0]u8 = undefined;
+            var symlink_path_len: u32 = symlink_path_buffer.len + 1;
+            const ns_result = macos._NSGetExecutablePath(symlink_path_buffer.&, symlink_path_len.&);
+            if (ns_result == 0) {
+                const symlink_path = symlink_path_buffer[0..symlink_path_len];
+                const result = macos.realpath(symlink_path.ptr, buffer.ptr);
+                if (result != null) {
+                    var i: usize = 0;
+                    while (i < buffer.len) {
+                        if (result[i] == 0) {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    #assert(i < buffer.len);
+
+                    return result[0..i];
+                } else {
+                    return null;
+                }
             } else {
                 return null;
             }
@@ -158,7 +212,7 @@ const Process = struct{
 
 const duplicate_process = fn () ?Process.Id {
     switch (current) {
-        .linux =>  {
+        .linux => {
             if (linux.unwrap_syscall(syscall_result = linux.fork())) |fork_result| {
                 const unsigned: u32 = #cast(fork_result);
                 const signed: s32 = #cast(unsigned);
@@ -167,14 +221,25 @@ const duplicate_process = fn () ?Process.Id {
                 return null;
             }
         },
+        .macos => {
+            const fork_result = macos.fork();
+            if (unwrap_syscall_signed(fork_result)) {
+                return fork_result;
+            } else {
+                return null;
+            }
+        },
         else => #error("OS not supported"),
     }
 }
 
-const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) usize {
+const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) void {
     switch (current) {
         .linux =>  {
-            return linux.execve(path, argv, env);
+            _ = linux.execve(path, argv, env);
+        },
+        .macos => {
+            _ = macos.execve(path, argv, env);
         },
         else => #error("OS not supported"),
     }
