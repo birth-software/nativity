@@ -304,7 +304,7 @@ const Analyzer = struct {
                             if (equal(u8, identifier_name, enum_field.name)) {
                                 const attribute = @field(Compilation.Debug.Declaration.Global.Attribute, enum_field.name); 
                                 const attribute_node = switch (attribute) {
-                                    .@"export" => try analyzer.addNode(.{
+                                    .@"export", .@"extern", => try analyzer.addNode(.{
                                         .id = @field(Node.Id, "symbol_attribute_" ++ @tagName(attribute)),
                                         .token = identifier,
                                         .left = .null,
@@ -313,7 +313,7 @@ const Analyzer = struct {
                                 };
                                 break attribute_node;
                             }
-                        } else @panic("Not known attribute");
+                        } else panic("Unknown symbol attribute: {s}", .{identifier_name});
                         try list.append(analyzer.allocator, attribute_node);
 
                         switch (analyzer.peekToken()) {
@@ -400,7 +400,7 @@ const Analyzer = struct {
                     };
                     break attribute_node;
                 }
-            } else @panic("Not known attribute");
+            } else panic("Unknown function attribute: {s}", .{identifier_name});
 
             try attribute_and_return_type_node_list.append(analyzer.allocator, attribute_node);
 
@@ -1128,7 +1128,8 @@ const Analyzer = struct {
     fn primaryExpression(analyzer: *Analyzer) !Node.Index {
         const result = switch (analyzer.peekToken()) {
             .identifier => switch (analyzer.peekTokenAhead(1)) {
-                .operator_colon => unreachable,
+                // TODO: tags
+                // .operator_colon => unreachable,
                 else => try analyzer.curlySuffixExpression(),
             },
             .string_literal,
@@ -1349,6 +1350,7 @@ const Analyzer = struct {
             .operator_right_parenthesis,
             .operator_left_brace,
             .operator_assign,
+            .operator_semicolon,
             => return node_index,
             else => |t| @panic(@tagName(t)),
         }

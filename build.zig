@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) !void {
     const self_hosted_ci = b.option(bool, "self_hosted_ci", "This option enables the self-hosted CI behavior") orelse false;
     const third_party_ci = b.option(bool, "third_party_ci", "This option enables the third-party CI behavior") orelse false;
     const is_ci = self_hosted_ci or third_party_ci;
-    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci;
+    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or @import("builtin").os.tag == .macos;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
     var target_query = b.standardTargetOptionsQueryOnly(.{});
@@ -14,6 +14,32 @@ pub fn build(b: *std.Build) !void {
         target_query.abi = .musl;
     }
     const target = b.resolveTargetQuery(target_query);
+    const compiler_options = b.addOptions();
+    compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
+
+    const compiler = b.addExecutable(.{
+        .name = "nat",
+        .root_source_file = .{ .path = "bootstrap/main.zig" },
+        .target = target,
+        .optimize = optimization,
+    });
+    compiler.root_module.addOptions("configuration", compiler_options);
+    compiler.formatted_panics = print_stack_trace;
+    compiler.root_module.unwind_tables = print_stack_trace;
+    compiler.root_module.omit_frame_pointer = false;
+    compiler.want_lto = false;
+
+    compiler.linkLibC();
+    compiler.linkSystemLibrary("c++");
+
+    // TODO:
+    // if (target.result.os.tag == .windows) {
+    //     compiler.linkSystemLibrary("ole32");
+    //     compiler.linkSystemLibrary("version");
+    //     compiler.linkSystemLibrary("uuid");
+    //     compiler.linkSystemLibrary("msvcrt-os");
+    // }
+
     const llvm_version = "17.0.6";
     var fetcher_run: ?*std.Build.Step.Run = null;
     const llvm_path = b.option([]const u8, "llvm_path", "LLVM prefix path") orelse blk: {
@@ -69,30 +95,6 @@ pub fn build(b: *std.Build) !void {
             };
         }
     };
-    const compiler_options = b.addOptions();
-    compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
-
-    const compiler = b.addExecutable(.{
-        .name = "nat",
-        .root_source_file = .{ .path = "bootstrap/main.zig" },
-        .target = target,
-        .optimize = optimization,
-    });
-    compiler.root_module.addOptions("configuration", compiler_options);
-    compiler.formatted_panics = print_stack_trace;
-    compiler.root_module.unwind_tables = print_stack_trace;
-    compiler.root_module.omit_frame_pointer = false;
-    compiler.want_lto = false;
-
-    compiler.linkLibC();
-    compiler.linkSystemLibrary("c++");
-
-    if (target.result.os.tag == .windows) {
-        compiler.linkSystemLibrary("ole32");
-        compiler.linkSystemLibrary("version");
-        compiler.linkSystemLibrary("uuid");
-        compiler.linkSystemLibrary("msvcrt-os");
-    }
 
     if (fetcher_run) |fr| {
         compiler.step.dependOn(&fr.step);
@@ -408,13 +410,9 @@ pub fn build(b: *std.Build) !void {
     test_command.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
-        std.debug.print("Args: {s}", .{args});
         run_command.addArgs(args);
         debug_command.addArgs(args);
         test_command.addArgs(args);
-        for (debug_command.argv.items, 0..) |arg, i| {
-            std.debug.print("Arg #{}: {s}\n", .{i, arg.bytes});
-        }
     }
 
     const run_step = b.step("run", "Test the Nativity compiler");
