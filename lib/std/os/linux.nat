@@ -478,7 +478,8 @@ const pipe2 = fn (pipe_pointer: &[2]s32, flags: u32) usize {
 }
 
 const waitpid = fn(pid: ProcessId, status: &u32, flags: u32, resource_usage: usize) usize {
-    const result = #syscall(#cast(Syscall.wait4), pid, #cast(status), flags, resource_usage);
+    const pid_unsigned: u32 = #cast(pid);
+    const result = #syscall(#cast(Syscall.wait4), pid_unsigned, #cast(status), flags, resource_usage);
     return result;
 }
 

@@ -1255,7 +1255,11 @@ pub const LLVM = struct {
                 },
                 .array => |array| blk: {
                     const element_type = try llvm.getType(unit, context, array.type);
-                    const array_type = LLVM.Type.Array.get(element_type, array.count) orelse return Type.Error.array;
+                    const extra_element = switch (array.termination) {
+                        .none => false,
+                        else => true,
+                    };
+                    const array_type = LLVM.Type.Array.get(element_type, array.count + @intFromBool(extra_element)) orelse return Type.Error.array;
                     break :blk array_type.toType();
                 },
                 else => |t| @panic(@tagName(t)),
@@ -2223,6 +2227,7 @@ pub const LLVM = struct {
             };
             list.appendAssumeCapacity(value);
         }
+
         const result = array_type.getConstant(list.items.ptr, list.items.len) orelse unreachable;
         return result;
     }
@@ -3193,17 +3198,55 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     var arguments = ArrayList([*:0]const u8){};
     try arguments.append(context.allocator, driver_program);
 
-    try arguments.append(context.allocator, object_file_path.ptr);
+    try arguments.append(context.allocator, "--error-limit=0");
+
     try arguments.append(context.allocator, "-o");
     try arguments.append(context.allocator, destination_file_path.ptr);
 
-    if (format == .macho) {
-        try arguments.append(context.allocator, "-dynamic");
-        try arguments.appendSlice(context.allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
-        try arguments.appendSlice(context.allocator, &.{ "-arch", "arm64" });
-        try arguments.appendSlice(context.allocator, &.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
-        try arguments.appendSlice(context.allocator, &.{ "-e", "_main" });
-        try arguments.append(context.allocator, "-lSystem");
+    try arguments.append(context.allocator, object_file_path.ptr);
+
+    switch (unit.descriptor.target.os.tag) {
+        .macos => {
+            try arguments.append(context.allocator, "-dynamic");
+            try arguments.appendSlice(context.allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
+            try arguments.append(context.allocator, "-arch");
+            try arguments.append(context.allocator, switch (unit.descriptor.target.cpu.arch) {
+                .aarch64 => "arm64",
+                else => |t| @panic(@tagName(t)),
+            });
+            try arguments.appendSlice(context.allocator, &.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
+            try arguments.appendSlice(context.allocator, &.{ "-e", "_main" });
+            try arguments.append(context.allocator, "-lSystem");
+        },
+        .linux => {
+            try arguments.appendSlice(context.allocator, &.{"--entry", "_start"});
+            try arguments.append(context.allocator, "-m");
+            try arguments.append(context.allocator, switch (unit.descriptor.target.cpu.arch) {
+                .x86_64 => "elf_x86_64",
+                else => |t| @panic(@tagName(t)),
+            });
+
+            if (unit.descriptor.link_libc) {
+                try arguments.append(context.allocator, "/usr/lib/crt1.o");
+                try arguments.append(context.allocator, "/usr/lib/crti.o");
+                try arguments.appendSlice(context.allocator, &.{"-L", "/usr/lib"});
+                try arguments.appendSlice(context.allocator, &.{"-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"});
+                try arguments.append(context.allocator, "--as-needed");
+                try arguments.append(context.allocator, "-lm");
+                try arguments.append(context.allocator, "-lpthread");
+                try arguments.append(context.allocator, "-lc");
+                try arguments.append(context.allocator, "-ldl");
+                try arguments.append(context.allocator, "-lrt");
+                try arguments.append(context.allocator, "-lutil");
+                try arguments.append(context.allocator, "/usr/lib/crtn.o");
+            }
+
+            // if (unit.descriptor.link_libc) {
+            //     try arguments.appendSlice(context.allocator, &.{ "-lc" });
+            // }
+        },
+        .windows => {},
+        else => |t| @panic(@tagName(t)),
     }
 
     var stdout_ptr: [*]const u8 = undefined;

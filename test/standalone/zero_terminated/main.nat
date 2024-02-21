@@ -1,0 +1,7 @@
+const std = #import("std");
+const assert = std.assert;
+const main = fn () s32 {
+    var a = [2:0]u8 {1, 2};
+    assert(a[2] == 0);
+    return 0;
+}
