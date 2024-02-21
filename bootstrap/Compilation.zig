@@ -2025,7 +2025,7 @@ pub const Builder = struct {
                             switch (function_prototype.attributes.naked) {
                                 true => {
                                     assert(return_type == .noreturn);
-                                    try builder.buildUnreachable(unit, context);
+                                    try builder.buildTrap(unit, context);
                                 },
                                 false => switch (return_type) {
                                     .void => {
@@ -2037,7 +2037,7 @@ pub const Builder = struct {
                                         });
                                     },
                                     .noreturn => {
-                                        try builder.buildUnreachable(unit, context);
+                                        try builder.buildTrap(unit, context);
                                     },
                                     else => unreachable,
                                 },
@@ -6226,7 +6226,7 @@ pub const Builder = struct {
         try builder.appendInstruction(unit, context, instruction);
 
         if (function_prototype.return_type == .noreturn) {
-            try builder.buildUnreachable(unit, context);
+            try builder.buildTrap(unit, context);
         }
 
         return .{
@@ -6492,7 +6492,7 @@ pub const Builder = struct {
                     }
                 },
                 .@"unreachable" => {
-                    try builder.buildUnreachable(unit, context);
+                    try builder.buildTrap(unit, context);
                 },
                 .@"while" => {
                     assert(statement_node.left != .null);
