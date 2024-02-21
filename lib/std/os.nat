@@ -1,5 +1,6 @@
 const std = #import("std");
 const Allocator = std.Allocator;
+const assert = std.assert;
 const current = #import("builtin").os;
 const system = switch (current) {
     .linux => linux,
@@ -192,7 +193,7 @@ const current_executable_path = fn(buffer: [:0]u8) ?[]u8 {
                         }
                         i += 1;
                     }
-                    #assert(i < buffer.len);
+                    assert(i < buffer.len);
 
                     return result[0..i];
                 } else {

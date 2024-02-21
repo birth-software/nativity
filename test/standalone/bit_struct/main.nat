@@ -1,3 +1,6 @@
+const std = #import("std");
+const assert = std.assert;
+
 const BitStruct = struct(u8) {
     a: bool,
     b: bool,
@@ -13,7 +16,7 @@ const main = fn () s32 {
         .d = 0,
     };
     const bitcast_bs: u8 = #cast(bs);
-    #assert(bitcast_bs == 6);
+    assert(bitcast_bs == 6);
 
     const const_bs = BitStruct{
         .a = true,
@@ -22,6 +25,6 @@ const main = fn () s32 {
         .d = 0,
     };
     const bitcast_const_bs: u8 = #cast(const_bs);
-    #assert(bitcast_const_bs == 5);
+    assert(bitcast_const_bs == 5);
     return 0;
 }

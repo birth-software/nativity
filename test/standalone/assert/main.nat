@@ -1,7 +1,10 @@
+const std = #import("std");
+const assert = std.assert;
+
 const main = fn() s32 {
-    #assert(true);
+    assert(true);
     var a: s32 = 1;
     const is_not_one = a != 1;
-    #assert(!is_not_one);
+    assert(!is_not_one);
     return 0;
 }

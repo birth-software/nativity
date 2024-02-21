@@ -1520,35 +1520,6 @@ pub const Builder = struct {
                 _ = expected_type; // autofix
                 unreachable;
             },
-            .assert => {
-                assert(argument_node_list.len == 1);
-                const boolean = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .bool }, argument_node_list[0], .right);
-                switch (boolean.value) {
-                    .@"comptime" => |ct| switch (ct) {
-                        .bool => |value| switch (value) {
-                            true => {},
-                            false => {
-                                @panic("Assert failed at comptime");
-                            },
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    },
-                    .runtime => |instruction_index| {
-                        const true_block = try builder.newBasicBlock(unit, context);
-                        const false_block = try builder.newBasicBlock(unit, context);
-
-                        try builder.branch(unit, context, instruction_index, true_block, false_block);
-
-                        builder.current_basic_block = false_block;
-                        try builder.buildTrap(unit, context);
-
-                        builder.current_basic_block = true_block;
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-
-                return undefined;
-            },
             .@"error" => {
                 assert(argument_node_list.len == 1);
                 // TODO: type
