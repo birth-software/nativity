@@ -1,0 +1,6 @@
+const std = #import("std");
+const assert = std.assert;
+const main = fn () s32 {
+    assert(#size(usize) == 8);
+    return 0;
+}

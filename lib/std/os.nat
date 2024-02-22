@@ -406,7 +406,7 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
             while (true) {
                 const raw_syscall_result = linux.waitpid(pid, status = status.&, flags, resource_usage = 0);
                 const signed_syscall_result: ssize = #cast(raw_syscall_result);
-                if (raw_syscall_result != -4) {
+                if (signed_syscall_result != -4) {
                     if (linux.unwrap_syscall(syscall_result = raw_syscall_result)) |_| {
                         return status;
                     } else {

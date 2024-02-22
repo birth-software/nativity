@@ -27,8 +27,10 @@ const start :: export = fn (argc_argv_address: usize) noreturn {
     argument_count = argument_count_ptr.@;
     argument_address_iterator += #size(usize);
     argument_values = #cast(argument_address_iterator);
+    const argv = argument_values;
     argument_address_iterator += #size(usize) * (argument_count + 1);
     environment_values = #cast(argument_address_iterator);
+    const env = environment_values;
     const result = #import("main").main();
     std.os.exit(exit_code = result);
 }

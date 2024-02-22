@@ -29,7 +29,8 @@ pub fn main() !void {
     const command_arguments = arguments[2..];
 
     if (equal(u8, command, "build")) {
-        todo();
+        const context = try Compilation.createContext(allocator);
+        try Compilation.compileBuildExecutable(context, command_arguments);
     } else if (equal(u8, command, "clang") or equal(u8, command, "-cc1") or equal(u8, command, "-cc1as")) {
         const exit_code = try clangMain(allocator, arguments);
         std.process.exit(exit_code);
@@ -40,7 +41,8 @@ pub fn main() !void {
         // TODO: transform our arguments to Clang and invoke it
         todo();
     } else if (equal(u8, command, "exe")) {
-        try Compilation.buildExecutable(allocator, command_arguments);
+        const context = try Compilation.createContext(allocator);
+        try Compilation.buildExecutable(context, command_arguments);
     } else if (equal(u8, command, "lib")) {
         todo();
     } else if (equal(u8, command, "obj")) {

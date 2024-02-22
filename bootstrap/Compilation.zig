@@ -36,7 +36,7 @@ fn reportUnterminatedArgumentError(string: []const u8) noreturn {
     std.debug.panic("Unterminated argument: {s}", .{string});
 }
 
-pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
+pub fn createContext(allocator: Allocator) !*const Context{
     const context: *Context = try allocator.create(Context);
 
     const self_exe_path = try std.fs.selfExePathAlloc(allocator);
@@ -52,6 +52,42 @@ pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
     try context.build_directory.makePath(cache_dir_name);
     try context.build_directory.makePath(installation_dir_name);
 
+    return context;
+}
+
+pub fn compileBuildExecutable(context: *const Context, arguments: [][:0]u8) !void {
+    _ = arguments; // autofix
+    const unit = try context.allocator.create(Unit);
+    const target_query = try std.Target.Query.parse(.{});
+    const target = try std.zig.system.resolveTargetQuery(target_query);
+    unit.* = .{
+        .descriptor = .{
+            .main_package_path = "build.nat",
+            .target = target,
+            .only_parse = false,
+            .executable_path = "nat/build",
+            .link_libc = @import("builtin").os.tag == .macos,
+            .generate_debug_information = true,
+            .name = "build",
+        },
+    };
+
+    try unit.compile(context);
+    const result = try std.ChildProcess.run(.{
+        .allocator = context.allocator,
+        .argv = &.{ "nat/build", "-compiler_path", context.executable_absolute_path },
+    });
+    switch (result.term) {
+        .Exited => |exit_code| {
+            if (exit_code != 0) @panic("Bad exit code");
+        },
+        .Signal => @panic("Signaled"),
+        .Stopped => @panic("Stopped"),
+        .Unknown => @panic("Unknown"),
+    }
+}
+
+pub fn buildExecutable(context: *const Context, arguments: [][:0]u8) !void {
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
     var target_triplet: []const u8 = switch (@import("builtin").os.tag) {
@@ -63,121 +99,112 @@ pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
     var link_libc = false;
     var maybe_executable_name: ?[]const u8 = null;
     const generate_debug_information = true;
-    var is_build = false;
 
-    if (arguments.len == 0) {
-        is_build = true;
-    } else if (equal(u8, arguments[0], "init")) {
-        if (arguments.len == 1) {
-            unreachable;
-        } else {
-            @panic("Init does not take arguments");
-        }
-    } else {
-        var i: usize = 0;
-        while (i < arguments.len) : (i += 1) {
-            const current_argument = arguments[i];
-            if (equal(u8, current_argument, "-o")) {
-                if (i + 1 != arguments.len) {
-                    maybe_executable_path = arguments[i + 1];
-                    assert(maybe_executable_path.?.len != 0);
-                    i += 1;
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
-            } else if (equal(u8, current_argument, "-target")) {
-                if (i + 1 != arguments.len) {
-                    target_triplet = arguments[i + 1];
-                    i += 1;
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
-            } else if (equal(u8, current_argument, "-log")) {
-                if (i + 1 != arguments.len) {
-                    i += 1;
+    if (arguments.len == 0) return error.InvalidInput;
 
-                    var log_argument_iterator = std.mem.splitScalar(u8, arguments[i], ',');
+    var i: usize = 0;
+    while (i < arguments.len) : (i += 1) {
+        const current_argument = arguments[i];
+        if (equal(u8, current_argument, "-o")) {
+            if (i + 1 != arguments.len) {
+                maybe_executable_path = arguments[i + 1];
+                assert(maybe_executable_path.?.len != 0);
+                i += 1;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-target")) {
+            if (i + 1 != arguments.len) {
+                target_triplet = arguments[i + 1];
+                i += 1;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-log")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
 
-                    while (log_argument_iterator.next()) |log_argument| {
-                        var log_argument_splitter = std.mem.splitScalar(u8, log_argument, '.');
-                        const log_scope_candidate = log_argument_splitter.next() orelse unreachable;
-                        var recognized_scope = false;
+                var log_argument_iterator = std.mem.splitScalar(u8, arguments[i], ',');
 
-                        inline for (@typeInfo(LoggerScope).Enum.fields) |logger_scope_enum_field| {
-                            const log_scope = @field(LoggerScope, logger_scope_enum_field.name);
+                while (log_argument_iterator.next()) |log_argument| {
+                    var log_argument_splitter = std.mem.splitScalar(u8, log_argument, '.');
+                    const log_scope_candidate = log_argument_splitter.next() orelse unreachable;
+                    var recognized_scope = false;
 
-                            if (equal(u8, @tagName(log_scope), log_scope_candidate)) {
-                                const LogScope = getLoggerScopeType(log_scope);
+                    inline for (@typeInfo(LoggerScope).Enum.fields) |logger_scope_enum_field| {
+                        const log_scope = @field(LoggerScope, logger_scope_enum_field.name);
 
-                                if (log_argument_splitter.next()) |particular_log_candidate| {
-                                    var recognized_particular = false;
-                                    inline for (@typeInfo(LogScope.Logger).Enum.fields) |particular_log_field| {
-                                        const particular_log = @field(LogScope.Logger, particular_log_field.name);
+                        if (equal(u8, @tagName(log_scope), log_scope_candidate)) {
+                            const LogScope = getLoggerScopeType(log_scope);
 
-                                        if (equal(u8, particular_log_candidate, @tagName(particular_log))) {
-                                            LogScope.Logger.bitset.setPresent(particular_log, true);
-                                            recognized_particular = true;
-                                        }
-                                    } else if (!recognized_particular) std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
-                                } else {
-                                    // LogScope.Logger.bitset = @TypeOf(LogScope.Logger.bitset).initFull();
-                                }
+                            if (log_argument_splitter.next()) |particular_log_candidate| {
+                                var recognized_particular = false;
+                                inline for (@typeInfo(LogScope.Logger).Enum.fields) |particular_log_field| {
+                                    const particular_log = @field(LogScope.Logger, particular_log_field.name);
 
-                                logger_bitset.setPresent(log_scope, true);
-
-                                recognized_scope = true;
+                                    if (equal(u8, particular_log_candidate, @tagName(particular_log))) {
+                                        LogScope.Logger.bitset.setPresent(particular_log, true);
+                                        recognized_particular = true;
+                                    }
+                                } else if (!recognized_particular) std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
+                            } else {
+                                // LogScope.Logger.bitset = @TypeOf(LogScope.Logger.bitset).initFull();
                             }
-                        } else if (!recognized_scope) std.debug.panic("Unrecognized log scope: {s}", .{log_scope_candidate});
-                    }
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
-            } else if (equal(u8, current_argument, "-parse")) {
-                if (i + 1 != arguments.len) {
-                    i += 1;
 
-                    const arg = arguments[i];
-                    maybe_main_package_path = arg;
-                    maybe_only_parse = true;
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
-            } else if (equal(u8, current_argument, "-link_libc")) {
-                if (i + 1 != arguments.len) {
-                    i += 1;
+                            logger_bitset.setPresent(log_scope, true);
 
-                    const arg = arguments[i];
-                    if (std.mem.eql(u8, arg, "true")) {
-                        link_libc = true;
-                    } else if (std.mem.eql(u8, arg, "false")) {
-                        link_libc = false;
-                    } else {
-                        unreachable;
-                    }
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
-            } else if (equal(u8, current_argument, "-main_source_file")) {
-                if (i + 1 != arguments.len) {
-                    i += 1;
-
-                    const arg = arguments[i];
-                    maybe_main_package_path = arg;
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
-                }
-            } else if (equal(u8, current_argument, "-name")) {
-                if (i + 1 != arguments.len) {
-                    i += 1;
-
-                    const arg = arguments[i];
-                    maybe_executable_name = arg;
-                } else {
-                    reportUnterminatedArgumentError(current_argument);
+                            recognized_scope = true;
+                        }
+                    } else if (!recognized_scope) std.debug.panic("Unrecognized log scope: {s}", .{log_scope_candidate});
                 }
             } else {
-                std.debug.panic("Unrecognized argument: {s}", .{current_argument});
+                reportUnterminatedArgumentError(current_argument);
             }
+        } else if (equal(u8, current_argument, "-parse")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                maybe_main_package_path = arg;
+                maybe_only_parse = true;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-link_libc")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                if (std.mem.eql(u8, arg, "true")) {
+                    link_libc = true;
+                } else if (std.mem.eql(u8, arg, "false")) {
+                    link_libc = false;
+                } else {
+                    unreachable;
+                }
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-main_source_file")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                maybe_main_package_path = arg;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (equal(u8, current_argument, "-name")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                maybe_executable_name = arg;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else {
+            std.debug.panic("Unrecognized argument: {s}", .{current_argument});
         }
     }
 
@@ -190,25 +217,13 @@ pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
         file.close();
 
         break :blk path;
-    } else blk: {
-        const build_file = "build.nat";
-        const file = std.fs.cwd().openFile(build_file, .{}) catch return error.main_package_path_not_specified;
-        file.close();
-        is_build = true;
+    } else unreachable;
 
-        break :blk build_file;
-    };
-
-    const executable_name = if (is_build) b: {
-        assert(maybe_executable_name == null);
-        break :b "build";
-    } else b: {
-        break :b if (maybe_executable_name) |name| name else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
-    };
+    const executable_name = if (maybe_executable_name) |name| name else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
 
     const executable_path = maybe_executable_path orelse blk: {
         assert(executable_name.len > 0);
-        const result = try std.mem.concat(allocator, u8, &.{ "nat/", executable_name });
+        const result = try std.mem.concat(context.allocator, u8, &.{ "nat/", executable_name });
         break :blk result;
     };
 
@@ -218,7 +233,6 @@ pub fn buildExecutable(allocator: Allocator, arguments: [][:0]u8) !void {
             .main_package_path = main_package_path,
             .executable_path = executable_path,
             .target = target,
-            .is_build = is_build,
             .only_parse = only_parse,
             .link_libc = switch (target.os.tag) {
                 .linux => link_libc,
@@ -372,6 +386,12 @@ fn getTypeBitSize(ty: *Type, unit: *Unit) u32 {
             }
         },
         .pointer => 64,
+        .@"enum" => |enum_index| b: {
+            const enum_type = unit.enums.get(enum_index);
+            const backing_type = unit.types.get(enum_type.backing_type);
+            break :b getTypeBitSize(backing_type, unit);
+        },
+        .slice => 2 * @bitSizeOf(usize),
         else => |t| @panic(@tagName(t)),
     };
 }
@@ -397,7 +417,7 @@ pub const Type = union(enum) {
     fn getByteSize(ty: *Type, unit: *Unit) u32 {
         _ = unit; // autofix
         return switch (ty.*) {
-            .integer => |integer| integer.bit_count,
+            .integer => |integer| @divExact(integer.bit_count, @bitSizeOf(u8)),
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -1312,6 +1332,18 @@ pub const Builder = struct {
                                     .pointer => |source_pointer| {
                                         if (destination_pointer.type == source_pointer.type) {
                                             if (destination_pointer.mutability == source_pointer.mutability) {
+                                                if (destination_pointer.nullable != source_pointer.nullable) {
+                                                    std.debug.print("Dst: {} Src: {}\n",.{destination_pointer.nullable, source_pointer.nullable});
+                                                    if (destination_pointer.nullable) {
+                                                        assert(destination_pointer.termination != source_pointer.termination);
+                                                        unreachable;
+                                                    } else {
+                                                        unreachable;
+                                                    }
+                                                }
+                                                if (destination_pointer.termination != source_pointer.termination) {
+                                                    unreachable;
+                                                }
                                                 unreachable;
                                             } else {
                                                 break :b .pointer_const_to_var;
@@ -1435,6 +1467,7 @@ pub const Builder = struct {
                             else => |t| @panic(@tagName(t)),
                         };
                     },
+                    .none => .usize,
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -2255,10 +2288,16 @@ pub const Builder = struct {
 
                                                 return .pointer_to_nullable;
                                             }
+                                        } else {
+                                            if (destination_pointer.termination != .none) {
+                                                unreachable;
+                                            } else {
+                                                unreachable;
+                                            }
                                         }
                                     }
 
-                                    unreachable;
+                                    std.debug.panic("Pointer unknown typecheck:\nDst: {}\n Src: {}", .{destination_pointer, source_pointer});
                                 },
                                 else => |t| @panic(@tagName(t)),
                             }
@@ -2387,27 +2426,20 @@ pub const Builder = struct {
                     }
                 },
                 .array => |destination_array| {
-                        switch (source.*) {
-                            .array => |source_array| {
-                                assert(destination_array.type == source_array.type);
-                                assert(destination_array.count == source_array.count);
-                                if (destination_array.termination != source_array.termination) {
-                                    if (destination_array.termination == .none) {
-                                        unreachable;
-                                    } else {
-                                        std.debug.panic("Expected {s} array termination, got {s}", .{@tagName(destination_array.termination), @tagName(source_array.termination)});
-                                    }
-                                } else unreachable;
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        }
-                    //         .array => |array| switch (unit.types.get(array_type).*) {
-                    //             .array => |expected_array| {
-                    //             },
-                    //             else => |t| @panic(@tagName(t)),
-                    //         },
-                    //         else => |t| @panic(@tagName(t)),
-                    //     }
+                    switch (source.*) {
+                        .array => |source_array| {
+                            assert(destination_array.type == source_array.type);
+                            assert(destination_array.count == source_array.count);
+                            if (destination_array.termination != source_array.termination) {
+                                if (destination_array.termination == .none) {
+                                    unreachable;
+                                } else {
+                                    std.debug.panic("Expected {s} array termination, got {s}", .{@tagName(destination_array.termination), @tagName(source_array.termination)});
+                                }
+                            } else unreachable;
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
                 },
                 else => |t| @panic(@tagName(t)),
             }
@@ -3928,6 +3960,19 @@ pub const Builder = struct {
                 const result = try builder.resolveContainerLiteral(unit, context, initialization_nodes, container_type_index);
                 break :block result;
             },
+            .anonymous_container_literal => block: {
+                switch (type_expect) {
+                    .type => |type_index| {
+                        assert(node.left == .null);
+                        assert(node.right != .null);
+                        const initialization_nodes = unit.getNodeList(node.right);
+                        const result = try builder.resolveContainerLiteral(unit, context, initialization_nodes, type_index);
+                        break :block result;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+                unreachable;
+            },
             .enum_literal => block: {
                 switch (type_expect) {
                     .type => |type_index| {
@@ -5191,52 +5236,15 @@ pub const Builder = struct {
                                     .type = gep_type,
                                 };
                             },
-                            .pointer => |child_pointer| switch (unit.types.get(child_pointer.type).*) {
-                                .array => |array| b: {
+                            .pointer => |child_pointer| switch (child_pointer.many) {
+                                true => b: {
                                     const load = try unit.instructions.append(context.allocator, .{
                                         .load = .{
                                             .value = array_like_expression,
                                             .type = pointer.type,
                                         },
-                                    });
+                                        });
                                     try builder.appendInstruction(unit, context, load);
-
-                                    const gep = try unit.instructions.append(context.allocator, .{
-                                        .get_element_pointer = .{
-                                            .pointer = load,
-                                            .base_type = array.type,
-                                            .is_struct = false,
-                                            .index = index,
-                                        },
-                                    });
-                                    try builder.appendInstruction(unit, context, gep);
-
-                                    const gep_type = try unit.getPointerType(context, .{
-                                        .type = array.type,
-                                        .termination = .none,
-                                        .mutability = pointer.mutability,
-                                        .many = false,
-                                        .nullable = false,
-                                    });
-
-                                    break :b .{
-                                        .value = .{
-                                            .runtime = gep,
-                                        },
-                                        .type = gep_type,
-                                    };
-                                },
-                                .integer => b: {
-                                    assert(child_pointer.many);
-
-                                    const load = try unit.instructions.append(context.allocator, .{
-                                        .load = .{
-                                            .value = array_like_expression,
-                                            .type = pointer.type,
-                                        },
-                                    });
-                                    try builder.appendInstruction(unit, context, load);
-
                                     const gep = try unit.instructions.append(context.allocator, .{
                                         .get_element_pointer = .{
                                             .pointer = load,
@@ -5249,8 +5257,8 @@ pub const Builder = struct {
 
                                     const gep_type = try unit.getPointerType(context, .{
                                         .type = child_pointer.type,
-                                        .termination = .none,
-                                        .mutability = pointer.mutability,
+                                        .termination = child_pointer.termination,
+                                        .mutability = child_pointer.mutability,
                                         .many = false,
                                         .nullable = false,
                                     });
@@ -5262,7 +5270,79 @@ pub const Builder = struct {
                                         .type = gep_type,
                                     };
                                 },
-                                else => |t| @panic(@tagName(t)),
+                                false => switch (unit.types.get(child_pointer.type).*) {
+                                    .array => |array| b: {
+                                        const load = try unit.instructions.append(context.allocator, .{
+                                            .load = .{
+                                                .value = array_like_expression,
+                                                .type = pointer.type,
+                                            },
+                                            });
+                                        try builder.appendInstruction(unit, context, load);
+
+                                        const gep = try unit.instructions.append(context.allocator, .{
+                                            .get_element_pointer = .{
+                                                .pointer = load,
+                                                .base_type = array.type,
+                                                .is_struct = false,
+                                                .index = index,
+                                            },
+                                            });
+                                        try builder.appendInstruction(unit, context, gep);
+
+                                        const gep_type = try unit.getPointerType(context, .{
+                                            .type = array.type,
+                                            .termination = .none,
+                                            .mutability = pointer.mutability,
+                                            .many = false,
+                                            .nullable = false,
+                                        });
+
+                                        break :b .{
+                                            .value = .{
+                                                .runtime = gep,
+                                            },
+                                            .type = gep_type,
+                                        };
+                                    },
+                                    .integer => b: {
+                                        assert(child_pointer.many);
+
+                                        const load = try unit.instructions.append(context.allocator, .{
+                                            .load = .{
+                                                .value = array_like_expression,
+                                                .type = pointer.type,
+                                            },
+                                            });
+                                        try builder.appendInstruction(unit, context, load);
+
+                                        const gep = try unit.instructions.append(context.allocator, .{
+                                            .get_element_pointer = .{
+                                                .pointer = load,
+                                                .base_type = child_pointer.type,
+                                                .is_struct = false,
+                                                .index = index,
+                                            },
+                                            });
+                                        try builder.appendInstruction(unit, context, gep);
+
+                                        const gep_type = try unit.getPointerType(context, .{
+                                            .type = child_pointer.type,
+                                            .termination = .none,
+                                            .mutability = pointer.mutability,
+                                            .many = false,
+                                            .nullable = false,
+                                        });
+
+                                        break :b .{
+                                            .value = .{
+                                                .runtime = gep,
+                                            },
+                                            .type = gep_type,
+                                        };
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                },
                             },
                             else => |t| @panic(@tagName(t)),
                         },
@@ -5658,12 +5738,36 @@ pub const Builder = struct {
         if (array_type.count != expression_element_count) @panic("Array element count mismatch");
 
         var is_comptime = true;
-        var values = try ArrayList(V).initCapacity(context.allocator, nodes.len);
+        const is_terminated = switch (array_type.termination) {
+            .none => false,
+            else => true,
+        };
+        var values = try ArrayList(V).initCapacity(context.allocator, nodes.len + @intFromBool(is_terminated));
         for (nodes) |node_index| {
             const value = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = array_type.type }, node_index, .right);
             // assert(value.value == .@"comptime");
             is_comptime = is_comptime and value.value == .@"comptime";
             values.appendAssumeCapacity(value);
+        }
+
+        switch (array_type.termination) {
+            .none => {},
+            .zero => values.appendAssumeCapacity(.{
+                .value = .{
+                    .@"comptime" = .{
+                        .constant_int = .{
+                            .value = 0,
+                        },
+                    },
+                },
+                .type = array_type.type,
+            }),
+            .null => values.appendAssumeCapacity(.{
+                .value = .{
+                    .@"comptime" = .null_pointer,
+                },
+                .type = array_type.type,
+            }),
         }
 
         if (is_comptime) {
@@ -7662,30 +7766,47 @@ pub const Builder = struct {
                                             .constant_int = .{
                                                 .value = ct_int.value,
                                             },
+                                        },
+                                    },
+                                    .type = ti,
+                                };
+                            },
+                            .signed => {
+                                if (destination_integer_type.signedness == .unsigned) {
+                                    unreachable;
+                                } else {
+                                    const value = -@as(i64, @intCast(ct_int.value));
+                                    return .{
+                                        .value = .{
+                                            .@"comptime" = .{
+                                                .constant_int = .{
+                                                    .value = @bitCast(value),
+                                                },
                                             },
                                         },
                                         .type = ti,
                                     };
-                                },
-                                .signed => {
-                                    if (destination_integer_type.signedness == .unsigned) {
-                                        unreachable;
-                                    } else {
-                                        const value = -@as(i64, @intCast(ct_int.value));
-                                        return .{
-                                            .value = .{
-                                                .@"comptime" = .{
-                                                    .constant_int = .{
-                                                        .value = @bitCast(value),
-                                                    },
-                                                    },
-                                                },
-                                                .type = ti,
-                                            };
-                                    }
-                                },
-                            }
-                        },
+                                }
+                            },
+                        }
+                    },
+                    .pointer_to_nullable => {
+                        const cast = try unit.instructions.append(context.allocator, .{
+                            .cast = .{
+                                .id = .pointer_to_nullable,
+                                .value = result,
+                                .type = ti,
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, cast);
+
+                        return .{
+                            .value = .{
+                                .runtime = cast,
+                            },
+                            .type = ti,
+                        };
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
             },
@@ -8513,7 +8634,6 @@ pub const Descriptor = struct {
     main_package_path: []const u8,
     executable_path: []const u8,
     target: std.Target,
-    is_build: bool,
     only_parse: bool,
     link_libc: bool,
     generate_debug_information: bool,
