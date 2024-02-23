@@ -415,6 +415,15 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
                 }
             }
         },
+        .macos => {
+            var status: s32 = undefined;
+            if (macos.waitpid(pid, status.&, #cast(flags)) != -1) {
+                const status_u: u32 = #cast(status);
+                return status_u;
+            } else {
+                return null;
+            }
+        },
         else => #error("OS not supported"),
     }
 

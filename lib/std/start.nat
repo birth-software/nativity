@@ -35,6 +35,10 @@ const start :: export = fn (argc_argv_address: usize) noreturn {
     std.os.exit(exit_code = result);
 }
 
-const main :: export = fn (argc: s32, argv: [&:null]?[&:null]u8, env: [&:null]?[&:null]u8) s32 {
+const main :: export = fn (argc: s32, argv: [&]const [&:0]const u8, env: [&:null]const ?[&:null]const u8) s32 {
+    const argc_u: u32 = #cast(argc);
+    argument_count = argc_u;
+    argument_values = argv;
+    environment_values = env;
     return #import("main").main();
 }

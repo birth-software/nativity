@@ -184,6 +184,9 @@ pub const Node = struct {
         symbol_attribute_export,
         symbol_attributes,
         metadata,
+        test_declaration,
+        all_errors,
+        error_union,
     };
 };
 
@@ -1372,7 +1375,6 @@ const Analyzer = struct {
                 });
             },
             .operator_ampersand => try analyzer.pointerOrArrayTypeExpression(.single_pointer_type),
-            .operator_bang => unreachable, // error
             .operator_left_bracket => switch (analyzer.peekTokenAhead(1)) {
                 .operator_ampersand => try analyzer.pointerOrArrayTypeExpression(.many_pointer_type),
                 .operator_asterisk => @panic("Meant to use ampersand?"),
@@ -1382,12 +1384,37 @@ const Analyzer = struct {
     }
 
     fn errorUnionExpression(analyzer: *Analyzer) !Node.Index {
-        const suffix_expression = try analyzer.suffixExpression();
+        if (analyzer.peekToken() == .operator_bang) {
+            const error_union_token = try analyzer.expectToken(.operator_bang);
+            if (analyzer.peekToken() == .operator_asterisk) {
+                analyzer.consumeToken();
+                // All errors
+                const all_errors_node = try analyzer.addNode(.{
+                    .id = .all_errors,
+                    .token = error_union_token,
+                    .left = .null,
+                    .right = .null,
+                });
+                const type_node = try analyzer.suffixExpression();
 
-        return switch (analyzer.peekToken()) {
-            .operator_bang => unreachable,
-            else => suffix_expression,
-        };
+                const error_union = try analyzer.addNode(.{
+                    .id = .error_union,
+                    .token = error_union_token,
+                    .left = all_errors_node,
+                    .right = type_node,
+                });
+                return error_union;
+            } else {
+                unreachable;
+            }
+        } else {
+            const suffix_expression = try analyzer.suffixExpression();
+
+            return switch (analyzer.peekToken()) {
+                .operator_bang => unreachable,
+                else => suffix_expression,
+            };
+        }
     }
 
     fn suffixExpression(analyzer: *Analyzer) !Node.Index {
@@ -1666,6 +1693,7 @@ const Analyzer = struct {
                     }
                 },
                 .fixed_keyword_const, .fixed_keyword_var => try analyzer.symbolDeclaration(),
+                .fixed_keyword_test => try analyzer.testDeclaration(),
                 else => |t| @panic(@tagName(t)),
             };
 
@@ -1693,6 +1721,18 @@ const Analyzer = struct {
             .token = token_i,
             .left = try analyzer.nodeList(node_list),
             .right = type_node,
+        });
+    }
+
+    fn testDeclaration(analyzer: *Analyzer) !Node.Index {
+        const test_token = try analyzer.expectToken(.fixed_keyword_test);
+        const name_node: Node.Index = if (analyzer.peekToken() == .string_literal) try analyzer.identifierNode() else .null;
+        const test_block = try analyzer.block();
+        return try analyzer.addNode(.{
+            .token = test_token,
+            .id = .test_declaration,
+            .left = test_block,
+            .right = name_node,
         });
     }
 

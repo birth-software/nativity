@@ -52,5 +52,6 @@ const mmap :: extern = fn (address: ?[&]const u8, length: usize, protection_flag
 const munmap :: extern = fn (address: [&]const u8, length: usize) s32;
 const execve :: extern = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) s32;
 const realpath :: extern = fn(path: [&:0]const u8, resolved_path: [&:0]u8) [&:0]u8;
+const waitpid :: extern = fn(pid: ProcessId, status: &s32, flags: s32) s32;
 
 const _NSGetExecutablePath :: extern = fn (buffer: [&:0]u8, buffer_size: &u32) s32;

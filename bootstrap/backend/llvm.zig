@@ -2605,7 +2605,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                     try assembly_statements.appendSlice(context.allocator, "\n\t");
                                 }
 
-                                try constraints.appendSlice(context.allocator, ",~{dirflag},~{fpsr},~{flags}");
+                                // try constraints.appendSlice(context.allocator, ",~{dirflag},~{fpsr},~{flags}");
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -3088,6 +3088,15 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const parameter_types: []const *LLVM.Type = &.{};
                         const parameter_values: []const *LLVM.Value = &.{};
                         const intrinsic_call = try llvm.callIntrinsic("llvm.trap", parameter_types, parameter_values);
+                        try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, intrinsic_call);
+                    },
+                    .add_overflow => |add_overflow| {
+                        const intrinsic_type = try llvm.getType(unit, context, add_overflow.type);
+                        const parameter_types = [_]*LLVM.Type{intrinsic_type};
+                        const left = try llvm.emitRightValue(unit, context, add_overflow.left);
+                        const right = try llvm.emitRightValue(unit, context, add_overflow.right);
+                        const arguments = [_]*LLVM.Value{ left, right };
+                        const intrinsic_call = try llvm.callIntrinsic("llvm.sadd.with.overflow", &parameter_types, &arguments);
                         try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, intrinsic_call);
                     },
                     else => |t| @panic(@tagName(t)),
