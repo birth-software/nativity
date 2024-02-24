@@ -42,11 +42,18 @@ pub fn main() !void {
         todo();
     } else if (equal(u8, command, "exe")) {
         const context = try Compilation.createContext(allocator);
-        try Compilation.buildExecutable(context, command_arguments);
+        try Compilation.buildExecutable(context, command_arguments, .{
+            .is_test = false,
+        });
     } else if (equal(u8, command, "lib")) {
         todo();
     } else if (equal(u8, command, "obj")) {
         todo();
+    } else if (equal(u8, command, "test")) {
+        const context = try Compilation.createContext(allocator);
+        try Compilation.buildExecutable(context, command_arguments, .{
+            .is_test = true,
+        });
     } else {
         todo();
     }

@@ -36,6 +36,13 @@ fn reportUnterminatedArgumentError(string: []const u8) noreturn {
     std.debug.panic("Unterminated argument: {s}", .{string});
 }
 
+const Error = struct{
+    message: []const u8,
+    node: Node.Index,
+};
+
+
+
 pub fn createContext(allocator: Allocator) !*const Context{
     const context: *Context = try allocator.create(Context);
 
@@ -69,25 +76,38 @@ pub fn compileBuildExecutable(context: *const Context, arguments: [][:0]u8) !voi
             .link_libc = @import("builtin").os.tag == .macos,
             .generate_debug_information = true,
             .name = "build",
+            .is_test = false,
         },
     };
 
     try unit.compile(context);
+    const argv: []const []const u8 = &.{ "nat/build", "-compiler_path", context.executable_absolute_path };
     const result = try std.ChildProcess.run(.{
         .allocator = context.allocator,
-        .argv = &.{ "nat/build", "-compiler_path", context.executable_absolute_path },
+        .argv = argv,
     });
-    switch (result.term) {
-        .Exited => |exit_code| {
-            if (exit_code != 0) @panic("Bad exit code");
-        },
-        .Signal => @panic("Signaled"),
-        .Stopped => @panic("Stopped"),
-        .Unknown => @panic("Unknown"),
+
+    const success = switch (result.term) {
+        .Exited => |exit_code| exit_code == 0,
+        else => false,
+    };
+    if (!success) {
+        std.debug.print("The following command terminated with failure ({s}): {s}\n", .{@tagName(result.term), argv});
+        if (result.stdout.len > 0) {
+            std.debug.print("STDOUT:\n{s}\n", .{result.stdout});
+        }
+        if (result.stderr.len > 0) {
+            std.debug.print("STDOUT:\n{s}\n", .{result.stderr});
+        }
+        std.os.abort();
     }
 }
 
-pub fn buildExecutable(context: *const Context, arguments: [][:0]u8) !void {
+const ExecutableOptions = struct{
+    is_test: bool,
+};
+
+pub fn buildExecutable(context: *const Context, arguments: [][:0]u8, options: ExecutableOptions) !void {
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
     var target_triplet: []const u8 = switch (@import("builtin").os.tag) {
@@ -242,6 +262,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][:0]u8) !void {
             },
             .generate_debug_information = generate_debug_information,
             .name = executable_name,
+            .is_test = options.is_test,
         },
     };
 
@@ -577,6 +598,7 @@ pub const Type = union(enum) {
 };
 
 pub const Instruction = union(enum) {
+    add_overflow: AddOverflow,
     argument_declaration: *Debug.Declaration.Argument,
     branch: Branch,
     block: Debug.Block.Index,
@@ -756,6 +778,12 @@ pub const Instruction = union(enum) {
         // TODO:
         destination: V,
         source: V,
+    };
+
+    const AddOverflow = struct{
+        left: V,
+        right: V,
+        type: Type.Index,
     };
 
     pub const List = BlockList(@This(), enum {});
@@ -1065,6 +1093,10 @@ pub const Debug = struct {
             lexed,
             parsed,
         };
+
+        pub fn getPath(file: *File, allocator: Allocator) ![]const u8 {
+            return try std.mem.concat(allocator, u8, &.{ file.package.directory.path, "/", file.relative_path});
+        }
     };
 };
 
@@ -1074,6 +1106,7 @@ pub const Mutability = enum(u1) {
 };
 
 pub const IntrinsicId = enum {
+    add_overflow,
     assert,
     @"asm", //this is processed separately as it need special parsing
     cast,
@@ -1085,6 +1118,7 @@ pub const IntrinsicId = enum {
     size,
     sign_extend,
     syscall,
+    trap,
     zero_extend,
 };
 
@@ -1561,10 +1595,85 @@ pub const Builder = struct {
                 switch (argument_node.id) {
                     .string_literal => {
                         const error_message = try unit.fixupStringLiteral(context, argument_node.token);
-                        std.debug.panic("Compile error: {s}", .{error_message});
+                        builder.reportCompileError(unit, context, .{
+                            .message = error_message,
+                            .node = node_index,
+                        });
                     },
                     else => |t| @panic(@tagName(t)),
                 }
+            },
+            .add_overflow => {
+                assert(argument_node_list.len == 2);
+                const left = try builder.resolveRuntimeValue(unit, context, type_expect, argument_node_list[0], .right);
+                const right_type_expect = switch (type_expect) {
+                    .none => Type.Expect { .type = left.type },
+                    else => type_expect,
+                };
+                const right = try builder.resolveRuntimeValue(unit, context, right_type_expect, argument_node_list[1], .right);
+
+                const add_overflow = try unit.instructions.append(context.allocator, .{
+                    .add_overflow = .{
+                        .left = left,
+                        .right = right,
+                        .type = left.type,
+                    },
+                });
+                try builder.appendInstruction(unit, context, add_overflow);
+
+                const result_type = try unit.getOptionalType(context, left.type);
+
+                const extract_value = try unit.instructions.append(context.allocator, .{
+                    .extract_value = .{
+                        .expression = .{
+                            .value = .{
+                                .runtime = add_overflow,
+                            },
+                            .type = result_type,
+                        },
+                        .index = 1,
+                    },
+                });
+                try builder.appendInstruction(unit, context, extract_value);
+
+                const carry = try builder.newBasicBlock(unit, context);
+                const normal = try builder.newBasicBlock(unit, context);
+
+                try builder.branch(unit, context, extract_value, carry, normal);
+                builder.current_basic_block = carry;
+
+                try builder.buildRet(unit, context, .{
+                    .value = .{
+                        .@"comptime" = .{
+                            .constant_int = .{
+                                .value = 1,
+                            },
+                        },
+                    },
+                    .type = left.type,
+                });
+
+                builder.current_basic_block = normal;
+
+                const result_extract_value = try unit.instructions.append(context.allocator, .{
+                    .extract_value = .{
+                        .expression = .{
+                            .value = .{
+                                .runtime = add_overflow,
+                            },
+                            .type = result_type,
+                        },
+                        .index = 0,
+                    },
+                });
+                try builder.appendInstruction(unit, context, result_extract_value);
+
+                return V{
+                    .value = .{
+                        .runtime = result_extract_value,
+                    },
+                    .type = left.type,
+                };
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -3364,6 +3473,7 @@ pub const Builder = struct {
                 fields: u32 = 0,
                 declarations: u32 = 0,
                 comptime_blocks: u32 = 0,
+                test_declarations: u32 = 0,
             } = .{};
 
             for (container_nodes) |member_index| {
@@ -3379,6 +3489,7 @@ pub const Builder = struct {
                     .declaration => result.declarations += 1,
                     .field => result.fields += 1,
                     .comptime_block => result.comptime_blocks += 1,
+                    .test_declaration => result.test_declarations += 1,
                 }
             }
 
@@ -3388,6 +3499,7 @@ pub const Builder = struct {
         var declaration_nodes = try ArrayList(Node.Index).initCapacity(context.allocator, count.declarations);
         var field_nodes = try ArrayList(Node.Index).initCapacity(context.allocator, count.fields);
         var comptime_block_nodes = try ArrayList(Node.Index).initCapacity(context.allocator, count.comptime_blocks);
+        var test_declarations = try ArrayList(Node.Index).initCapacity(context.allocator, count.test_declarations);
 
         for (container_nodes) |member_index| {
             const member_node = unit.getNode(member_index);
@@ -3396,6 +3508,7 @@ pub const Builder = struct {
                 .comptime_block => &comptime_block_nodes,
                 .declaration => &declaration_nodes,
                 .field => &field_nodes,
+                .test_declaration => &test_declarations,
             };
             array_list.appendAssumeCapacity(member_index);
         }
@@ -3585,6 +3698,10 @@ pub const Builder = struct {
                     else => |t| @panic(@tagName(t)),
                 }
             }
+        }
+
+        if (unit.descriptor.is_test and count.test_declarations > 0) {
+            unreachable;
         }
 
         return type_index;
@@ -5108,6 +5225,11 @@ pub const Builder = struct {
                                 const v = try builder.resolveRuntimeValue(unit, context, type_expect, node.left, .left);
                                 break :blk v;
                             },
+                        },
+                        .integer => {
+                            const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
+                            _ = v;
+                            unreachable;
                         },
                         else => |t| @panic(@tagName(t)),
                     },
@@ -7864,6 +7986,16 @@ pub const Builder = struct {
         try builder.appendInstruction(unit, context, ret);
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
     }
+    
+    fn reportCompileError(builder: *Builder, unit: *Unit, context: *const Context, err: Error) noreturn{
+        const err_node = unit.getNode(err.node);
+        const file = unit.files.get(builder.current_file);
+        const token_debug_info = builder.getTokenDebugInfo(unit, err_node.token);
+        std.debug.print("{s}:{}:{}: \x1b[31merror:\x1b[0m {s}\n", .{file.getPath(context.allocator) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1, err.message});
+        // std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+        // file.relative_path
+        std.os.abort();
+    }
 };
 
 pub const Enum = struct {
@@ -8607,7 +8739,6 @@ pub const FixedKeyword = enum {
     @"var",
     void,
     noreturn,
-    function,
     @"while",
     bool,
     true,
@@ -8628,6 +8759,7 @@ pub const FixedKeyword = enum {
     @"for",
     undefined,
     @"break",
+    @"test",
 };
 
 pub const Descriptor = struct {
@@ -8636,6 +8768,7 @@ pub const Descriptor = struct {
     target: std.Target,
     only_parse: bool,
     link_libc: bool,
+    is_test: bool,
     generate_debug_information: bool,
     name: []const u8,
 };
@@ -8649,6 +8782,7 @@ fn getContainerMemberType(member_id: Node.Id) MemberType {
         .enum_field,
         .container_field,
         => .field,
+        .test_declaration => .test_declaration,
         else => |t| @panic(@tagName(t)),
     };
 }
@@ -8657,6 +8791,7 @@ const MemberType = enum {
     declaration,
     field,
     comptime_block,
+    test_declaration,
 };
 
 pub const Token = struct {
@@ -8737,7 +8872,6 @@ pub const Token = struct {
         operator_compare_greater,
         operator_compare_greater_equal,
         // Fixed keywords
-        fixed_keyword_function,
         fixed_keyword_const,
         fixed_keyword_var,
         fixed_keyword_void,
@@ -8763,7 +8897,7 @@ pub const Token = struct {
         fixed_keyword_for,
         fixed_keyword_undefined,
         fixed_keyword_break,
-        unused0,
+        fixed_keyword_test,
         unused1,
         unused2,
         unused3,
