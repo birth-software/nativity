@@ -15,7 +15,6 @@ const logln = Compilation.logln;
 const Token = Compilation.Token;
 const fs = @import("../fs.zig");
 
-
 // Needed information
 // Token: u8
 // line: u32
@@ -76,7 +75,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
 
     try token_buffer.tokens.ensureUnusedCapacity(allocator, text.len / 4);
 
-    logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{Token.unwrap(lexer.offset), lexer.line_offset});
+    logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
     while (index < len) {
         const start_index = index;
@@ -229,7 +228,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
                         index += 1;
                         break :blk .operator_compare_less_equal;
                     },
-                    else =>break :blk .operator_compare_less,
+                    else => break :blk .operator_compare_less,
                 }
             },
             '>' => blk: {
@@ -249,7 +248,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
                         index += 1;
                         break :blk .operator_compare_greater_equal;
                     },
-                    else =>break :blk .operator_compare_greater,
+                    else => break :blk .operator_compare_greater,
                 }
             },
             ';' => blk: {
@@ -281,7 +280,6 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
                     },
                     else => break :blk .operator_bang,
                 }
-               
             },
             '=' => blk: {
                 index += 1;
@@ -421,10 +419,10 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
         });
         const line_offset = token_buffer.line_offsets.items[line_index];
         const column = start_index - line_offset;
-        logln(.lexer, .new_token, "T at line {}, column {}, byte offset {}, with length {} -line offset: {}- ({s})", .{line_index, column, start_index, token_length, line_offset, @tagName(token_id)});
+        logln(.lexer, .new_token, "T at line {}, column {}, byte offset {}, with length {} -line offset: {}- ({s})", .{ line_index, column, start_index, token_length, line_offset, @tagName(token_id) });
     }
 
-    logln(.lexer, .end, "END LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{Token.unwrap(lexer.offset), lexer.line_offset});
+    logln(.lexer, .end, "END LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
     lexer.count = Token.sub(token_buffer.getOffset(), lexer.offset);
     lexer.line_count = token_buffer.getLineOffset() - lexer.line_offset;

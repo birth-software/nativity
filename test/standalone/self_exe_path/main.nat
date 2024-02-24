@@ -1,14 +1,16 @@
 const std = #import("std");
 const print = std.print;
 
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn() Error!void {
     var buffer: [std.os.max_path_byte_count:0]u8 = undefined;
     if (std.os.current_executable_path(buffer = buffer.&)) |bytes| {
         print(bytes);
         print(bytes = "\n");
-        return 0;
     } else {
-        print(bytes = "Failed\n");
-        return 1;
+        return Error.unexpected_result;
     }
 }

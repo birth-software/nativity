@@ -1,4 +1,8 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn() Error!void {
     var i: s32 = 0;
     while (i < 10) {
         i += 1;
@@ -7,5 +11,7 @@ const main = fn() s32 {
         }
     }
 
-    return i - 5;
+    if (i - 5 != 0) {
+        return Error.unexpected_result;
+    }
 }

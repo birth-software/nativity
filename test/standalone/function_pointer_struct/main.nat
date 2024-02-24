@@ -13,11 +13,17 @@ const Struct = struct{
     }
 };
 
-const main = fn () s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
     var s = Struct{
         .a = expected_number,
         .handler = Struct.handler_function.&,
     };
 
-    return s.handler(s.&) - expected_number;
+    if (s.handler(s.&) - expected_number != 0) {
+        return Error.unexpected_result;
+    }
 }

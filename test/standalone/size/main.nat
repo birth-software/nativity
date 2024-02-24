@@ -1,6 +1,9 @@
-const std = #import("std");
-const assert = std.assert;
-const main = fn () s32 {
-    assert(#size(usize) == 8);
-    return 0;
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
+    if (#size(usize) != 8) {
+        return Error.unexpected_result;
+    }
 }

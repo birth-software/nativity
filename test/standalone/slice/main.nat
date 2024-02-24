@@ -1,4 +1,8 @@
-const main = fn () s32{
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void{
     const a: [4]u8 = .{1, 2, 3, 4};
     const b: []const []const u8 = .{a.&}.&;
 
@@ -10,5 +14,7 @@ const main = fn () s32{
         }
     }
 
-    return #cast(sum - 10);
+    if (sum - 10 != 0) {
+        return Error.unexpected_result;
+    }
 }

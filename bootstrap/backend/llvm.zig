@@ -1180,7 +1180,13 @@ pub const LLVM = struct {
                     for (sema_function_prototype.argument_types) |argument_type_index| {
                         switch (unit.types.get(argument_type_index).*) {
                             // TODO: ABI
-                            .integer, .pointer, .@"enum", .@"struct", .slice, .bool, => try parameter_types.append(context.allocator, try llvm.getType(unit, context, argument_type_index)),
+                            .integer,
+                            .pointer,
+                            .@"enum",
+                            .@"struct",
+                            .slice,
+                            .bool,
+                            => try parameter_types.append(context.allocator, try llvm.getType(unit, context, argument_type_index)),
                             else => |t| @panic(@tagName(t)),
                         }
                         // arg_types.appendAssumeCapacity(llvm_argument_type);
@@ -1262,6 +1268,39 @@ pub const LLVM = struct {
                     const array_type = LLVM.Type.Array.get(element_type, array.count + @intFromBool(extra_element)) orelse return Type.Error.array;
                     break :blk array_type.toType();
                 },
+                .error_union => |error_union| {
+                    const error_type = try llvm.getType(unit, context, error_union.@"error");
+                    const payload_type = try llvm.getType(unit, context, error_union.type);
+                    const payload_type_size = unit.types.get(error_union.type).getBitSize(unit);
+
+                    switch (payload_type_size) {
+                        0 => {
+                            const integer_type = llvm.context.getIntegerType(31) orelse unreachable;
+                            const boolean_type = try llvm.getType(unit, context, .bool);
+                            const types = [2]*LLVM.Type{ integer_type.toType(), boolean_type };
+                            const is_packed = false;
+                            const struct_type = llvm.context.getStructType(&types, types.len, is_packed) orelse return Type.Error.@"struct";
+                            return struct_type.toType();
+                        },
+                        else => unreachable,
+                    }
+                    _ = error_type;
+                    _ = payload_type;
+                    unreachable;
+                },
+                .error_set => |error_set_index| b: {
+                    const error_set = unit.error_sets.get(error_set_index);
+                    if (error_set.values.items.len > 0) {
+                        unreachable;
+                    } else {
+                        const integer_type = llvm.context.getIntegerType(32) orelse unreachable;
+                        break :b integer_type.toType();
+                    }
+                },
+                .@"error" => b: {
+                    const integer_type = llvm.context.getIntegerType(31) orelse unreachable;
+                    break :b integer_type.toType();
+                },
                 else => |t| @panic(@tagName(t)),
             };
 
@@ -1327,7 +1366,13 @@ pub const LLVM = struct {
 
                             break :b name.items;
                         } else {
-                            unreachable;
+                            if (unit.type_declarations.get(sema_type_index)) |type_declaration| {
+                                _ = type_declaration; // autofix
+                                unreachable;
+                            } else {
+                                // TODO: fix
+                                break :b "anon_struct";
+                            }
                         }
                     },
                     // TODO: termination
@@ -2031,7 +2076,7 @@ pub const LLVM = struct {
         }
     }
 
-    fn emitComptimeRightValue(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, ct: Compilation.V.Comptime, type_index: Compilation.Type.Index) !*LLVM.Value.Constant {
+    fn emitComptimeRightValue(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, ct: Compilation.V.Comptime, type_index: Compilation.Type.Index) anyerror!*LLVM.Value.Constant {
         switch (ct) {
             .constant_int => |integer| {
                 const integer_type = unit.types.get(type_index);
@@ -2083,21 +2128,7 @@ pub const LLVM = struct {
                 const constant_int = llvm.context.getConstantInt(backing_integer_type.bit_count, value, signed) orelse unreachable;
                 return constant_int.toConstant();
             },
-            .constant_struct => |constant_struct_index| {
-                const constant_struct = unit.constant_structs.get(constant_struct_index);
-                var field_values = try ArrayList(*LLVM.Value.Constant).initCapacity(context.allocator, constant_struct.fields.len);
-                const sema_struct_type = unit.structs.get(unit.types.get(constant_struct.type).@"struct");
-                for (constant_struct.fields, sema_struct_type.fields.items) |field_value, field_index| {
-                    const field = unit.struct_fields.get(field_index);
-                    const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field.type);
-                    field_values.appendAssumeCapacity(constant);
-                }
-
-                const llvm_type = try llvm.getType(unit, context, constant_struct.type);
-                const struct_type = llvm_type.toStruct() orelse unreachable;
-                const const_struct = struct_type.getConstant(field_values.items.ptr, field_values.items.len) orelse unreachable;
-                return const_struct;
-            },
+            .constant_struct => |constant_struct_index| return try llvm.getConstantStruct(unit, context, constant_struct_index),
             .undefined => {
                 const undefined_type = try llvm.getType(unit, context, type_index);
                 const poison = undefined_type.getPoison() orelse unreachable;
@@ -2129,6 +2160,13 @@ pub const LLVM = struct {
                 const pointer_type = value_type.toPointer() orelse unreachable;
                 const constant_null_pointer = pointer_type.getNull();
                 return constant_null_pointer.toConstant();
+            },
+            .error_value => |error_field_index| {
+                const error_field = unit.error_fields.get(error_field_index);
+                const signed = false;
+                const bit_count = 31;
+                const constant_int = llvm.context.getConstantInt(bit_count, error_field.value, signed) orelse unreachable;
+                return constant_int.toConstant();
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -2192,9 +2230,10 @@ pub const LLVM = struct {
         const const_slice = unit.constant_slices.get(constant_slice_index);
         const const_slice_type = try llvm.getType(unit, context, const_slice.type);
         const slice_struct_type = const_slice_type.toStruct() orelse unreachable;
-        const ptr = llvm.global_variable_map.get(const_slice.ptr).?;
+        const ptr = llvm.global_variable_map.get(const_slice.array).?;
         const signed = false;
-        const len = llvm.context.getConstantInt(@bitSizeOf(usize), const_slice.len, signed) orelse unreachable;
+        assert(const_slice.start == 0);
+        const len = llvm.context.getConstantInt(@bitSizeOf(usize), const_slice.end, signed) orelse unreachable;
         const slice_fields = [2]*LLVM.Value.Constant{
             ptr.toConstant(),
             len.toConstant(),
@@ -2223,6 +2262,7 @@ pub const LLVM = struct {
                     break :b constant_int.toConstant();
                 },
                 .constant_slice => |constant_slice_index| try llvm.getConstantSlice(unit, context, constant_slice_index),
+                .constant_struct => |constant_struct_index| try llvm.getConstantStruct(unit, context, constant_struct_index),
                 else => |t| @panic(@tagName(t)),
             };
             list.appendAssumeCapacity(value);
@@ -2230,6 +2270,22 @@ pub const LLVM = struct {
 
         const result = array_type.getConstant(list.items.ptr, list.items.len) orelse unreachable;
         return result;
+    }
+
+    fn getConstantStruct(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, constant_struct_index: Compilation.V.Comptime.ConstantStruct.Index) !*LLVM.Value.Constant {
+        const constant_struct = unit.constant_structs.get(constant_struct_index);
+        var field_values = try ArrayList(*LLVM.Value.Constant).initCapacity(context.allocator, constant_struct.fields.len);
+        const sema_struct_type = unit.structs.get(unit.types.get(constant_struct.type).@"struct");
+        for (constant_struct.fields, sema_struct_type.fields.items) |field_value, field_index| {
+            const field = unit.struct_fields.get(field_index);
+            const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field.type);
+            field_values.appendAssumeCapacity(constant);
+        }
+
+        const llvm_type = try llvm.getType(unit, context, constant_struct.type);
+        const struct_type = llvm_type.toStruct() orelse unreachable;
+        const const_struct = struct_type.getConstant(field_values.items.ptr, field_values.items.len) orelse unreachable;
+        return const_struct;
     }
 
     fn callIntrinsic(llvm: *LLVM, intrinsic_name: []const u8, intrinsic_parameter_types: []const *LLVM.Type, intrinsic_arguments: []const *LLVM.Value) !*LLVM.Value {
@@ -2341,7 +2397,7 @@ pub const LLVM = struct {
             const function_name = unit.getIdentifier(declaration.declaration.name);
             const subprogram = llvm.debug_info_builder.createFunction(debug_file.toScope(), function_name.ptr, function_name.len, function_name.ptr, function_name.len, debug_file, declaration.declaration.line + 1, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration) orelse unreachable;
             function.setSubprogram(subprogram);
-            
+
             switch (declaration.initial_value) {
                 .function_declaration => {},
                 .function_definition => |function_definition_index| {
@@ -2354,7 +2410,6 @@ pub const LLVM = struct {
             }
         }
     }
-
 };
 
 fn getCallingConvention(calling_convention: Compilation.Function.CallingConvention) LLVM.Value.Constant.Function.CallingConvention {
@@ -2508,6 +2563,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         const entry_block_node = try llvm.createBasicBlock(context, function_definition.basic_blocks.items[0], "fn_entry");
         block_command_list.append(entry_block_node);
 
+        var phis = AutoArrayHashMap(Compilation.Instruction.Index, *LLVM.Value.Instruction.PhiNode){};
+
         while (block_command_list.len != 0) {
             const block_node = block_command_list.first orelse unreachable;
             const basic_block_index = block_node.data;
@@ -2625,14 +2682,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         switch (unit.types.get(stack_slot.type).*) {
                             .void, .noreturn, .type => unreachable,
                             .comptime_int => unreachable,
-                            .bool => {},
-                            .@"struct" => {},
-                            .@"enum" => {},
                             .function => unreachable,
-                            .integer => {},
-                            .pointer => {},
-                            .slice => {},
-                            .array => {},
+                            else => {},
                         }
 
                         const declaration_type = try llvm.getType(unit, context, stack_slot.type);
@@ -2769,7 +2820,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                         else => |t| @panic(@tagName(t)),
                                     };
 
-
                                     for (call.arguments, arguments) |argument_value, *argument| {
                                         argument.* = try llvm.emitRightValue(unit, context, argument_value);
                                     }
@@ -2883,15 +2933,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         switch (unit.types.get(argument_type_index).*) {
                             .void, .noreturn, .type => unreachable,
                             .comptime_int => unreachable,
-                            .bool => {},
-                            // .bool => unreachable,
-                            .@"struct" => {},
-                            .@"enum" => {},
                             .function => unreachable,
-                            .integer => {},
-                            .pointer => {},
-                            .slice => {},
-                            .array => {},
+                            else => {},
                         }
                         const argument_type = argument.toValue().getType();
                         const alloca_array_size: ?*LLVM.Value = null;
@@ -3047,6 +3090,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const not_taken_node = try llvm.createBasicBlock(context, branch.not_taken, "not_taken_block");
                         block_command_list.insertAfter(block_node, taken_node);
                         block_command_list.insertAfter(taken_node, not_taken_node);
+                        // block_command_list.append(taken_node);
+                        // block_command_list.append(taken_node);
 
                         // TODO: make this fast
                         const taken_block = llvm.llvm_block_map.get(taken_node.data).?;
@@ -3064,11 +3109,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const phi_name = "phi";
                         const phi_node = llvm.builder.createPhi(phi_type, reserved_value_count, phi_name, phi_name.len) orelse unreachable;
 
-                        for (phi.values.items, phi.basic_blocks.items) |sema_value, sema_block| {
-                            const value = llvm.llvm_value_map.get(sema_value) orelse try llvm.emitRightValue(unit, context, sema_value);
-                            const value_basic_block = llvm.llvm_block_map.get(sema_block).?;
-                            phi_node.addIncoming(value, value_basic_block);
-                        }
+                        try phis.putNoClobber(context.allocator, instruction_index, phi_node);
 
                         try llvm.llvm_instruction_map.putNoClobber(context.allocator, instruction_index, phi_node.toValue());
                     },
@@ -3104,6 +3145,16 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             }
 
             _ = block_command_list.popFirst();
+        }
+
+        for (phis.keys(), phis.values()) |instruction_index, phi| {
+            const instruction = unit.instructions.get(instruction_index);
+            const sema_phi = instruction.phi;
+            for (sema_phi.values.items, sema_phi.basic_blocks.items) |sema_value, sema_block| {
+                const value_basic_block = llvm.llvm_block_map.get(sema_block).?;
+                const value = llvm.llvm_value_map.get(sema_value) orelse try llvm.emitRightValue(unit, context, sema_value);
+                phi.addIncoming(value, value_basic_block);
+            }
         }
 
         if (!builder.isCurrentBlockTerminated()) {
@@ -3228,7 +3279,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             try arguments.append(context.allocator, "-lSystem");
         },
         .linux => {
-            try arguments.appendSlice(context.allocator, &.{"--entry", "_start"});
+            try arguments.appendSlice(context.allocator, &.{ "--entry", "_start" });
             try arguments.append(context.allocator, "-m");
             try arguments.append(context.allocator, switch (unit.descriptor.target.cpu.arch) {
                 .x86_64 => "elf_x86_64",
@@ -3238,8 +3289,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             if (unit.descriptor.link_libc) {
                 try arguments.append(context.allocator, "/usr/lib/crt1.o");
                 try arguments.append(context.allocator, "/usr/lib/crti.o");
-                try arguments.appendSlice(context.allocator, &.{"-L", "/usr/lib"});
-                try arguments.appendSlice(context.allocator, &.{"-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"});
+                try arguments.appendSlice(context.allocator, &.{ "-L", "/usr/lib" });
+                try arguments.appendSlice(context.allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
                 try arguments.append(context.allocator, "--as-needed");
                 try arguments.append(context.allocator, "-lm");
                 try arguments.append(context.allocator, "-lpthread");

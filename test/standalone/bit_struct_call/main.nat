@@ -17,7 +17,7 @@ const transform = fn (a: A) B {
     };
 }
 
-const main = fn () s32 {
+const main = fn () *!void {
     var a = A{
         .a = 3,
         .b = 8,
@@ -26,6 +26,4 @@ const main = fn () s32 {
     const b = transform(a);
     assert(a.a == b.a);
     assert(a.b == b.b);
-
-    return 0;
 }

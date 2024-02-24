@@ -1,4 +1,7 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+const main = fn() Error!void {
     var i: s32 = 0;
     const j: s32 = 5;
     for (0..10) |_| {
@@ -8,5 +11,7 @@ const main = fn() s32 {
         i += 1;
     }
 
-    return i - j;
+    if (i - j != 0) {
+        return Error.unexpected_result;
+    }
 }

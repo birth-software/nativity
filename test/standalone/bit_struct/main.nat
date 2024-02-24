@@ -8,7 +8,7 @@ const BitStruct = struct(u8) {
     d: u5,
 };
 
-const main = fn () s32 {
+const main = fn () *!void {
     var bs = BitStruct{
         .a = false,
         .b = true,
@@ -26,5 +26,4 @@ const main = fn () s32 {
     };
     const bitcast_const_bs: u8 = #cast(const_bs);
     assert(bitcast_const_bs == 5);
-    return 0;
 }
