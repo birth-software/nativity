@@ -2,7 +2,11 @@ const std = #import("std");
 const assert = std.assert;
 const Executable = std.build.Executable;
 
-const main = fn () s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
     const executable = Executable{
         .target = .{
             .cpu = .x86_64,
@@ -15,9 +19,8 @@ const main = fn () s32 {
     };
 
     if (executable.compile()) {
-        return 0;
     } else {
         std.print(bytes = "Executable failed to compile!\n");
-        return 1;
+        return Error.unexpected_result;
     }
 }

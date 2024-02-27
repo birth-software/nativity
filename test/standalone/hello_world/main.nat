@@ -1,6 +1,5 @@
 const std = #import("std");
 
-const main = fn() s32 {
+const main = fn() *!void {
     std.print(bytes = "Hello world!\n");
-    return 0;
 }

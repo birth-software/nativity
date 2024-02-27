@@ -30,5 +30,5 @@ const panic = fn (reason: PanicReason) noreturn{
 
 const TestFunction = struct{
     name: []const u8,
-    function: &const fn () !*void,
+    function: &const fn () *!void,
 };

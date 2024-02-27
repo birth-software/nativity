@@ -1,8 +1,13 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+const main = fn() Error!void {
     const dividend: s32 = 30;
     const divisor: s32 = 6;
     const div: s32 = dividend / divisor;
     const n: s32 = 5;
 
-    return n - div;
+    if (n - div != 0) {
+        return Error.unexpected_result;
+    }
 }

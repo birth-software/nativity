@@ -1,7 +1,13 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn() Error!void {
     const a: u32 = 0xffff;
     const b: u32 = 0xffff0000;
     const c: u32 = 0xffffffff;
     const result = c - (a | b);
-    return #cast(result);
+    if (result != 0) {
+        return Error.unexpected_result;
+    }
 }

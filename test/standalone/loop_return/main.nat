@@ -1,13 +1,19 @@
-const main = fn () s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
     const a = foo(5142);
     if (a != 2501) {
-        return 1;
+        return Error.unexpected_result;
     }
     const b = foo(5142);
     if (b != 2501) {
-        return 1;
+        return Error.unexpected_result;
     }
-    return #cast(a - b);
+    if (a - b != 0) {
+        return Error.unexpected_result;
+    }
 }
 
 const foo = fn (arg: u32) u32 {

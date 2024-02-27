@@ -1,7 +1,13 @@
-const main = fn () s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
     const a = foo(5);
     const b = foo(5);
-    return a - b;
+    if (a - b != 0) {
+        return Error.unexpected_result;
+    }
 }
 
 const foo = fn (arg: s32) s32 {

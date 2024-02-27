@@ -1,0 +1,6 @@
+const builtin = #import("builtin");
+const main = fn () *!void {
+    for (builtin.test_functions) |test_function| {
+        try test_function.function();
+    }
+}

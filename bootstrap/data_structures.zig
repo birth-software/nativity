@@ -100,7 +100,7 @@ pub fn getIndexForType(comptime T: type, comptime E: type) type {
     const EnumField = std.builtin.Type.EnumField;
     comptime var fields: []const EnumField = &.{};
     // comptime var enum_value: comptime_int = 0;
-        fields = fields ++ @typeInfo(E).Enum.fields;
+    fields = fields ++ @typeInfo(E).Enum.fields;
 
     // for (names) |name| {
     //     fields = fields ++ [1]EnumField{.{
@@ -137,31 +137,30 @@ pub fn getIndexForType(comptime T: type, comptime E: type) type {
             return @enumFromInt(value);
         }
 
-        pub fn addInt(this: Index, value: IndexType) Index{
+        pub fn addInt(this: Index, value: IndexType) Index {
             const this_int = @intFromEnum(this);
             return @enumFromInt(this_int + value);
         }
 
-        pub fn subInt(this: Index, value: IndexType) IndexType{
+        pub fn subInt(this: Index, value: IndexType) IndexType {
             const this_int = @intFromEnum(this);
             return this_int - value;
         }
 
-        pub fn add(a: Index, b: Index) Index{
+        pub fn add(a: Index, b: Index) Index {
             return @enumFromInt(@intFromEnum(a) + @intFromEnum(b));
         }
 
-        pub fn sub(a: Index, b: Index) IndexType{
+        pub fn sub(a: Index, b: Index) IndexType {
             return @intFromEnum(a) - @intFromEnum(b);
         }
     };
 }
 
-pub const ListType = enum{
+pub const ListType = enum {
     index,
     pointer,
 };
-
 
 pub fn enumFromString(comptime E: type, string: []const u8) ?E {
     return inline for (@typeInfo(E).Enum.fields) |enum_field| {

@@ -20,12 +20,17 @@ const print_values = fn(slice: []const u8) void {
     }
 }
 
-const main = fn () s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
     const a = [_]u8{1, 1, 4, 5, 6};
     const b = [_]u8{1, 4, 6};
     const expected_result: usize = a.len + b.len;
     const result = count_slice_byte_count(slices = .{a.&, b.&}.&);
     print_values(slice = a.&);
-    const main_result: u32 = #cast(expected_result - result);
-    return #cast(main_result);
+    if (expected_result - result != 0) {
+        return Error.unexpected_result;
+    }
 }

@@ -1,9 +1,13 @@
-const main = fn () s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn () Error!void {
     const ch = 'a';
     var buffer: [1]u8 = undefined;
     var index: usize = 0;
     buffer[index] = ch;
-    const sub: u8 = buffer[index] - ch;
-    const result: u32 = sub;
-    return #cast(result);
+    if (buffer[index] - ch != 0) {
+        return Error.unexpected_result;
+    }
 }

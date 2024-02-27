@@ -1,7 +1,10 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn() Error!void {
     if (true) {
-        return 0;
     } else {
-        return 1;
+        return Error.unexpected_result;
     }
 }

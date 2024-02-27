@@ -1,6 +1,11 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+const main = fn() Error!void {
     var a: s32 = 5;
     var b: s32 = 4;
     var result = a & b;
-    return result - b;
+    if (result - b != 0) {
+        return Error.unexpected_result;
+    }
 }

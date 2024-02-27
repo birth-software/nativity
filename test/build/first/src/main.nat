@@ -1,3 +1,0 @@
-const main = fn () s32 {
-    return 0;
-}

@@ -1,4 +1,8 @@
-const main = fn() s32 {
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn() Error!void {
     var counter: s32 = 0;
     const loop = 10;
 
@@ -6,5 +10,7 @@ const main = fn() s32 {
         counter += 1;
     }
 
-    return loop - counter;
+    if (loop - counter != 0) {
+        return Error.unexpected_result;
+    }
 }

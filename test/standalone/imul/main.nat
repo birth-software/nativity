@@ -1,5 +1,10 @@
-const main = fn() s32 {
-    const a: s32 = 5;
-    const b: s32 = 4;
-    return a * b - a * b;
+const Error = error{
+    unexpected_result,
+};
+const main = fn() Error!void {
+    var a: s32 = 5;
+    var b: s32 = 4;
+    if (a * b - a * b != 0) {
+        return Error.unexpected_result;
+    }
 }

@@ -1,6 +1,5 @@
-const main = fn () s32 {
+const main = fn () *!void {
     _ = foo();
-    return 0;
 }
 
 const foo = fn () []u8 {
