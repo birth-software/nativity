@@ -2,6 +2,13 @@ comptime {
     _ = start;
 }
 
+test {
+    _ = build;
+    _ = builtin;
+    _ = os;
+    _ = start;
+}
+
 const build = #import("build.nat");
 const builtin = #import("builtin.nat");
 const os = #import("os.nat");

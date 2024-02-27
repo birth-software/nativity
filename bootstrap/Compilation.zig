@@ -3938,7 +3938,7 @@ pub const Builder = struct {
             }
         }
 
-        if (unit.descriptor.is_test and count.test_declarations > 0) {
+        if (unit.descriptor.is_test and count.test_declarations > 0 and unit.main_package.? == unit.files.get(builder.current_file).package) {
             for (test_declarations.items) |test_declaration_node_index| {
                 const test_node = unit.getNode(test_declaration_node_index);
                 assert(test_node.id == .test_declaration);
