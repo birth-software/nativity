@@ -302,4 +302,54 @@ pub fn main() !void {
         .group_name = "TEST EXECUTABLE",
         .is_test = true,
     });
+
+    std.debug.print("std... ", .{});
+
+    const result = try std.ChildProcess.run(.{
+        .allocator = allocator, 
+        .argv = &.{ "zig-out/bin/nat", "test", "-main_source_file", "lib/std/std.nat", "-name", "std" },
+    });
+    const compilation_result: TestError!bool = switch (result.term) {
+        .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
+        .Signal => error.signaled,
+        .Stopped => error.stopped,
+        .Unknown => error.unknown,
+    };
+
+    const compilation_success = compilation_result catch b: {
+        break :b false;
+    };
+
+    std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+    if (result.stdout.len > 0) {
+        std.debug.print("STDOUT:\n\n{s}\n\n", .{result.stdout});
+    }
+    if (result.stderr.len > 0) {
+        std.debug.print("STDERR:\n\n{s}\n\n", .{result.stderr});
+    }
+
+    if (compilation_success) {
+        const test_run = try std.ChildProcess.run(.{
+            .allocator = allocator, 
+            // TODO: delete -main_source_file?
+            .argv = &.{ "nat/std" },
+        });
+        const test_result: TestError!bool = switch (test_run.term) {
+            .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
+            .Signal => error.signaled,
+            .Stopped => error.stopped,
+            .Unknown => error.unknown,
+        };
+
+        const test_success = test_result catch b: {
+            break :b false;
+        };
+        std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+        if (test_run.stdout.len > 0) {
+            std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
+        }
+        if (test_run.stderr.len > 0) {
+            std.debug.print("STDERR:\n\n{s}\n\n", .{test_run.stderr});
+        }
+    }
 }
