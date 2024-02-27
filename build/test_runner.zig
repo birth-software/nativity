@@ -11,7 +11,6 @@ const TestError = error{
 };
 
 fn collectDirectoryDirEntries(allocator: Allocator, path: []const u8) ![]const []const u8{
-    std.debug.print("Opening from cwd: {s}\n", .{try std.fs.cwd().realpathAlloc(allocator, ".")});
     var dir = try std.fs.cwd().openDir(path, .{
         .iterate = true,
     });
@@ -45,7 +44,7 @@ fn runStandalone(allocator: Allocator, args: struct {
     var failed_test_count: usize = 0;
     const total_test_count = test_names.len;
 
-    std.debug.print("[{s} START]\n", .{args.group_name});
+    std.debug.print("\n[{s} START]\n\n", .{args.group_name});
 
     for (test_names) |test_name| {
         std.debug.print("{s}... ", .{test_name});
@@ -290,7 +289,6 @@ fn runBuildTests(allocator: Allocator) !void {
 }
 
 pub fn main() !void {
-    std.debug.print("\n",.{});
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
     try runStandalone(allocator, .{
@@ -301,7 +299,7 @@ pub fn main() !void {
     try runBuildTests(allocator);
     try runStandalone(allocator, .{
         .directory_path = "test/tests",
-        .group_name = "TESTS",
+        .group_name = "TEST EXECUTABLE",
         .is_test = true,
     });
 }
