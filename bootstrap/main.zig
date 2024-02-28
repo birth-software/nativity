@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const equal = std.mem.eql;
 
+const data_structures = @import("data_structures.zig");
+const ArrayList = data_structures.ArrayList;
 const Compilation = @import("Compilation.zig");
 pub const panic = Compilation.panic;
 
@@ -28,20 +30,30 @@ pub fn main() !void {
     const command = arguments[1];
     const command_arguments = arguments[2..];
 
+    const context = try Compilation.createContext(allocator);
     if (equal(u8, command, "build")) {
-        const context = try Compilation.createContext(allocator);
         try Compilation.compileBuildExecutable(context, command_arguments);
     } else if (equal(u8, command, "clang") or equal(u8, command, "-cc1") or equal(u8, command, "-cc1as")) {
         // const exit_code = try clangMain(allocator, arguments);
         // std.process.exit(exit_code);
     } else if (equal(u8, command, "cc")) {
         // TODO: transform our arguments to Clang and invoke it
-        todo();
+        var args = try ArrayList([]const u8).initCapacity(allocator, command_arguments.len + 2);
+        args.appendAssumeCapacity(context.executable_absolute_path);
+        args.appendAssumeCapacity("clang");
+        for (command_arguments) |arg| {
+            args.appendAssumeCapacity(arg);
+        }
+
+        const exit_code = try clangMain(allocator, args.items);
+        std.debug.print("Clang exit code: {}\n", .{exit_code});
+        unreachable;
     } else if (equal(u8, command, "c++")) {
+        unreachable;
         // TODO: transform our arguments to Clang and invoke it
-        todo();
+        // var args = ArrayList([]const u8) {};
+        // try std.mem.concat(allocator, u8, &.{context.executable_absolute_path, "clang"});
     } else if (equal(u8, command, "exe")) {
-        const context = try Compilation.createContext(allocator);
         try Compilation.buildExecutable(context, command_arguments, .{
             .is_test = false,
         });
@@ -50,7 +62,6 @@ pub fn main() !void {
     } else if (equal(u8, command, "obj")) {
         todo();
     } else if (equal(u8, command, "test")) {
-        const context = try Compilation.createContext(allocator);
         try Compilation.buildExecutable(context, command_arguments, .{
             .is_test = true,
         });
