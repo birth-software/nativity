@@ -3,11 +3,9 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log;
 
-const equal = std.mem.eql;
-
-const data_structures = @import("../data_structures.zig");
-const ArrayList = data_structures.ArrayList;
+const data_structures = @import("../library.zig");
 const enumFromString = data_structures.enumFromString;
+const MyAllocator = data_structures.MyAllocator;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
@@ -27,11 +25,6 @@ pub const Result = struct {
     count: u32,
     line_offset: u32,
     line_count: u32,
-    // ids: ArrayList(Token.Id) = .{},
-    // token_lines: ArrayList(u32) = .{},
-    // file_line_offsets: ArrayList(u32) = .{},
-    // token_offsets: ArrayList(u32) = .{},
-    // token_lengths: ArrayList(u32) = .{},
     time: u64 = 0,
 };
 
@@ -49,7 +42,7 @@ pub const Logger = enum {
     });
 };
 
-pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buffer) !Result {
+pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.Buffer) !Result {
     assert(text.len <= std.math.maxInt(u32));
     const len: u32 = @intCast(text.len);
 
@@ -73,9 +66,9 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
     var index: u32 = 0;
     var line_index: u32 = lexer.line_offset;
 
-    try token_buffer.tokens.ensureUnusedCapacity(allocator, text.len / 4);
+    try token_buffer.ensure_with_capacity(allocator, len / 4);
 
-    logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
+    // logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
     while (index < len) {
         const start_index = index;
@@ -116,7 +109,7 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
                 const string = text[start_index..][0 .. index - start_index];
                 break :blk if (enumFromString(Compilation.FixedKeyword, string)) |fixed_keyword| switch (fixed_keyword) {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
-                } else if (equal(u8, string, "_")) .discard else .identifier;
+                } else if (data_structures.byte_equal( string, "_")) .discard else .identifier;
             },
             '0'...'9' => blk: {
                 // Detect other non-decimal literals
@@ -404,25 +397,26 @@ pub fn analyze(allocator: Allocator, text: []const u8, token_buffer: *Token.Buff
                 break :blk .operator_dollar;
             },
             else => |ch| {
-                std.debug.panic("NI: '{c}'", .{ch});
+                const ch_arr = [1]u8{ch};
+                @panic(&ch_arr);
             },
         };
 
         const end_index = index;
         const token_length = end_index - start_index;
 
-        token_buffer.tokens.appendAssumeCapacity(.{
+        token_buffer.append_with_capacity(.{
             .id = token_id,
             .offset = start_index,
             .length = token_length,
             .line = line_index,
         });
-        const line_offset = token_buffer.line_offsets.items[line_index];
-        const column = start_index - line_offset;
-        logln(.lexer, .new_token, "T at line {}, column {}, byte offset {}, with length {} -line offset: {}- ({s})", .{ line_index, column, start_index, token_length, line_offset, @tagName(token_id) });
+        // const line_offset = token_buffer.line_offsets.pointer[line_index];
+        // const column = start_index - line_offset;
+        // logln(.lexer, .new_token, "T at line {}, column {}, byte offset {}, with length {} -line offset: {}- ({s})", .{ line_index, column, start_index, token_length, line_offset, @tagName(token_id) });
     }
 
-    logln(.lexer, .end, "END LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
+    // logln(.lexer, .end, "END LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
     lexer.count = Token.sub(token_buffer.getOffset(), lexer.offset);
     lexer.line_count = token_buffer.getLineOffset() - lexer.line_offset;

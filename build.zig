@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) !void {
     compiler.formatted_panics = print_stack_trace;
     compiler.root_module.unwind_tables = print_stack_trace;
     compiler.root_module.omit_frame_pointer = false;
+    compiler.root_module.error_tracing = false;
     compiler.want_lto = false;
 
     compiler.linkLibC();
@@ -414,6 +415,23 @@ pub fn build(b: *std.Build) !void {
         debug_command.addArgs(args);
         test_command.addArgs(args);
     }
+    //
+    // const tests = b.addTest(.{
+    //     .name = "nat_test",
+    //     .root_source_file = .{ .path = "bootstrap/main.zig" },
+    //     .target = target,
+    //     .optimize = optimization,
+    // });
+    // tests.root_module.addOptions("configuration", compiler_options);
+    // tests.formatted_panics = print_stack_trace;
+    // tests.root_module.unwind_tables = print_stack_trace;
+    // tests.root_module.omit_frame_pointer = false;
+    // tests.want_lto = false;
+    //
+    //
+    // const run_tests = b.addRunArtifact(tests);
+    // b.installArtifact(tests);
+    // run_tests.step.dependOn(b.getInstallStep());
 
     const run_step = b.step("run", "Test the Nativity compiler");
     run_step.dependOn(&run_command.step);
@@ -421,4 +439,11 @@ pub fn build(b: *std.Build) !void {
     debug_step.dependOn(&debug_command.step);
     const test_step = b.step("test", "Test the Nativity compiler");
     test_step.dependOn(&test_command.step);
+
+    // const test_lib = b.step("test_lib", "Test the Nativity Zig library");
+    // test_lib.dependOn(&run_tests.step);
+
+    const test_all = b.step("test_all", "Test all");
+    // test_all.dependOn(&run_tests.step);
+    test_all.dependOn(&test_command.step);
 }

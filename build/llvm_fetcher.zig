@@ -95,7 +95,8 @@ pub fn main() !void {
     try request.wait();
 
     if (request.response.status != .ok) {
-        std.debug.panic("Status: {s} when fetching TAR {s}", .{@tagName(request.response.status), url});
+        @panic("Failure when fetching TAR");
+        //std.debug.panic("Status: {s} when fetching TAR {s}", .{@tagName(request.response.status), url});
     }
 
     var decompression = try std.compress.xz.decompress(allocator, request.reader());
