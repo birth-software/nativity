@@ -3263,6 +3263,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     try arguments.append(context.allocator, "-o");
     try arguments.append(context.allocator, destination_file_path.ptr);
 
+
     try arguments.append(context.allocator, object_file_path.ptr);
 
     switch (unit.descriptor.target.os.tag) {
