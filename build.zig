@@ -41,12 +41,18 @@ pub fn build(b: *std.Build) !void {
     //     compiler.linkSystemLibrary("msvcrt-os");
     // }
 
+    const fetcher = b.addExecutable(.{
+        .name = "llvm_fetcher",
+        .root_source_file = .{ .path = "build/fetcher.zig" },
+        .target = native_target,
+        .optimize = .Debug,
+        .single_threaded = true,
+    });
     const llvm_version = "17.0.6";
-    var fetcher_run: ?*std.Build.Step.Run = null;
+    const prefix = "nat/cache";
     const llvm_path = b.option([]const u8, "llvm_path", "LLVM prefix path") orelse blk: {
         assert(!self_hosted_ci);
         if (third_party_ci or (!target.query.isNativeOs() or !target.query.isNativeCpu())) {
-            const prefix = "nat/cache";
             var llvm_directory = try std.ArrayListUnmanaged(u8).initCapacity(b.allocator, 128);
             llvm_directory.appendSliceAssumeCapacity(prefix ++ "/");
             llvm_directory.appendSliceAssumeCapacity("llvm-");
@@ -58,30 +64,18 @@ pub fn build(b: *std.Build) !void {
             llvm_directory.appendSliceAssumeCapacity("-");
             llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.abi));
             llvm_directory.appendSliceAssumeCapacity("-");
-            llvm_directory.appendSliceAssumeCapacity(if (std.mem.eql(u8, target.result.cpu.model.name, @tagName(target.result.cpu.arch))) "baseline" else target.result.cpu.model.name);
+            const cpu = if (std.mem.eql(u8, target.result.cpu.model.name, @tagName(target.result.cpu.arch))) "baseline" else target.result.cpu.model.name;
+            llvm_directory.appendSliceAssumeCapacity(cpu);
+
+            const url = try std.mem.concat(b.allocator, u8, &.{"https://github.com/birth-software/fetch-llvm/releases/download/v", llvm_version, "/llvm-", llvm_version, "-", @tagName(target.result.cpu.arch), "-", @tagName(target.result.os.tag), "-", @tagName(target.result.abi), "-", cpu, ".tar.xz"});
 
             var dir = std.fs.cwd().openDir(llvm_directory.items, .{}) catch {
-                const llvm_fetcher = b.addExecutable(.{
-                    .name = "llvm_fetcher",
-                    .root_source_file = .{ .path = "build/llvm_fetcher.zig" },
-                    .target = native_target,
-                    .optimize = .ReleaseFast,
-                    .single_threaded = true,
-                });
-                const run = b.addRunArtifact(llvm_fetcher);
-                fetcher_run = run;
+                const run = b.addRunArtifact(fetcher);
+                compiler.step.dependOn(&run.step);
                 run.addArg("-prefix");
                 run.addArg(prefix);
-                run.addArg("-version");
-                run.addArg(llvm_version);
-                run.addArg("-arch");
-                run.addArg(@tagName(target.result.cpu.arch));
-                run.addArg("-os");
-                run.addArg(@tagName(target.result.os.tag));
-                run.addArg("-abi");
-                run.addArg(@tagName(target.result.abi));
-                run.addArg("-cpu");
-                run.addArg(target.result.cpu.model.name);
+                run.addArg("-url");
+                run.addArg(url);
                 break :blk llvm_directory.items;
             };
 
@@ -97,9 +91,24 @@ pub fn build(b: *std.Build) !void {
         }
     };
 
-    if (fetcher_run) |fr| {
-        compiler.step.dependOn(&fr.step);
+    if (os == .linux) {
+        const directory = "musl-libc-main";
+        var maybe_dir = std.fs.cwd().openDir(prefix ++ "/" ++ directory, .{});
+        _ = &maybe_dir;
+        if (maybe_dir) |*dir| {
+            dir.close();
+        } else |err| {
+            _ = &err; // autofix
+            const url = "https://github.com/birth-software/musl-libc/archive/refs/heads/main.tar.gz";
+            const run = b.addRunArtifact(fetcher);
+            compiler.step.dependOn(&run.step);
+            run.addArg("-prefix");
+            run.addArg(prefix);
+            run.addArg("-url");
+            run.addArg(url);
+        }
     }
+
 
     const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
     const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
@@ -415,7 +424,7 @@ pub fn build(b: *std.Build) !void {
         debug_command.addArgs(args);
         test_command.addArgs(args);
     }
-    //
+    
     // const tests = b.addTest(.{
     //     .name = "nat_test",
     //     .root_source_file = .{ .path = "bootstrap/main.zig" },
