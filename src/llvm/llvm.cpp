@@ -860,7 +860,7 @@ extern "C" void NativityLLVMInitializeCodeGeneration()
 
 extern "C" const Target* NativityLLVMGetTarget(const char* target_triple_ptr, size_t target_triple_len, const char** message_ptr, size_t* message_len)
 {
-    auto target_triple = StringRef(target_triple_ptr, target_triple_len);
+    auto target_triple = std::string(target_triple_ptr, target_triple_len);
     std::string error_message;
     const Target* target = TargetRegistry::lookupTarget(target_triple, error_message);
 
