@@ -91,38 +91,33 @@ pub fn build(b: *std.Build) !void {
         }
     };
 
-    if (os == .linux) {
-        const directory = "musl-libc-main";
-        var maybe_dir = std.fs.cwd().openDir(prefix ++ "/" ++ directory, .{});
-        _ = &maybe_dir;
-        if (maybe_dir) |*dir| {
-            dir.close();
-        } else |err| {
-            _ = &err; // autofix
-            const url = "https://github.com/birth-software/musl-libc/archive/refs/heads/main.tar.gz";
-            const run = b.addRunArtifact(fetcher);
-            compiler.step.dependOn(&run.step);
-            run.addArg("-prefix");
-            run.addArg(prefix);
-            run.addArg("-url");
-            run.addArg(url);
-        }
-    }
-
-
     const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
     const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
     compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
     const cpp_files = .{
         "src/llvm/llvm.cpp",
         "src/llvm/lld.cpp",
-        // "src/llvm/clang_main.cpp",
-        // "src/llvm/clang_cc1.cpp",
-        // "src/llvm/clang_cc1as.cpp",
+        "src/llvm/clang_main.cpp",
+        "src/llvm/clang_cc1.cpp",
+        "src/llvm/clang_cc1as.cpp",
+        "src/llvm/ar.cpp",
     };
     compiler.addCSourceFiles(.{
         .files = &cpp_files,
-        .flags = &.{"-g"},
+        .flags = &.{
+            "-g",
+            "-std=c++17",
+            "-D__STDC_CONSTANT_MACROS",
+            "-D__STDC_FORMAT_MACROS",
+            "-D__STDC_LIMIT_MACROS",
+            "-D_GNU_SOURCE",
+            "-fvisibility-inlines-hidden",
+            "-fno-exceptions",
+            "-fno-rtti",
+            "-Werror=type-limits",
+            "-Wno-missing-braces",
+            "-Wno-comment",
+        },
     });
 
     const zlib = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
@@ -320,48 +315,48 @@ pub fn build(b: *std.Build) !void {
         zlib,
         "libz.a",
         // Clang
-        // "libclangAnalysis.a",
-        // "libclangAnalysisFlowSensitive.a",
-        // "libclangAnalysisFlowSensitiveModels.a",
-        // "libclangAPINotes.a",
-        // "libclangARCMigrate.a",
-        // "libclangAST.a",
-        // "libclangASTMatchers.a",
-        // "libclangBasic.a",
-        // "libclangCodeGen.a",
-        // "libclangCrossTU.a",
-        // "libclangDependencyScanning.a",
-        // "libclangDirectoryWatcher.a",
-        // "libclangDriver.a",
-        // "libclangDynamicASTMatchers.a",
-        // "libclangEdit.a",
-        // "libclangExtractAPI.a",
-        // "libclangFormat.a",
-        // "libclangFrontend.a",
-        // "libclangFrontendTool.a",
-        // "libclangHandleCXX.a",
-        // "libclangHandleLLVM.a",
-        // "libclangIndex.a",
-        // "libclangIndexSerialization.a",
-        // "libclangInterpreter.a",
-        // "libclangLex.a",
-        // "libclangParse.a",
-        // "libclangRewrite.a",
-        // "libclangRewriteFrontend.a",
-        // "libclangSema.a",
-        // "libclangSerialization.a",
-        // "libclangStaticAnalyzerCheckers.a",
-        // "libclangStaticAnalyzerCore.a",
-        // "libclangStaticAnalyzerFrontend.a",
-        // "libclangSupport.a",
-        // "libclangTooling.a",
-        // "libclangToolingASTDiff.a",
-        // "libclangToolingCore.a",
-        // "libclangToolingInclusions.a",
-        // "libclangToolingInclusionsStdlib.a",
-        // "libclangToolingRefactoring.a",
-        // "libclangToolingSyntax.a",
-        // "libclangTransformer.a",
+        "libclangAnalysis.a",
+        "libclangAnalysisFlowSensitive.a",
+        "libclangAnalysisFlowSensitiveModels.a",
+        "libclangAPINotes.a",
+        "libclangARCMigrate.a",
+        "libclangAST.a",
+        "libclangASTMatchers.a",
+        "libclangBasic.a",
+        "libclangCodeGen.a",
+        "libclangCrossTU.a",
+        "libclangDependencyScanning.a",
+        "libclangDirectoryWatcher.a",
+        "libclangDriver.a",
+        "libclangDynamicASTMatchers.a",
+        "libclangEdit.a",
+        "libclangExtractAPI.a",
+        "libclangFormat.a",
+        "libclangFrontend.a",
+        "libclangFrontendTool.a",
+        "libclangHandleCXX.a",
+        "libclangHandleLLVM.a",
+        "libclangIndex.a",
+        "libclangIndexSerialization.a",
+        "libclangInterpreter.a",
+        "libclangLex.a",
+        "libclangParse.a",
+        "libclangRewrite.a",
+        "libclangRewriteFrontend.a",
+        "libclangSema.a",
+        "libclangSerialization.a",
+        "libclangStaticAnalyzerCheckers.a",
+        "libclangStaticAnalyzerCore.a",
+        "libclangStaticAnalyzerFrontend.a",
+        "libclangSupport.a",
+        "libclangTooling.a",
+        "libclangToolingASTDiff.a",
+        "libclangToolingCore.a",
+        "libclangToolingInclusions.a",
+        "libclangToolingInclusionsStdlib.a",
+        "libclangToolingRefactoring.a",
+        "libclangToolingSyntax.a",
+        "libclangTransformer.a",
     };
 
     for (llvm_libraries) |llvm_library| {
