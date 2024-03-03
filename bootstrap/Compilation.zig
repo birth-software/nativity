@@ -260,7 +260,13 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8) !void {
         const argument = span(arguments[0]);
 
         const output_object_file = "nat/main.o";
-        const exit_code = try clangMain(context.allocator, &.{ context.executable_absolute_path, "--no-default-config", "-target", "x86_64-unknown-linux-musl", "-c", argument, "-o", output_object_file});
+        const exit_code = try clangMain(context.allocator, &.{ context.executable_absolute_path, "--no-default-config", "-target", "x86_64-unknown-linux-musl", "-nostdinc", "-fno-spell-checking", 
+            "-isystem", "lib/include",
+            "-isystem", "lib/libc/include/x86_64-linux-musl",
+            "-isystem", "lib/libc/include/generic-musl",
+            "-isystem", "lib/libc/include/x86-linux-any",
+            "-isystem", "lib/libc/include/any-linux-any",
+            "-c", argument, "-o", output_object_file});
         if (exit_code != 0) {
             unreachable;
         }
