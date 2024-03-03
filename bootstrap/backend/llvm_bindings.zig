@@ -141,4 +141,7 @@ pub extern fn NativityLLVMTargetCreateTargetMachine(target: *LLVM.Target, target
 pub extern fn NativityLLVMModuleSetTargetMachineDataLayout(module: *LLVM.Module, target_machine: *LLVM.Target.Machine) void;
 pub extern fn NativityLLVMModuleSetTargetTriple(module: *LLVM.Module, target_triple_ptr: [*]const u8, target_triple_len: usize) void;
 pub extern fn NativityLLVMModuleAddPassesToEmitFile(module: *LLVM.Module, target_machine: *LLVM.Target.Machine, object_file_path_ptr: [*]const u8, object_file_path_len: usize, codegen_file_type: LLVM.CodeGenFileType, disable_verify: bool) bool;
-pub extern fn NativityLLDLink(format: llvm.Format, argument_ptr: [*]const [*:0]const u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+pub extern fn NativityLLDLinkELF(argument_ptr: [*]const [*:0]const u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+pub extern fn NativityLLDLinkCOFF(argument_ptr: [*]const [*:0]const u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+pub extern fn NativityLLDLinkMachO(argument_ptr: [*]const [*:0]const u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+pub extern fn NativityLLDLinkWasm(argument_ptr: [*]const [*:0]const u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;

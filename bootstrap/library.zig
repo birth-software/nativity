@@ -204,6 +204,12 @@ pub fn byte_equal(a: []const u8, b: []const u8) bool {
     return true;
 }
 
+pub fn byte_equal_terminated(a: [*:0]const u8, b: [*:0]const u8) bool {
+    const a_slice = span(a);
+    const b_slice = span(b);
+    return byte_equal(a_slice, b_slice);
+}
+
 const MapResult = struct{
     key_pointer: *anyopaque,
     value_pointer: *anyopaque,

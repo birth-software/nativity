@@ -9,7 +9,7 @@ const data_structures = @import("../library.zig");
 const MyHashMap = data_structures.MyHashMap;
 const UnpinnedArray = data_structures.UnpinnedArray;
 
-const bindings = @import("llvm_bindings.zig");
+pub const bindings = @import("llvm_bindings.zig");
 
 pub const Logger = enum {
     print_module,
@@ -3245,7 +3245,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     const target_triple = switch (unit.descriptor.os) {
         .linux => "x86_64-linux-none",
         .macos => "aarch64-apple-macosx-none",
-        else => |t| @panic(@tagName(t)),
     };
     const cpu = "generic";
     const features = "";
@@ -3286,10 +3285,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     }
 
     const format: Format = switch (unit.descriptor.os) {
-        .windows => .coff,
+        // .windows => .coff,
         .macos => .macho,
         .linux => .elf,
-        else => unreachable,
+        // else => unreachable,
     };
 
     const driver_program = switch (format) {
@@ -3347,8 +3346,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             //     try arguments.append_slice(context.allocator, &.{ "-lc" });
             // }
         },
-        .windows => {},
-        else => |t| @panic(@tagName(t)),
+        // .windows => {},
+        // else => |t| @panic(@tagName(t)),
     }
 
     var stdout_ptr: [*]const u8 = undefined;
@@ -3356,7 +3355,11 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     var stderr_ptr: [*]const u8 = undefined;
     var stderr_len: usize = 0;
 
-    const linking_result = bindings.NativityLLDLink(format, arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len);
+    const linking_result = switch (format) {
+        .elf => bindings.NativityLLDLinkELF(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        .coff => bindings.NativityLLDLinkCOFF(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        .macho => bindings.NativityLLDLinkMachO(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+    };
 
     if (stdout_len > 0) {
         // std.debug.print("{s}\n", .{stdout_ptr[0..stdout_len]});

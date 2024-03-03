@@ -30,7 +30,9 @@ pub export fn main(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]
         return 0;
     } else |err| {
         const error_name: []const u8 = @errorName(err);
-        _ = error_name; // autofix
+        std.io.getStdOut().writeAll("Error: ") catch {};
+        std.io.getStdOut().writeAll(error_name) catch {};
+        std.io.getStdOut().writeAll("\n") catch {};
         return 1;
     }
 }
@@ -59,7 +61,7 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
         // std.process.exit(exit_code);
     } else if (byte_equal(command, "cc")) {
         // TODO: transform our arguments to Clang and invoke it
-        todo();
+        try Compilation.compileCSourceFile(context, command_arguments);
     } else if (byte_equal(command, "c++")) {
         // TODO: transform our arguments to Clang and invoke it
         todo();
@@ -80,17 +82,3 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
     }
 }
 
-fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
-    var argv = try alloc.allocSentinel(?[*:0]u8, args.len, null);
-    for (args, 0..) |arg, i| {
-        argv[i] = try alloc.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
-    }
-    return argv;
-}
-
-extern "c" fn NativityClangMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-fn clangMain(allocator: Allocator, arguments: []const []const u8) !u8 {
-    const argv = try argsCopyZ(allocator, arguments);
-    const exit_code = NativityClangMain(@as(c_int, @intCast(arguments.len)), argv.ptr);
-    return @as(u8, @bitCast(@as(i8, @truncate(exit_code))));
-}
