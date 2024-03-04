@@ -380,6 +380,12 @@ extern "C" Constant* NativityLLVMConstantStruct(StructType* struct_type, Constan
     return constant_struct;
 }
 
+extern "C" ConstantInt* NativityLLVMConstantToInt(Constant* constant)
+{
+    auto* constant_int = dyn_cast<ConstantInt>(constant);
+    return constant_int;
+}
+
 extern "C" StoreInst* NativityLLVMBuilderCreateStore(IRBuilder<>& builder, Value* value, Value* pointer, bool is_volatile)
 {
     auto* store = builder.CreateStore(value, pointer, is_volatile);
@@ -571,6 +577,18 @@ extern "C" BranchInst* NativityLLVMBuilderCreateConditionalBranch(IRBuilder<>& b
 {
     auto* conditional_branch = builder.CreateCondBr(condition, true_block, false_block, branch_weights, unpredictable);
     return conditional_branch;
+}
+
+extern "C" SwitchInst* NativityLLVMBuilderCreateSwitch(IRBuilder<> builder, Value* condition, BasicBlock* default_block, ConstantInt** case_ptr, BasicBlock** case_block_ptr, unsigned case_count, MDNode* branch_weights, MDNode* unpredictable)
+{
+    auto switch_instruction = builder.CreateSwitch(condition, default_block, case_count, branch_weights, unpredictable);
+    for (unsigned i = 0; i < case_count; i += 1) {
+        ConstantInt* switch_case = case_ptr[i];
+        BasicBlock* case_block = case_block_ptr[i];
+        switch_instruction->addCase(switch_case, case_block);
+    }
+
+    return switch_instruction;
 }
 
 extern "C" Intrinsic::ID NativityLLVMLookupIntrinsic(const char* name_ptr, size_t name_len)

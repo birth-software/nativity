@@ -1,0 +1,5 @@
+const std = #import("std");
+const build = std.build;
+
+const main = fn() *!void {
+}

@@ -11,6 +11,7 @@ const BlockList = data_structures.BlockList;
 const MyAllocator = data_structures.MyAllocator;
 const MyHashMap = data_structures.MyHashMap;
 const span = data_structures.span;
+const format_int = data_structures.format_int;
 
 const lexer = @import("frontend/lexer.zig");
 const parser = @import("frontend/parser.zig");
@@ -29,7 +30,7 @@ fn todo() noreturn {
 }
 
 fn reportUnterminatedArgumentError(string: []const u8) noreturn {
-    std.io.getStdOut().writeAll("Unterminated argument: ") catch {};
+    write(.panic, "Unterminated argument: ") catch {};
     @panic(string);
 }
 
@@ -146,7 +147,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8) !void {
                 const target = try context.allocator.dupe(u8, basename);
                 target[target.len - 1] = 'o';
                 const hash = data_structures.my_hash(src_file);
-                const hash_string = data_structures.format_int(&buffer, hash, 16, false);
+                const hash_string = format_int(&buffer, hash, 16, false);
                 const target_path = try std.mem.concat(context.allocator, u8, &.{out_dir, hash_string, target});
                 const args: []const []const u8 = &.{ context.executable_absolute_path, "--no-default-config", "-fno-caret-diagnostics", "-target", "x86_64-unknown-linux-musl",  "-std=c99", "-ffreestanding", "-mred-zone", "-fno-omit-frame-pointer", "-fno-stack-protector", "-O2", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-ffunction-sections", "-fdata-sections", "-gdwarf-4", "-gdwarf32", "-Wa,--noexecstack", "-D_XOPEN_SOURCE=700",
                     "-I", arch_include_path,
@@ -171,7 +172,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8) !void {
                 const target = try context.allocator.dupe(u8, basename);
                 target[target.len - 1] = 'o';
                 const hash = data_structures.my_hash(src_file);
-                const hash_string = data_structures.format_int(&buffer, hash, 16, false);
+                const hash_string = format_int(&buffer, hash, 16, false);
                 const target_path = try std.mem.concat(context.allocator, u8, &.{out_dir, hash_string, target});
                 const args: []const []const u8 = &.{ context.executable_absolute_path, "--no-default-config", "-fno-caret-diagnostics", "-target", "x86_64-unknown-linux-musl",  "-std=c99", "-ffreestanding", "-mred-zone", "-fno-omit-frame-pointer", "-fno-stack-protector", "-O2", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-ffunction-sections", "-fdata-sections", "-gdwarf-4", "-gdwarf32", "-Wa,--noexecstack", "-D_XOPEN_SOURCE=700",
                     "-I", arch_include_path,
@@ -2389,11 +2390,6 @@ fn getLoggerScopeType(comptime logger_scope: LoggerScope) type {
 
 var logger_bitset = std.EnumSet(LoggerScope).initEmpty();
 
-// fn getWriter() !std.fs.File.Writer {
-//     const stdout = std.io.getStdOut();
-//     return stdout.writer();
-// }
-
 // fn shouldLog(comptime logger_scope: LoggerScope, logger: getLoggerScopeType(logger_scope).Logger) bool {
 //     return logger_bitset.contains(logger_scope) and getLoggerScopeType(logger_scope).Logger.bitset.contains(logger);
 // }
@@ -2417,10 +2413,9 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {
-            // const writer = try getWriter();
-            // writer.writeAll("\nPANIC: ") catch {};
-            // writer.writeAll(message) catch {};
-            // writer.writeByte('\n') catch {};
+            write(.panic, "\nPANIC: ") catch {};
+            write(.panic, message) catch {};
+            write(.panic, "\n") catch {};
             @breakpoint();
             std.os.abort();
         },
@@ -2472,7 +2467,20 @@ fn getTypeBitSize(ty: *Type, unit: *Unit) u32 {
             break :b getTypeBitSize(backing_type, unit);
         },
         .slice => 2 * @bitSizeOf(usize),
-        .void => 0,
+        .void, .noreturn => 0,
+        .@"error" => |error_index| b: {
+            const err = unit.errors.get(error_index);
+            const t = unit.types.get(err.backing_type);
+            break :b getTypeBitSize(t, unit);
+        },
+        .error_union => |error_union_index| {
+            const error_union = unit.error_unions.get(error_union_index);
+            const e = unit.types.get(error_union.@"error");
+            const t = unit.types.get(error_union.type);
+            const t_bitsize = t.getBitSize(unit);
+            const e_bitsize = e.getBitSize(unit);
+            return @max(t_bitsize, e_bitsize) + 1;
+        },
         else => |t| @panic(@tagName(t)),
     };
 }
@@ -2492,7 +2500,7 @@ pub const Type = union(enum) {
     array: Type.Array,
     @"union": Type.Union.Index,
     @"error": Type.Error.Index,
-    error_union: Type.Error.Union,
+    error_union: Type.Error.Union.Index,
     error_set: Type.Error.Set.Index,
 
     pub fn getBitSize(ty: *Type, unit: *Unit) u32 {
@@ -2553,8 +2561,15 @@ pub const Type = union(enum) {
         const Union = struct {
             @"error": Type.Index,
             type: Type.Index,
+            alternate_type: Type.Index,
+            alternate_index: bool,
             pub const List = BlockList(@This(), enum {});
             pub usingnamespace @This().List.Index;
+
+            const Descriptor = struct{
+                @"error": Type.Index,
+                type: Type.Index,
+            };
         };
     };
 
@@ -2729,13 +2744,33 @@ pub const Instruction = union(enum) {
     stack_slot: Instruction.StackSlot,
     store: Store,
     syscall: Syscall,
+    @"switch": Switch,
     trap,
     @"unreachable",
+
+    const Switch = struct{
+        condition: V,
+        cases: UnpinnedArray(Case) = .{},
+        else_block: BasicBlock.Index = .null,
+        block_type: Type.Index,
+
+        const Case = struct{
+            condition: V.Comptime,
+            basic_block: BasicBlock.Index,
+        };
+    };
 
     const Phi = struct {
         values: UnpinnedArray(V) = .{},
         basic_blocks: UnpinnedArray(BasicBlock.Index) = .{},
         type: Type.Index,
+
+        pub fn addIncoming(phi: *Phi, context: *const Context, value: V, basic_block: BasicBlock.Index) !void {
+            assert(phi.type == value.type);
+            assert(basic_block != .null);
+            try phi.values.append(context.my_allocator, value);
+            try phi.basic_blocks.append(context.my_allocator, basic_block);
+        }
     };
 
     const Min = struct {
@@ -2860,6 +2895,9 @@ pub const Instruction = union(enum) {
             slice_coerce_to_zero_termination,
             truncate,
             pointer_to_array_to_pointer_to_many,
+            error_union_type_int_to_pointer,
+            error_union_type_upcast,
+            error_union_type_downcast,
         };
     };
 
@@ -2896,7 +2934,7 @@ pub const Instruction = union(enum) {
 
 pub const BasicBlock = struct {
     instructions: UnpinnedArray(Instruction.Index) = .{},
-    predecessor: BasicBlock.Index = .null,
+    predecessors: UnpinnedArray(BasicBlock.Index) = .{},
     // TODO: not use a bool
     terminated: bool = false,
 
@@ -2948,6 +2986,7 @@ pub const Struct = struct {
     backing_type: Type.Index,
     type: Type.Index,
     optional: bool,
+    error_union_alternative: bool,
 
     pub const Field = struct {
         name: u32,
@@ -3010,6 +3049,7 @@ pub const V = struct {
         constant_slice: ConstantSlice.Index,
         string_literal: u32,
         null_pointer,
+        @"unreachable",
 
         pub const ConstantSlice = struct {
             array: *Debug.Declaration.Global,
@@ -3265,6 +3305,99 @@ pub const Builder = struct {
     generate_debug_info: bool,
     emit_ir: bool,
 
+    fn getErrorUnionType(builder: *Builder, unit: *Unit, context: *const Context, error_union: Type.Error.Union.Descriptor) !Type.Index{
+        if (unit.error_union_map.get(error_union)) |type_index| {
+            return type_index;
+        } else {
+            const t = unit.types.get(error_union.type);
+            const e = unit.types.get(error_union.@"error");
+            const t_bitsize = t.getBitSize(unit);
+            const e_bitsize = e.getBitSize(unit);
+            const error_type = unit.errors.get(e.@"error");
+
+            if ((t_bitsize == e_bitsize and (error_union.type == error_type.backing_type or t.* == .integer)) or t_bitsize == 0) {
+                const error_union_index = try unit.error_unions.append(context.my_allocator, .{
+                    .type = error_union.type,
+                    .@"error" = error_union.@"error",
+                    .alternate_type = .null,
+                    .alternate_index = false,
+                });
+                const error_union_type = try unit.types.append(context.my_allocator, .{
+                    .error_union = error_union_index,
+                });
+
+                try unit.error_union_map.put_no_clobber(context.my_allocator, error_union, error_union_type);
+
+                return error_union_type;
+            } else if (t_bitsize >= e_bitsize) {
+                const struct_type_index = try unit.structs.append(context.my_allocator, .{
+                    .scope = .{
+                        .scope = .{
+                            .file = .null,
+                            .line = 0,
+                            .column = 0,
+                            .kind = .container,
+                            .local = false,
+                            .level = builder.current_scope.level + 1,
+                        },
+                    },
+                    .backing_type = .null,
+                    .type = .null,
+                    .optional = false,
+                    .error_union_alternative = true,
+                });
+                const struct_type = unit.structs.get(struct_type_index);
+                const size_diff = t_bitsize - e_bitsize;
+                try struct_type.fields.ensure_capacity(context.my_allocator, @as(u32, 2) + @intFromBool(size_diff > 0));
+                const error_field = try unit.struct_fields.append(context.my_allocator, .{
+                    .name = try unit.processIdentifier(context, "error"),
+                    .type = error_union.@"error",
+                    .default_value = null,
+                });
+                struct_type.fields.append_with_capacity(error_field);
+                if (size_diff > 0) {
+                    const padding_field = try unit.struct_fields.append(context.my_allocator, .{
+                        .name = try unit.processIdentifier(context, "padding"),
+                        .type = try unit.getIntegerType(context, .{
+                            .bit_count = @intCast(size_diff),
+                            .signedness = .unsigned,
+                        }),
+                        .default_value = .{
+                            .constant_int = .{
+                                .value = 0,
+                            },
+                        },
+                    });
+                    struct_type.fields.append_with_capacity(padding_field);
+                }
+                const bool_field = try unit.struct_fields.append(context.my_allocator, .{
+                    .name = try unit.processIdentifier(context, "is_error"),
+                    .type = .bool,
+                    .default_value = null,
+                });
+                struct_type.fields.append_with_capacity(bool_field);
+                const alternate_type_index = try unit.types.append(context.my_allocator, .{
+                    .@"struct" = struct_type_index,
+                });
+                const error_union_index = try unit.error_unions.append(context.my_allocator, .{
+                    .type = error_union.type,
+                    .@"error" = error_union.@"error",
+                    .alternate_type = alternate_type_index,
+                    .alternate_index = true,
+                });
+                const error_union_type = try unit.types.append(context.my_allocator, .{
+                    .error_union = error_union_index,
+                });
+
+                try unit.error_union_map.put_no_clobber(context.my_allocator, error_union, error_union_type);
+
+                return error_union_type;
+            } else {
+                unreachable;
+            }
+        }
+    }
+
     fn processArrayLiteral(builder: *Builder, unit: *Unit, context: *const Context, constant_array_index: V.Comptime.ConstantArray.Index, token: Token.Index) !*Debug.Declaration.Global {
         if (unit.global_array_constants.get(constant_array_index)) |global| {
             return global;
@@ -3311,7 +3444,7 @@ pub const Builder = struct {
     fn join_name(context: *const Context, name: []const u8, number: usize, base: u8) ![:0]const u8 {
         const len = 65;
         var buffer: [len + 1]u8 = undefined;
-        const slice = data_structures.format_int(buffer[0..len], number, base, false);
+        const slice = format_int(buffer[0..len], number, base, false);
         const ptr = slice.ptr - name.len;
         const new_slice = ptr[0..slice.len + name.len];
         @memcpy(new_slice[0..name.len], name);
@@ -3396,17 +3529,21 @@ pub const Builder = struct {
             .@"asm" => {
                 const architecture = InlineAssembly.x86_64;
 
-                var instructions = try UnpinnedArray(InlineAssembly.Instruction.Index).initialize_with_capacity(context.my_allocator, @intCast(argument_node_list.len));
+                assert(argument_node_list.len == 1);
+                const assembly_block_node = unit.getNode(argument_node_list[0]);
+                const instruction_node_list = unit.getNodeList(assembly_block_node.left);
+                var instructions = try UnpinnedArray(InlineAssembly.Instruction.Index).initialize_with_capacity(context.my_allocator, @intCast(instruction_node_list.len));
 
-                for (argument_node_list) |assembly_statement_node_index| {
-                    const assembly_statement_node = unit.getNode(assembly_statement_node_index);
-                    const instruction_name = unit.getExpectedTokenBytes(assembly_statement_node.token, .identifier);
+                for (instruction_node_list) |assembly_statement_node_index| {
+                    const assembly_instruction_node = unit.getNode(assembly_statement_node_index);
+                    const assembly_instruction_name_node = unit.getNode(assembly_instruction_node.left);
+                    const instruction_name = unit.getExpectedTokenBytes(assembly_instruction_name_node.token, .identifier);
                     const instruction = inline for (@typeInfo(architecture.Instruction).Enum.fields) |instruction_enum_field| {
                         if (byte_equal(instruction_name, instruction_enum_field.name)) {
                             break @field(architecture.Instruction, instruction_enum_field.name);
                         }
                     } else unreachable;
-                    const operand_nodes = unit.getNodeList(assembly_statement_node.left);
+                    const operand_nodes = unit.getNodeList(assembly_instruction_node.right);
 
                     var operands = try UnpinnedArray(InlineAssembly.Operand).initialize_with_capacity(context.my_allocator, @intCast(operand_nodes.len));
 
@@ -3431,13 +3568,16 @@ pub const Builder = struct {
                                 },
                                 else => |t| @panic(@tagName(t)),
                             },
-                            .identifier => b: {
-                                const identifier = unit.getExpectedTokenBytes(operand_node.token, .identifier);
-                                const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, identifier, .left);
-
-                                break :b .{
-                                    .value = result,
-                                };
+                            // .identifier => b: {
+                            //     const identifier = unit.getExpectedTokenBytes(operand_node.token, .identifier);
+                            //     const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, identifier, .left);
+                            //
+                            //     break :b .{
+                            //         .value = result,
+                            //     };
+                            // },
+                            .assembly_code_expression => .{
+                                .value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, operand_node.left, .left),
                             },
                             else => |t| @panic(@tagName(t)),
                         };
@@ -3476,142 +3616,92 @@ pub const Builder = struct {
                 // TODO: depends? .right is not always the right choice
                 const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_index, .right);
 
-                const source_type = unit.types.get(v.type);
-                //
                 const cast_id: Instruction.Cast.Id = switch (type_expect) {
-                    .type => |type_index| b: {
-                        assert(type_index != v.type);
-                        const destination_type = unit.types.get(type_index);
-                        switch (destination_type.*) {
-                            .pointer => |destination_pointer| {
-                                switch (source_type.*) {
-                                    .integer => |source_integer| {
-                                        _ = source_integer; // autofix
-                                        // TODO:
-                                        break :b .int_to_pointer;
+                    .type => |type_index| {
+                        const cast_id = try builder.resolveCast(unit, context, type_index, v);
+                        switch (cast_id) {
+                            .error_union_type_int_to_pointer => {
+                                const error_union = unit.error_unions.get(unit.types.get(type_index).error_union);
+                                const cast = try unit.instructions.append(context.my_allocator, .{
+                                    .cast = .{
+                                        .id = .int_to_pointer,
+                                        .value = v,
+                                        .type = error_union.type,
                                     },
-                                    .pointer => |source_pointer| {
-                                        if (destination_pointer.type == source_pointer.type) {
-                                            if (destination_pointer.mutability == source_pointer.mutability) {
-                                                if (destination_pointer.nullable != source_pointer.nullable) {
-                                                    // std.debug.print("Dst: {} Src: {}\n", .{ destination_pointer.nullable, source_pointer.nullable });
-                                                    if (destination_pointer.nullable) {
-                                                        assert(destination_pointer.termination != source_pointer.termination);
-                                                        unreachable;
-                                                    } else {
-                                                        unreachable;
-                                                    }
-                                                }
-                                                if (destination_pointer.termination != source_pointer.termination) {
-                                                    unreachable;
-                                                }
-                                                unreachable;
-                                            } else {
-                                                break :b .pointer_const_to_var;
-                                            }
-                                        } else {
-                                            unreachable;
-                                        }
-                                    },
-                                    else => |t| @panic(@tagName(t)),
-                                }
-                            },
-                            .integer => |destination_integer| {
-                                switch (source_type.*) {
-                                    .@"enum" => |enum_index| {
-                                        const enum_type = unit.enums.get(enum_index);
-                                        if (enum_type.backing_type == type_index) {
-                                            break :b .enum_to_int;
-                                        } else {
-                                            const source_integer = unit.types.get(enum_type.backing_type).integer;
-                                            if (destination_integer.bit_count < source_integer.bit_count) {
-                                                unreachable;
-                                            } else if (destination_integer.bit_count > source_integer.bit_count) {
-                                                assert(destination_integer.signedness != source_integer.signedness);
-                                                break :b switch (destination_integer.signedness) {
-                                                    .signed => .sign_extend,
-                                                    .unsigned => .zero_extend,
-                                                };
-                                            } else {
-                                                assert(destination_integer.signedness != source_integer.signedness);
-                                                break :b .bitcast;
-                                            }
-                                        }
-                                    },
-                                    .integer => |source_integer| {
-                                        if (destination_integer.bit_count < source_integer.bit_count) {
-                                            assert(destination_integer.signedness == source_integer.signedness);
-                                            break :b .truncate;
-                                        } else if (destination_integer.bit_count > source_integer.bit_count) {
-                                            assert(destination_integer.signedness != source_integer.signedness);
-                                            break :b switch (destination_integer.signedness) {
-                                                .signed => .sign_extend,
-                                                .unsigned => .zero_extend,
-                                            };
-                                        } else {
-                                            assert(destination_integer.signedness != source_integer.signedness);
-                                            break :b .bitcast;
-                                        }
-                                    },
-                                    .pointer => {
-                                        if (destination_integer.signedness == .signed) {
-                                            unreachable;
-                                        }
-                                        if (destination_integer.bit_count < 64) {
-                                            unreachable;
-                                        }
+                                });
+                                try builder.appendInstruction(unit, context, cast);
 
-                                        break :b .pointer_to_int;
+                                const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                                    .insert_value = .{
+                                        .expression = .{
+                                            .value = .{
+                                                .@"comptime" = .undefined,
+                                            },
+                                            .type = type_index,
+                                        },
+                                        .index = 0,
+                                        .new_value = .{
+                                            .value = .{
+                                                .runtime = cast,
+                                            },
+                                            .type = error_union.type,
+                                        },
                                     },
-                                    .@"struct" => |struct_index| {
-                                        const struct_type = unit.structs.get(struct_index);
-                                        if (struct_type.backing_type != .null) {
-                                            if (struct_type.backing_type == type_index) {
-                                                break :b .bitcast;
-                                            } else {
-                                                unreachable;
-                                            }
-                                        } else {
-                                            unreachable;
-                                        }
+                                });
+                                try builder.appendInstruction(unit, context, error_union_builder);
+
+                                const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                                    .insert_value = .{
+                                        .expression = .{
+                                            .value = .{
+                                                .runtime = error_union_builder,
+                                            },
+                                            .type = type_index,
+                                        },
+                                        .index = 1,
+                                        .new_value = .{
+                                            .value = .{
+                                                .@"comptime" = .{
+                                                    .bool = false,
+                                                },
+                                            },
+                                            .type = .bool,
+                                        },
                                     },
-                                    else => |t| @panic(@tagName(t)),
-                                }
+                                });
+                                try builder.appendInstruction(unit, context, final_error_union);
+
+                                return .{
+                                    .value = .{
+                                        .runtime = final_error_union,
+                                    },
+                                    .type = type_expect.type,
+                                };
                             },
-                            .@"struct" => |struct_index| {
-                                const struct_type = unit.structs.get(struct_index);
-                                if (struct_type.optional) {
-                                    assert(struct_type.backing_type == .null);
-                                    unreachable;
-                                } else {
-                                    switch (struct_type.backing_type) {
-                                        .null => unreachable,
-                                        else => unreachable,
-                                    }
-                                }
+                            else => {
+                                const instruction = try unit.instructions.append(context.my_allocator, .{
+                                    .cast = .{
+                                        .value = v,
+                                        .type = type_expect.type,
+                                        .id = cast_id,
+                                    },
+                                });
+
+                                try builder.appendInstruction(unit, context, instruction);
+
+                                return .{
+                                    .value = .{
+                                        .runtime = instruction,
+                                    },
+                                    .type = type_expect.type,
+                                };
                             },
-                            else => |t| @panic(@tagName(t)),
                         }
                     },
                     else => |t| @panic(@tagName(t)),
                 };
+                _ = cast_id; // autofix
 
-                const instruction = try unit.instructions.append(context.my_allocator, .{
-                    .cast = .{
-                        .value = v,
-                        .type = type_expect.type,
-                        .id = cast_id,
-                    },
-                });
-
-                try builder.appendInstruction(unit, context, instruction);
-
-                return .{
-                    .value = .{
-                        .runtime = instruction,
-                    },
-                    .type = type_expect.type,
-                };
             },
             .size => {
                 assert(argument_node_list.len == 1);
@@ -3730,77 +3820,241 @@ pub const Builder = struct {
                     else => |t| @panic(@tagName(t)),
                 }
             },
-            .add_overflow => {
-                assert(argument_node_list.len == 2);
-                const left = try builder.resolveRuntimeValue(unit, context, type_expect, argument_node_list[0], .right);
-                const right_type_expect = switch (type_expect) {
-                    .none => Type.Expect{ .type = left.type },
-                    else => type_expect,
-                };
-                const right = try builder.resolveRuntimeValue(unit, context, right_type_expect, argument_node_list[1], .right);
+            // .add_overflow => {
+            //     assert(argument_node_list.len == 2);
+            //     const left = try builder.resolveRuntimeValue(unit, context, type_expect, argument_node_list[0], .right);
+            //     const right_type_expect = switch (type_expect) {
+            //         .none => Type.Expect{ .type = left.type },
+            //         else => type_expect,
+            //     };
+            //     const right = try builder.resolveRuntimeValue(unit, context, right_type_expect, argument_node_list[1], .right);
+            //
+            //     const add_overflow = try unit.instructions.append(context.my_allocator, .{
+            //         .add_overflow = .{
+            //             .left = left,
+            //             .right = right,
+            //             .type = left.type,
+            //         },
+            //     });
+            //     try builder.appendInstruction(unit, context, add_overflow);
+            //
+            //     const result_type = try unit.getOptionalType(context, left.type);
+            //
+            //     const extract_value = try unit.instructions.append(context.my_allocator, .{
+            //         .extract_value = .{
+            //             .expression = .{
+            //                 .value = .{
+            //                     .runtime = add_overflow,
+            //                 },
+            //                 .type = result_type,
+            //             },
+            //             .index = 1,
+            //         },
+            //     });
+            //     try builder.appendInstruction(unit, context, extract_value);
+            //
+            //     const carry = try builder.newBasicBlock(unit, context);
+            //     const normal = try builder.newBasicBlock(unit, context);
+            //
+            //     try builder.branch(unit, context, extract_value, carry, normal);
+            //     builder.current_basic_block = carry;
+            //
+            //     try builder.buildRet(unit, context, .{
+            //         .value = .{
+            //             .@"comptime" = .{
+            //                 .constant_int = .{
+            //                     .value = 1,
+            //                 },
+            //             },
+            //         },
+            //         .type = left.type,
+            //     });
+            //
+            //     builder.current_basic_block = normal;
+            //
+            //     const result_extract_value = try unit.instructions.append(context.my_allocator, .{
+            //         .extract_value = .{
+            //             .expression = .{
+            //                 .value = .{
+            //                     .runtime = add_overflow,
+            //                 },
+            //                 .type = result_type,
+            //             },
+            //             .index = 0,
+            //         },
+            //     });
+            //     try builder.appendInstruction(unit, context, result_extract_value);
+            //
+            //     return V{
+            //         .value = .{
+            //             .runtime = result_extract_value,
+            //         },
+            //         .type = left.type,
+            //     };
+            // },
+            else => |t| @panic(@tagName(t)),
+        }
+    }
 
-                const add_overflow = try unit.instructions.append(context.my_allocator, .{
-                    .add_overflow = .{
-                        .left = left,
-                        .right = right,
-                        .type = left.type,
+    fn resolveCast(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index, value: V) !Instruction.Cast.Id {
+        assert(type_index != value.type);
+        const source_type = unit.types.get(value.type);
+        const destination_type = unit.types.get(type_index);
+
+        switch (destination_type.*) {
+            .pointer => |destination_pointer| {
+                switch (source_type.*) {
+                    .integer => |source_integer| {
+                        _ = source_integer; // autofix
+                                            // TODO:
+                        return .int_to_pointer;
                     },
-                });
-                try builder.appendInstruction(unit, context, add_overflow);
-
-                const result_type = try unit.getOptionalType(context, left.type);
-
-                const extract_value = try unit.instructions.append(context.my_allocator, .{
-                    .extract_value = .{
-                        .expression = .{
-                            .value = .{
-                                .runtime = add_overflow,
-                            },
-                            .type = result_type,
-                        },
-                        .index = 1,
+                    .pointer => |source_pointer| {
+                        if (destination_pointer.type == source_pointer.type) {
+                            if (destination_pointer.mutability == source_pointer.mutability) {
+                                if (destination_pointer.nullable != source_pointer.nullable) {
+                                    // std.debug.print("Dst: {} Src: {}\n", .{ destination_pointer.nullable, source_pointer.nullable });
+                                    if (destination_pointer.nullable) {
+                                        assert(destination_pointer.termination != source_pointer.termination);
+                                        unreachable;
+                                    } else {
+                                        unreachable;
+                                    }
+                                }
+                                if (destination_pointer.termination != source_pointer.termination) {
+                                    unreachable;
+                                }
+                                unreachable;
+                            } else {
+                                return .pointer_const_to_var;
+                            }
+                        } else {
+                            unreachable;
+                        }
                     },
-                });
-                try builder.appendInstruction(unit, context, extract_value);
-
-                const carry = try builder.newBasicBlock(unit, context);
-                const normal = try builder.newBasicBlock(unit, context);
-
-                try builder.branch(unit, context, extract_value, carry, normal);
-                builder.current_basic_block = carry;
-
-                try builder.buildRet(unit, context, .{
-                    .value = .{
-                        .@"comptime" = .{
-                            .constant_int = .{
-                                .value = 1,
-                            },
-                        },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            .integer => |destination_integer| {
+                switch (source_type.*) {
+                    .@"enum" => |enum_index| {
+                        const enum_type = unit.enums.get(enum_index);
+                        if (enum_type.backing_type == type_index) {
+                            return .enum_to_int;
+                        } else {
+                            const source_integer = unit.types.get(enum_type.backing_type).integer;
+                            if (destination_integer.bit_count < source_integer.bit_count) {
+                                unreachable;
+                            } else if (destination_integer.bit_count > source_integer.bit_count) {
+                                assert(destination_integer.signedness != source_integer.signedness);
+                                return switch (destination_integer.signedness) {
+                                    .signed => .sign_extend,
+                                    .unsigned => .zero_extend,
+                                };
+                            } else {
+                                assert(destination_integer.signedness != source_integer.signedness);
+                                return .bitcast;
+                            }
+                        }
                     },
-                    .type = left.type,
-                });
-
-                builder.current_basic_block = normal;
-
-                const result_extract_value = try unit.instructions.append(context.my_allocator, .{
-                    .extract_value = .{
-                        .expression = .{
-                            .value = .{
-                                .runtime = add_overflow,
-                            },
-                            .type = result_type,
-                        },
-                        .index = 0,
+                    .integer => |source_integer| {
+                        if (destination_integer.bit_count < source_integer.bit_count) {
+                            assert(destination_integer.signedness == source_integer.signedness);
+                            return .truncate;
+                        } else if (destination_integer.bit_count > source_integer.bit_count) {
+                            assert(destination_integer.signedness != source_integer.signedness);
+                            return switch (destination_integer.signedness) {
+                                .signed => .sign_extend,
+                                .unsigned => .zero_extend,
+                            };
+                        } else {
+                            assert(destination_integer.signedness != source_integer.signedness);
+                            return .bitcast;
+                        }
                     },
-                });
-                try builder.appendInstruction(unit, context, result_extract_value);
+                    .pointer => {
+                        if (destination_integer.signedness == .signed) {
+                            unreachable;
+                        }
+                        if (destination_integer.bit_count < 64) {
+                            unreachable;
+                        }
 
-                return V{
-                    .value = .{
-                        .runtime = result_extract_value,
+                        return .pointer_to_int;
                     },
-                    .type = left.type,
-                };
+                    .@"struct" => |struct_index| {
+                        const struct_type = unit.structs.get(struct_index);
+                        if (struct_type.backing_type != .null) {
+                            if (struct_type.backing_type == type_index) {
+                                return .bitcast;
+                            } else {
+                                unreachable;
+                            }
+                        } else {
+                            unreachable;
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            .@"struct" => |struct_index| {
+                const struct_type = unit.structs.get(struct_index);
+                if (struct_type.optional) {
+                    assert(struct_type.backing_type == .null);
+                    unreachable;
+                } else {
+                    switch (struct_type.backing_type) {
+                        .null => unreachable,
+                        else => unreachable,
+                    }
+                }
+            },
+            .@"error" => |destination_error_index| {
+                const destination_error_type = unit.errors.get(destination_error_index);
+                if (destination_error_type.backing_type == value.type) {
+                    return .bitcast;
+                } else {
+                    switch (source_type.*) {
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+            },
+            .error_union => |error_union_index| {
+                const destination_error_union = unit.error_unions.get(error_union_index);
+                const destination_bitsize = destination_type.getBitSize(unit);
+                const source_bitsize = source_type.getBitSize(unit);
+                if (destination_bitsize == source_bitsize) {
+                    unreachable;
+                } else switch (source_type.*) {
+                    .error_union => {
+                        assert(type_index != unit.all_errors);
+                        if (destination_bitsize > source_bitsize) {
+                            return .error_union_type_upcast;
+                        } else if (destination_bitsize < source_bitsize) {
+                            return .error_union_type_downcast;
+                        } else unreachable;
+                        // _ = source_error_union_index; // autofix
+                        // const destination_eu_type = unit.types.get(destination_error_union.type);
+                        // const destination_eu_error = unit.types.get(destination_error_union.@"error");
+                        // const destination_eu_type_size = destination_eu_type.getBitSize(unit);
+                        // const destination_eu_error_size = destination_eu_error.getBitSize(unit);
+
+                        // if (destination_eu_type_size == destination_eu_error_size) {
+                        //     unreachable;
+                        // } else if (destination_eu_type_size > destination_eu_error_size) {
+                        //     unreachable;
+                        // } else {
+                        //     unreachable;
+                        // }
+                    },
+                    else => {
+                        assert(value.type != destination_error_union.type);
+                        return switch (try builder.resolveCast(unit, context, destination_error_union.type, value)) {
+                            .int_to_pointer => .error_union_type_int_to_pointer,
+                            else => |t| @panic(@tagName(t)),
+                        };
+                    },
+                }
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -3957,7 +4211,7 @@ pub const Builder = struct {
     }
 
     fn appendInstruction(builder: *Builder, unit: *Unit, context: *const Context, instruction_index: Instruction.Index) !void {
-        // if (@intFromEnum(instruction_index) == 366) @breakpoint();
+        // if (@intFromEnum(instruction_index) == 474) @breakpoint();
         switch (unit.instructions.get(instruction_index).*) {
             .extract_value => |extract_value| switch (unit.types.get(extract_value.expression.type).*) {
                 .pointer => unreachable,
@@ -4291,38 +4545,41 @@ pub const Builder = struct {
                                         try builder.buildTrap(unit, context);
                                     },
                                     else => switch (unit.types.get(return_type).*) {
-                                        .error_union => |error_union| switch (error_union.type) {
-                                            .void => {
-                                                const undefined_value = V{
-                                                    .value = .{
-                                                        .@"comptime" = .undefined,
-                                                    },
-                                                    .type = return_type,
-                                                };
-                                                const insert = try unit.instructions.append(context.my_allocator, .{
-                                                    .insert_value = .{
-                                                        .expression = undefined_value,
-                                                        .index = 1,
-                                                        .new_value = .{
-                                                            .value = .{
-                                                                .@"comptime" = .{
-                                                                    .bool = false,
-                                                                },
-                                                            },
-                                                            .type = .bool,
+                                        .error_union => |error_union_index| {
+                                            const error_union = unit.error_unions.get(error_union_index);
+                                            switch (error_union.type) {
+                                                .void => {
+                                                    const undefined_value = V{
+                                                        .value = .{
+                                                            .@"comptime" = .undefined,
                                                         },
-                                                    },
-                                                });
-                                                try builder.appendInstruction(unit, context, insert);
+                                                        .type = return_type,
+                                                    };
+                                                    const insert = try unit.instructions.append(context.my_allocator, .{
+                                                        .insert_value = .{
+                                                            .expression = undefined_value,
+                                                            .index = 1,
+                                                            .new_value = .{
+                                                                .value = .{
+                                                                    .@"comptime" = .{
+                                                                        .bool = false,
+                                                                    },
+                                                                    },
+                                                                .type = .bool,
+                                                            },
+                                                            },
+                                                        });
+                                                    try builder.appendInstruction(unit, context, insert);
 
-                                                try builder.buildRet(unit, context, .{
-                                                    .value = .{
-                                                        .runtime = insert,
-                                                    },
-                                                    .type = return_type,
-                                                });
-                                            },
-                                            else => unreachable,
+                                                    try builder.buildRet(unit, context, .{
+                                                        .value = .{
+                                                            .runtime = insert,
+                                                        },
+                                                        .type = return_type,
+                                                    });
+                                                },
+                                                else => unreachable,
+                                            }
                                         },
                                         else => |t| @panic(@tagName(t)),
                                     },
@@ -4338,8 +4595,9 @@ pub const Builder = struct {
                                 .void => unreachable,
                                 .noreturn => unreachable,
                                 else => switch (unit.types.get(return_type).*) {
-                                    .error_union => |error_union| {
-                                        if (error_union.type == .void) {
+                                    .error_union => |error_union_index| {
+                                        const error_union = unit.error_unions.get(error_union_index);
+                                        if (error_union.type == .void or error_union.type == .noreturn) {
                                             const return_value = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
                                                     .expression = .{
@@ -4361,19 +4619,24 @@ pub const Builder = struct {
                                             });
                                             try builder.appendInstruction(unit, context, return_value);
 
-                                            try phi.values.append(context.my_allocator, .{
+                                            try phi.addIncoming(context, .{
                                                 .value = .{
                                                     .runtime = return_value,
                                                 },
                                                 .type = return_type,
-                                            });
-                                            try phi.basic_blocks.append(context.my_allocator, builder.current_basic_block);
+                                            }, builder.current_basic_block);
 
                                             try builder.jump(unit, context, builder.return_block);
                                         } else if (error_union.type == .noreturn) {
                                             unreachable;
                                         } else {
-                                            unreachable;
+                                            if (cbb.instructions.length > 0) {
+                                                try unit.dumpFunctionDefinition(builder.current_function);
+                                                switch (unit.types.get(error_union.type).*) {
+                                                    else => |t| @panic(@tagName(t)),
+                                                }
+                                                unreachable;
+                                            }
                                         }
                                     },
                                     else => {},
@@ -4418,7 +4681,7 @@ pub const Builder = struct {
                 };
             },
             .@"switch" => {
-                const result = try builder.resolveSwitch(unit, context, type_expect, node_index);
+                const result = try builder.resolveSwitch(unit, context, type_expect, node_index, .right);
                 switch (result.value) {
                     .@"comptime" => |ct| {
                         return ct;
@@ -4523,7 +4786,10 @@ pub const Builder = struct {
             },
             .error_type => {
                 assert(node.left != .null);
-                assert(node.right == .null);
+                const backing_type: Type.Index = switch (node.right) {
+                    .null => .u32,
+                    else => try builder.resolveType(unit, context, node.right),
+                };
                 const nodes = unit.getNodeList(node.left);
                 if (nodes.len == 0) {
                     unreachable;
@@ -4541,9 +4807,10 @@ pub const Builder = struct {
                             .kind = .container,
                             .local = false,
                             .level = builder.current_scope.level + 1,
+                            .parent = builder.current_scope,
                         },
                     },
-                    .backing_type = .u32,
+                    .backing_type = backing_type,
                 });
                 const new_error = unit.errors.get(error_index);
                 const error_type_index = try unit.types.append(context.my_allocator, .{
@@ -4565,6 +4832,45 @@ pub const Builder = struct {
                 return .{
                     .type = error_type_index,
                 };
+            },
+            .enum_literal => {
+                switch (type_expect) {
+                    .type => |type_index| {
+                        const expected_type = unit.types.get(type_index);
+                        const identifier = unit.getExpectedTokenBytes(Token.addInt(node.token, 1), .identifier);
+                        const hash = try unit.processIdentifier(context, identifier);
+                        switch (expected_type.*) {
+                            .@"enum" => |enum_index| {
+                                const enum_type = unit.enums.get(enum_index);
+                                for (enum_type.fields.slice()) |field_index| {
+                                    const field = unit.enum_fields.get(field_index);
+                                    if (field.name == hash) {
+                                        return .{
+                                            .enum_value = field_index,
+                                        };
+                                    }
+                                } else {
+                                    unreachable;
+                                }
+                            },
+                            .@"error" => |error_index| {
+                                const error_type = unit.errors.get(error_index);
+                                for (error_type.fields.slice()) |field_index| {
+                                    const field = unit.error_fields.get(field_index);
+                                    if (field.name == hash) {
+                                        return .{
+                                            .error_value = field_index,
+                                        };
+                                    }
+                                } else {
+                                    unreachable;
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -4630,6 +4936,9 @@ pub const Builder = struct {
         sign_extend,
         zero_extend,
         error_to_error_union,
+        type_to_error_union,
+        error_union_to_all_error_union,
+        error_union_same_error,
     };
 
     const TypecheckError = error{};
@@ -4823,13 +5132,6 @@ pub const Builder = struct {
                         else => |t| @panic(@tagName(t)),
                     }
                 },
-                .error_union => |error_union| {
-                    if (error_union.@"error" == source_type_index) {
-                        return .error_to_error_union;
-                    } else {
-                        unreachable;
-                    }
-                },
                 .bool => {
                     switch (source.*) {
                         else => |t| @panic(@tagName(t)),
@@ -4842,6 +5144,56 @@ pub const Builder = struct {
                             @panic("WTF");
                         },
                         else => |t| @panic(@tagName(t)),
+                    }
+                },
+                .error_union => |destination_error_union_index| {
+                    const destination_error_union = unit.error_unions.get(destination_error_union_index);
+                    if (destination_error_union.@"error" == source_type_index) {
+                        return .error_to_error_union;
+                    } else if (destination_error_union.type == source_type_index) {
+                        return .type_to_error_union;
+                    } else {
+                        switch (source.*) {
+                            .error_union => |source_error_union_index| {
+                                const source_error_union = unit.error_unions.get(source_error_union_index);
+                                if (destination_error_union.@"error" == source_error_union.@"error") {
+                                    return .error_union_same_error;
+                                } else if (destination_error_union.@"error" == unit.all_errors) {
+                                    return .error_union_to_all_error_union;
+                                } else {
+                                    unreachable;
+                                }
+                            },
+                            .@"struct" => |struct_index| {
+                                const struct_type = unit.structs.get(struct_index);
+                                switch (struct_type.error_union_alternative) {
+                                    true => {
+                                        const struct_bitsize = source.getBitSize(unit);
+                                        const error_union_bitsize = destination.getBitSize(unit);
+                                        _ = error_union_bitsize; // autofix
+                                        _ = struct_bitsize; // autofix
+                                        assert(struct_type.fields.length >= 2);
+                                        const struct_field_index = struct_type.fields.pointer[0];
+                                        const struct_field = unit.struct_fields.get(struct_field_index);
+                                        switch (unit.types.get(struct_field.type).*) {
+                                            .@"error" => |source_error_index| {
+                                                _ = source_error_index; // autofix
+                                                if (destination_error_union.@"error" == struct_field.type) {
+                                                    return .error_union_same_error;
+                                                } else if (destination_error_union.@"error" == unit.all_errors) {
+                                                    return .error_union_to_all_error_union;
+                                                } else {
+                                                    unreachable;
+                                                }
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        }
+                                    },
+                                    false => unreachable,
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
                     }
                 },
                 else => |t| @panic(@tagName(t)),
@@ -5204,9 +5556,64 @@ pub const Builder = struct {
                                 else => |t| @panic(@tagName(t)),
                             }
                         },
-                        .error_to_error_union => {
-                            unreachable;
+                        .error_to_error_union, .type_to_error_union => {
+                            const error_union_index = unit.types.get(expected_type_index).error_union;
+                            const error_union = unit.error_unions.get(error_union_index);
+                            // const error_types = [2]Type.Index{expected_type_index, if (error_union.alternate_type == .null) expected_type_index else error_union.alternate_type};
+                            const error_union_type_index = switch (typecheck_result) {
+                                .error_to_error_union => if (error_union.alternate_type == .null) expected_type_index else if (error_union.alternate_index) error_union.alternate_type else expected_type_index,
+                                .type_to_error_union => if (error_union.alternate_type == .null) expected_type_index else if (error_union.alternate_index) expected_type_index else error_union.alternate_type,
+                                else => unreachable,
+                            };
+                            const undef = V{
+                                .value = .{
+                                    .@"comptime" = .undefined,
+                                },
+                                .type = error_union_type_index,
+                            };
+                            const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                                .insert_value = .{
+                                    .expression = undef,
+                                    .index = 0,
+                                    .new_value = v,
+                                },
+                            });
+                            try builder.appendInstruction(unit, context, error_union_builder);
+
+                            const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                                .insert_value = .{
+                                    .expression = .{
+                                        .value = .{
+                                            .runtime = error_union_builder,
+                                        },
+                                        .type = error_union_type_index,
+                                    },
+                                    .index = 1,
+                                    .new_value = .{
+                                        .value = .{
+                                            .@"comptime" = .{
+                                                .bool = typecheck_result == .error_to_error_union,
+                                            },
+                                        },
+                                        .type = .bool,
+                                    },
+                                },
+                            });
+                            try builder.appendInstruction(unit, context, final_error_union);
+
+                            const value = V{
+                                .value = .{
+                                    .runtime = final_error_union,
+                                },
+                                .type = error_union_type_index,
+                            };
+                            switch (error_union_type_index == expected_type_index) {
+                                true => return value,
+                                false => unreachable,
+                            }
                         },
+                        .error_union_to_all_error_union =>unreachable,
+                        .error_union_same_error => unreachable,
                     }
                 },
                 .array => |expected_array_descriptor| {
@@ -5586,20 +5993,37 @@ pub const Builder = struct {
                 const err = try builder.resolveType(unit, context, node.left);
                 const ty = try builder.resolveType(unit, context, node.right);
 
-                const error_union = try unit.types.append(context.my_allocator, .{
-                    .error_union = .{
-                        .@"error" = err,
-                        .type = ty,
-                    },
+                const error_union = try builder.getErrorUnionType(unit, context, .{
+                    .@"error" = err,
+                    .type = ty,
                 });
+
                 break :blk error_union;
             },
             .all_errors => blk: {
-                const all_error_index = try unit.error_sets.append(context.my_allocator, .{});
-                const all_errors = try unit.types.append(context.my_allocator, .{
-                    .error_set = all_error_index,
-                });
-                break :blk all_errors;
+                if (unit.all_errors != .null) {
+                    unreachable;
+                } else {
+                    const token_debug_info = builder.getTokenDebugInfo(unit, node.token);
+                    const all_errors = try unit.errors.append(context.my_allocator, .{
+                        .scope = .{
+                            .scope = .{
+                                .file = builder.current_file,
+                                .line = token_debug_info.line,
+                                .column = token_debug_info.column,
+                                .kind = .container,
+                                .local = false,
+                                .level = builder.current_scope.level + 1,
+                                .parent = &unit.scope.scope,
+                            },
+                        },
+                        .backing_type = .usize,
+                    });
+                    unit.all_errors = try unit.types.append(context.my_allocator, .{
+                        .@"error" = all_errors,
+                    });
+                    break :blk unit.all_errors;
+                }
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -5726,7 +6150,9 @@ pub const Builder = struct {
                     },
                     .backing_type = backing_type,
                     .optional = false,
+                    .error_union_alternative = false,
                     .type = .null,
+
                 });
                 const struct_type = unit.structs.get(struct_index);
 
@@ -6058,15 +6484,23 @@ pub const Builder = struct {
                     break :b anon_global;
                 };
 
-                const return_type = try unit.types.append(context.my_allocator, .{
-                    .error_union = .{
-                        .@"error" = try unit.types.append(context.my_allocator, .{
-                            // This means all errors
-                            .error_set = try unit.error_sets.append(context.my_allocator, .{}),
-                        }),
-                        .type = .void,
-                    },
+                const error_union = try builder.getErrorUnionType(unit, context, .{
+                    .@"error" = unreachable,
+                    .type = .void,
                 });
+
+                const return_type = error_union;
+
+                // const return_type = try unit.types.append(context.my_allocator, .{
+                //     .error_union = error_union,
+                //     // .error_union = .{
+                //     //     .@"error" = try unit.types.append(context.my_allocator, .{
+                //     //         // This means all errors
+                //     //         .error_set = try unit.error_sets.append(context.my_allocator, .{}),
+                //     //     }),
+                //     //     .type = .void,
+                //     // },
+                // });
 
                 // TODO: make test function prototypes unique
                 const function_prototype_index = try unit.function_prototypes.append(context.my_allocator, .{
@@ -6132,41 +6566,42 @@ pub const Builder = struct {
                                     try builder.buildTrap(unit, context);
                                 },
                                 else => switch (unit.types.get(return_type).*) {
-                                    .error_union => |error_union| {
-                                        if (error_union.type == .void) {
-                                            const undef = V{
-                                                .value = .{ .@"comptime" = .undefined },
-                                                .type = return_type,
-                                            };
-                                            const insert_value = try unit.instructions.append(context.my_allocator, .{
-                                                .insert_value = .{
-                                                    .expression = undef,
-                                                    .index = 1,
-                                                    .new_value = .{
-                                                        .value = .{
-                                                            .@"comptime" = .{
-                                                                .bool = false,
-                                                            },
-                                                        },
-                                                        .type = .bool,
-                                                    },
-                                                },
-                                            });
-                                            try builder.appendInstruction(unit, context, insert_value);
-
-                                            try builder.buildRet(unit, context, .{
-                                                .value = .{
-                                                    .runtime = insert_value,
-                                                },
-                                                .type = return_type,
-                                            });
-                                        } else if (error_union.type == .noreturn) {
-                                            unreachable;
-                                            // try builder.buildTrap(unit, context);
-                                        } else {
-                                            unreachable;
-                                        }
-                                    },
+                                    // .error_union => |err_union| {
+                                    //     _ = err_union; // autofix
+                                    //     if (error_union.type == .void) {
+                                    //         const undef = V{
+                                    //             .value = .{ .@"comptime" = .undefined },
+                                    //             .type = return_type,
+                                    //         };
+                                    //         const insert_value = try unit.instructions.append(context.my_allocator, .{
+                                    //             .insert_value = .{
+                                    //                 .expression = undef,
+                                    //                 .index = 1,
+                                    //                 .new_value = .{
+                                    //                     .value = .{
+                                    //                         .@"comptime" = .{
+                                    //                             .bool = false,
+                                    //                         },
+                                    //                     },
+                                    //                     .type = .bool,
+                                    //                 },
+                                    //             },
+                                    //         });
+                                    //         try builder.appendInstruction(unit, context, insert_value);
+                                    //
+                                    //         try builder.buildRet(unit, context, .{
+                                    //             .value = .{
+                                    //                 .runtime = insert_value,
+                                    //             },
+                                    //             .type = return_type,
+                                    //         });
+                                    //     } else if (error_union.type == .noreturn) {
+                                    //         unreachable;
+                                    //         // try builder.buildTrap(unit, context);
+                                    //     } else {
+                                    //         unreachable;
+                                    //     }
+                                    // },
                                     else => |t| @panic(@tagName(t)),
                                 },
                             },
@@ -6445,7 +6880,7 @@ pub const Builder = struct {
                     };
                 }
             },
-            .add, .sub, .mul, .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right => block: {
+            .add, .sub, .mul, .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right, .bool_and, .bool_or => block: {
                 const left_node_index = node.left;
                 const right_node_index = node.right;
                 const binary_operation_id: ArithmeticLogicIntegerInstruction = switch (node.id) {
@@ -6459,6 +6894,7 @@ pub const Builder = struct {
                     .bit_or => .bit_or,
                     .shift_left => .shift_left,
                     .shift_right => .shift_right,
+                    .bool_and => .bit_and,
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -6468,6 +6904,7 @@ pub const Builder = struct {
                 switch (unit.types.get(left_value.type).*) {
                     .integer => {},
                     .comptime_int => {},
+                    .bool => {},
                     else => |t| @panic(@tagName(t)),
                 }
 
@@ -6631,33 +7068,48 @@ pub const Builder = struct {
                                     });
                                     break :b i;
                                 },
-                                .comptime_int => {
-                                    const left = left_value.value.@"comptime".comptime_int;
-                                    const right = right_value.value.@"comptime".comptime_int;
-                                    switch (binary_operation_id) {
-                                        .add => {
-                                            assert(left.signedness == right.signedness);
-                                            assert(left.signedness == .unsigned);
-                                            if (true) unreachable;
-                                            const value = left.value + right.value;
-                                            break :block switch (type_expect) {
-                                                .none => V{
-                                                    .value = .{
-                                                        .@"comptime" = .{
-                                                            .comptime_int = .{
-                                                                .value = value,
-                                                                .signedness = left.signedness,
-                                                            },
-                                                        },
-                                                    },
-                                                    .type = .comptime_int,
-                                                },
-                                                else => |t| @panic(@tagName(t)),
-                                            };
-                                        },
+                                .bool => b: {
+                                    const id: Instruction.IntegerBinaryOperation.Id = switch (binary_operation_id) {
+                                        .bit_and => .bit_and,
                                         else => |t| @panic(@tagName(t)),
-                                    }
+                                    };
+                                    const i = try unit.instructions.append(context.my_allocator, .{
+                                        .integer_binary_operation = .{
+                                            .left = left_value,
+                                            .right = right_value,
+                                            .id = id,
+                                            .signedness = .unsigned,
+                                        },
+                                    });
+                                    break :b i;
                                 },
+                                // .comptime_int => {
+                                //     const left = left_value.value.@"comptime".comptime_int;
+                                //     const right = right_value.value.@"comptime".comptime_int;
+                                //     switch (binary_operation_id) {
+                                //         .add => {
+                                //             assert(left.signedness == right.signedness);
+                                //             assert(left.signedness == .unsigned);
+                                //             if (true) unreachable;
+                                //             const value = left.value + right.value;
+                                //             break :block switch (type_expect) {
+                                //                 .none => V{
+                                //                     .value = .{
+                                //                         .@"comptime" = .{
+                                //                             .comptime_int = .{
+                                //                                 .value = value,
+                                //                                 .signedness = left.signedness,
+                                //                             },
+                                //                         },
+                                //                     },
+                                //                     .type = .comptime_int,
+                                //                 },
+                                //                 else => |t| @panic(@tagName(t)),
+                                //             };
+                                //         },
+                                //         else => |t| @panic(@tagName(t)),
+                                //     }
+                                // },
                                 else => |t| @panic(@tagName(t)),
                             };
 
@@ -8234,31 +8686,42 @@ pub const Builder = struct {
             .negation => block: {
                 assert(node.left != .null);
                 assert(node.right == .null);
-                const value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .right);
+                const value = try builder.resolveRuntimeValue(unit, context, type_expect, node.left, .right);
+
                 switch (value.value) {
                     .@"comptime" => |ct| switch (ct) {
+                        .constant_int => |constant_int| switch (type_expect) {
+                            .type => |type_index| {
+                                assert(type_index == value.type);
+                                const expected_type = unit.types.get(type_index);
+                                switch (expected_type.*) {
+                                    .integer => |integer| {
+                                        assert(integer.signedness == .signed);
+                                        var v: i64 = @intCast(constant_int.value);
+                                        v = -v;
+                                        v = 0 - v;
+
+                                        break :block .{
+                                            .value = .{
+                                                .@"comptime" = .{
+                                                    .constant_int = .{
+                                                        .value = @bitCast(v),
+                                                    },
+                                                },
+                                            },
+                                            .type = type_index,
+                                        };
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
                         .comptime_int => |ct_int| switch (type_expect) {
                             .type => |type_index| switch (unit.types.get(type_index).*) {
                                 .integer => |integer| {
                                     assert(integer.signedness == .signed);
 
-                                    var v: i64 = @bitCast(ct_int.value);
-                                    if (ct_int.signedness == .signed) {
-                                        v = -v;
-                                    }
-
-                                    v = 0 - v;
-
-                                    break :block .{
-                                        .value = .{
-                                            .@"comptime" = .{
-                                                .constant_int = .{
-                                                    .value = @bitCast(v),
-                                                },
-                                            },
-                                        },
-                                        .type = type_index,
-                                    };
                                 },
                                 else => |t| @panic(@tagName(t)),
                             },
@@ -8282,6 +8745,35 @@ pub const Builder = struct {
                         },
                         else => |t| @panic(@tagName(t)),
                     },
+                    .runtime => {
+                        const sub = try unit.instructions.append(context.my_allocator, .{
+                            .integer_binary_operation = .{
+                                .id = .sub,
+                                .left = .{
+                                    .value = .{
+                                        .@"comptime" = .{
+                                            .constant_int = .{
+                                                .value = 0,
+                                            },
+                                        },
+                                    },
+                                    .type = value.type,
+                                },
+                                .right = value,
+                                .signedness = switch (unit.types.get(value.type).*) {
+                                    .integer => |integer| integer.signedness,
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, sub);
+                        break :block .{
+                            .value = .{
+                                .@"runtime" = sub,
+                            },
+                            .type = value.type,
+                        };
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
             },
@@ -8290,10 +8782,722 @@ pub const Builder = struct {
                 // TODO: warning
                 break :block undefined;
             },
+            .@"switch" => try builder.resolveSwitch(unit, context, type_expect, node_index, side),
+            .catch_expression => try builder.resolveCatchExpression(unit, context, type_expect, node_index, side),
+            .@"unreachable" => block: {
+                try builder.buildTrap(unit, context);
+                break :block .{
+                    .value = .{
+                        .@"comptime" = .@"unreachable",
+                    },
+                    .type = .noreturn,
+                };
+            },
+            .try_expression => try builder.resolveTryExpression(unit, context, type_expect, node_index, side),
             else => |t| @panic(@tagName(t)),
         };
 
         return v;
+    }
+
+    fn resolveTryExpression(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) !V{
+        _ = side; // autofix
+        const node = unit.getNode(node_index);
+        assert(node.left != .null);
+        assert(node.right == .null);
+        const value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .right);
+
+        switch (unit.types.get(value.type).*) {
+            .error_union => |error_union_index| {
+                const error_union = unit.error_unions.get(error_union_index);
+                const function_type = unit.function_definitions.get( builder.current_function).type;
+                const function_prototype_index = unit.types.get(function_type).function;
+                const function_prototype = unit.function_prototypes.get(function_prototype_index);
+                const return_type_index = function_prototype.return_type;
+                const return_type = unit.types.get(return_type_index);
+                const return_error_union = unit.error_unions.get(return_type.error_union);
+                const return_error_union_type = try unit.getErrorUnionTypeForType(return_type_index);
+                _ = return_error_union_type; // autofix
+                const return_error_union_error = try unit.getErrorUnionTypeForType(return_type_index);
+
+                const extract_value = try unit.instructions.append(context.my_allocator, .{
+                    .extract_value = .{
+                        .expression = value,
+                        .index = 1,
+                    },
+                });
+                try builder.appendInstruction(unit, context, extract_value);
+
+                const error_block = try builder.newBasicBlock(unit, context);
+                const clean_block = try builder.newBasicBlock(unit, context);
+
+                try builder.branch(unit, context, extract_value, error_block, clean_block);
+                builder.current_basic_block = error_block;
+
+                const value_error_union_type_type = try unit.getErrorUnionTypeForType(value.type);
+                _ = value_error_union_type_type; // autofix
+                const value_error_union_error_type = try unit.getErrorUnionTypeForError(value.type);
+
+                const final_error_union = switch (try builder.typecheck(unit, context, return_error_union_error, value_error_union_error_type)) {
+                    .success => switch (try builder.typecheck(unit, context, return_error_union_error, value_error_union_error_type)) {
+                        .success => value,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    .error_union_same_error => blk: {
+                        if (return_type_index == value.type) {
+                            break :blk value;
+                        } else {
+                            const cast = try builder.resolveCast(unit, context, return_type_index, value);
+                            switch (cast) {
+                                .error_union_type_upcast => {
+                                    const extract_error = try unit.instructions.append(context.my_allocator, .{
+                                        .extract_value = .{
+                                            .expression = value,
+                                            .index = 0,
+                                        },
+                                    });
+                                    try builder.appendInstruction(unit, context, extract_error);
+
+                                    const zero_extend = try unit.instructions.append(context.my_allocator, .{
+                                        .cast = .{
+                                            .id = .zero_extend,
+                                            .value = .{
+                                                .value = .{
+                                                    .runtime = extract_error,
+                                                },
+                                                .type = error_union.@"error",
+                                            },
+                                            .type = return_error_union.@"error",
+                                        },
+                                        });
+                                    try builder.appendInstruction(unit, context, zero_extend);
+
+                                    const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                                        .insert_value = .{
+                                            .expression = .{
+                                                .value = .{
+                                                    .@"comptime" = .undefined,
+                                                },
+                                                .type = return_type_index,
+                                            },
+                                            .index = 0,
+                                            .new_value = .{
+                                                .value = .{
+                                                    .runtime = zero_extend,
+                                                },
+                                                .type = return_error_union.@"error",
+                                            },
+                                            },
+                                        });
+                                    try builder.appendInstruction(unit, context, error_union_builder);
+
+                                    const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                                        .insert_value = .{
+                                            .expression = .{
+                                                .value = .{
+                                                    .runtime = error_union_builder,
+                                                },
+                                                .type = return_type_index,
+                                            },
+                                            .index = 1,
+                                            .new_value = .{
+                                                .value = .{
+                                                    .@"comptime" = .{
+                                                        .bool = true,
+                                                    },
+                                                    },
+                                                .type = .bool,
+                                            },
+                                            },
+                                        });
+                                    try builder.appendInstruction(unit, context, final_error_union);
+
+                                    break :blk V{
+                                        .value = .{
+                                            .runtime = final_error_union,
+                                        },
+                                        .type = return_type_index,
+                                    };
+                                },
+                                .error_union_type_downcast => {
+                                    const extract_error = try unit.instructions.append(context.my_allocator, .{
+                                        .extract_value = .{
+                                            .expression = value,
+                                            .index = 0,
+                                        },
+                                    });
+                                    try builder.appendInstruction(unit, context, extract_error);
+
+                                    const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                                        .insert_value = .{
+                                            .expression = .{
+                                                .value = .{
+                                                    .@"comptime" = .undefined,
+                                                },
+                                                .type = return_type_index,
+                                            },
+                                            .index = 0,
+                                            .new_value = .{
+                                                .value = .{
+                                                    .runtime = extract_error,
+                                                },
+                                                .type = return_error_union.@"error",
+                                            },
+                                            },
+                                        });
+                                    try builder.appendInstruction(unit, context, error_union_builder);
+
+                                    const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                                        .insert_value = .{
+                                            .expression = .{
+                                                .value = .{
+                                                    .runtime = error_union_builder,
+                                                },
+                                                .type = return_type_index,
+                                            },
+                                            .index = 1,
+                                            .new_value = .{
+                                                .value = .{
+                                                    .@"comptime" = .{
+                                                        .bool = true,
+                                                    },
+                                                    },
+                                                .type = .bool,
+                                            },
+                                            },
+                                        });
+                                    try builder.appendInstruction(unit, context, final_error_union);
+
+                                    break :blk V{
+                                        .value = .{
+                                            .runtime = final_error_union,
+                                        },
+                                        .type = return_type_index,
+                                    };
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        }
+                    },
+                    .error_union_to_all_error_union => final: {
+                        const return_error = unit.errors.get( unit.types.get(return_error_union.@"error").@"error");
+                        const eu_error = unit.errors.get(unit.types.get( error_union.@"error").@"error");
+                        // TODO: proper type matching
+                        if (eu_error.backing_type == .u32 and return_error.backing_type == .usize) {
+                            const error_extract_value = try unit.instructions.append(context.my_allocator, .{
+                                .extract_value = .{
+                                    .expression = value,
+                                    .index = 0,
+                                },
+                                });
+                            try builder.appendInstruction(unit, context, error_extract_value);
+
+                            const cast = try unit.instructions.append(context.my_allocator, .{
+                                .cast = .{
+                                    .id = .zero_extend,
+                                    .value = .{
+                                        .value = .{
+                                            .runtime = error_extract_value,
+                                        },
+                                        .type = error_union.@"error",
+                                    },
+                                    .type = return_error_union.@"error",
+                                },
+                                });
+                            try builder.appendInstruction(unit, context, cast);
+
+                            const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                                .insert_value = .{
+                                    .expression = .{
+                                        .value = .{
+                                            .@"comptime" = .undefined,
+                                        },
+                                        .type = return_type_index,
+                                    },
+                                    .index = 0,
+                                    .new_value = .{
+                                        .value = .{
+                                            .runtime = cast,
+                                        },
+                                        .type = return_error_union.@"error",
+                                    },
+                                    },
+                                });
+                            try builder.appendInstruction(unit, context, error_union_builder);
+
+                            const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                                .insert_value = .{
+                                    .expression = .{
+                                        .value = .{
+                                            .runtime = error_union_builder,
+                                        },
+                                        .type = return_type_index,
+                                    },
+                                    .index = 1,
+                                    .new_value = .{
+                                        .value = .{
+                                            .@"comptime" = .{
+                                                .bool = true,
+                                            },
+                                            },
+                                        .type = .bool,
+                                    },
+                                    },
+                                });
+                            try builder.appendInstruction(unit, context, final_error_union);
+
+                            break :final V{
+                                .value = .{
+                                    .runtime = final_error_union,
+                                },
+                                .type = return_type_index,
+                            };
+                        } else {
+                            unreachable;
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+                
+                if (builder.return_block != .null) {
+                    unreachable;
+                } else if (builder.return_phi != .null) {
+                    unreachable;
+                } else {
+                    const phi_index = try unit.instructions.append(context.my_allocator, .{
+                        .phi = .{
+                            .type = return_type_index,
+                        },
+                        });
+                    const phi = &unit.instructions.get(phi_index).phi;
+                    const phi_block = try builder.newBasicBlock(unit, context);
+                    try phi.addIncoming(context, final_error_union, builder.current_basic_block);
+                    try builder.jump(unit, context, phi_block);
+
+                    const old_block = builder.current_basic_block;
+                    builder.current_basic_block = phi_block;
+
+                    try builder.appendInstruction(unit, context, phi_index);
+                    try builder.buildRet(unit, context, .{
+                        .value = .{
+                            .runtime = phi_index,
+                        },
+                        .type = return_type_index,
+                    });
+
+                    builder.current_basic_block = old_block;
+
+                    builder.return_phi = phi_index;
+                    builder.return_block = phi_block;
+                }
+                
+                assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
+
+                builder.current_basic_block = clean_block;
+
+                const result = try unit.instructions.append(context.my_allocator, .{
+                    .extract_value = .{
+                        .expression = value,
+                        .index = 0,
+                    },
+                });
+                try builder.appendInstruction(unit, context, result);
+
+                const v = V{
+                    .value = .{
+                        .runtime = result,
+                    },
+                    .type = error_union.type,
+                };
+
+                return switch (type_expect) {
+                    .none => v,
+                    .type => |type_index| b: {
+                        assert(type_index == v.type);
+                        break :b v;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+
+                // switch (error_union.type) {
+                //     .void, .noreturn => {
+                //         const final_error_union = switch (try builder.typecheck(unit, context, return_type_index, value.type)) {
+                //             .success => value,
+                //             .error_union_to_all_error_union => final: {
+                //                 const return_type = unit.types.get(return_type_index);
+                //                 const return_error_union = unit.error_unions.get(return_type.error_union);
+                //                 const return_error = unit.errors.get( unit.types.get(return_error_union.@"error").@"error");
+                //                 const eu_error = unit.errors.get(unit.types.get( error_union.@"error").@"error");
+                //                 // TODO: proper type matching
+                //                 if (eu_error.backing_type == .u32 and return_error.backing_type == .usize) {
+                //                     const error_extract_value = try unit.instructions.append(context.my_allocator, .{
+                //                         .extract_value = .{
+                //                             .expression = value,
+                //                             .index = 0,
+                //                         },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, error_extract_value);
+                //
+                //                     const cast = try unit.instructions.append(context.my_allocator, .{
+                //                         .cast = .{
+                //                             .id = .zero_extend,
+                //                             .value = .{
+                //                                 .value = .{
+                //                                     .runtime = error_extract_value,
+                //                                 },
+                //                                 .type = error_union.@"error",
+                //                             },
+                //                             .type = return_error_union.@"error",
+                //                         },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, cast);
+                //
+                //                     const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                //                         .insert_value = .{
+                //                             .expression = .{
+                //                                 .value = .{
+                //                                     .@"comptime" = .undefined,
+                //                                 },
+                //                                 .type = return_type_index,
+                //                             },
+                //                             .index = 0,
+                //                             .new_value = .{
+                //                                 .value = .{
+                //                                     .runtime = cast,
+                //                                 },
+                //                                 .type = return_error_union.@"error",
+                //                             },
+                //                             },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, error_union_builder);
+                //
+                //                     const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                //                         .insert_value = .{
+                //                             .expression = .{
+                //                                 .value = .{
+                //                                     .runtime = error_union_builder,
+                //                                 },
+                //                                 .type = return_type_index,
+                //                             },
+                //                             .index = 1,
+                //                             .new_value = .{
+                //                                 .value = .{
+                //                                     .@"comptime" = .{
+                //                                         .bool = true,
+                //                                     },
+                //                                     },
+                //                                 .type = .bool,
+                //                             },
+                //                             },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, final_error_union);
+                //
+                //                     break :final V{
+                //                         .value = .{
+                //                             .runtime = final_error_union,
+                //                         },
+                //                         .type = return_type_index,
+                //                     };
+                //                 } else {
+                //                     unreachable;
+                //                 }
+                //             },
+                //             else => |t| @panic(@tagName(t)),
+                //         };
+                //
+                //         if (builder.return_phi != .null) {
+                //             const phi = &unit.instructions.get(builder.return_phi).phi;
+                //             try phi.addIncoming(context, final_error_union, builder.current_basic_block);
+                //             assert(builder.return_block != .null);
+                //             try builder.jump(unit, context, builder.return_block);
+                //         } else {
+                //             const phi_index = try unit.instructions.append(context.my_allocator, .{
+                //                 .phi = .{
+                //                     .type = return_type_index,
+                //                 },
+                //                 });
+                //             const phi = &unit.instructions.get(phi_index).phi;
+                //             const phi_block = try builder.newBasicBlock(unit, context);
+                //             try phi.addIncoming(context, final_error_union, builder.current_basic_block);
+                //             try builder.jump(unit, context, phi_block);
+                //
+                //             const old_block = builder.current_basic_block;
+                //             builder.current_basic_block = phi_block;
+                //
+                //             try builder.appendInstruction(unit, context, phi_index);
+                //             try builder.buildRet(unit, context, .{
+                //                 .value = .{
+                //                     .runtime = phi_index,
+                //                 },
+                //                 .type = return_type_index,
+                //             });
+                //
+                //             builder.current_basic_block = old_block;
+                //
+                //             builder.return_phi = phi_index;
+                //             builder.return_block = phi_block;
+                //         }
+                //
+                //         builder.current_basic_block = clean_block;
+                //
+                //         return undefined;
+                //     },
+                //     else => {
+                //         const extract_value = try unit.instructions.append(context.my_allocator, .{
+                //             .extract_value = .{
+                //                 .expression = value,
+                //                 .index = 1,
+                //             },
+                //             });
+                //         try builder.appendInstruction(unit, context, extract_value);
+                //
+                //         const error_block = try builder.newBasicBlock(unit, context);
+                //         const clean_block = try builder.newBasicBlock(unit, context);
+                //         try builder.branch(unit, context, extract_value, error_block, clean_block);
+                //
+                //         builder.current_basic_block = error_block;
+                //         const error_union_type_index = if (error_union.alternate_type == .null) value.type else if (error_union.alternate_index) error_union.alternate_type else value.type;
+                //         var temp_alloca = Instruction.Index.null;
+                //         const processed_value = switch (error_union_type_index == value.type) {
+                //             true => value,
+                //             false => b: {
+                //                 temp_alloca = try unit.instructions.append(context.my_allocator, .{
+                //                     .stack_slot = .{
+                //                         .type = value.type,
+                //                     },
+                //                     });
+                //                 try builder.appendInstruction(unit, context, temp_alloca);
+                //
+                //                 const pointer_to_original = try unit.getPointerType(context, .{
+                //                     .type = value.type, 
+                //                     .many = false,
+                //                     .mutability = .@"var",
+                //                     .termination = .none,
+                //                     .nullable = false,
+                //                 });
+                //
+                //                 const store = try unit.instructions.append(context.my_allocator, .{
+                //                     .store = .{
+                //                         .destination = .{
+                //                             .value = .{
+                //                                 .runtime = temp_alloca,
+                //                             },
+                //                             .type = pointer_to_original,
+                //                         },
+                //                         .source = value,
+                //                     },
+                //                     });
+                //                 try builder.appendInstruction(unit, context, store);
+                //
+                //                 const pointer_to_desired_type = try unit.getPointerType(context, .{
+                //                     .type = error_union_type_index, 
+                //                     .many = false,
+                //                     .mutability = .@"var",
+                //                     .termination = .none,
+                //                     .nullable = false,
+                //                 });
+                //                 const pointer_bitcast = try unit.instructions.append(context.my_allocator, .{
+                //                     .cast = .{
+                //                         .id = .bitcast,
+                //                         .value = .{
+                //                             .value = .{
+                //                                 .runtime = temp_alloca,
+                //                             },
+                //                             .type = pointer_to_original,
+                //                         },
+                //                         .type = pointer_to_desired_type,
+                //                     },
+                //                     });
+                //                 try builder.appendInstruction(unit, context, pointer_bitcast);
+                //
+                //                 const load = try unit.instructions.append(context.my_allocator, .{
+                //                     .load = .{
+                //                         .value = .{
+                //                             .value = .{
+                //                                 .runtime = pointer_bitcast,
+                //                             },
+                //                             .type = pointer_to_desired_type,
+                //                         },
+                //                         .type = error_union_type_index,
+                //                     },
+                //                     });
+                //                 try builder.appendInstruction(unit, context, load);
+                //
+                //                 break :b V{
+                //                     .value = .{
+                //                         .runtime = load,
+                //                     },
+                //                     .type = error_union_type_index,
+                //                 };
+                //             },
+                //         };
+                //
+                //         const function_type = unit.function_definitions.get( builder.current_function).type;
+                //         const function_prototype_index = unit.types.get(function_type).function;
+                //         const return_type_index = unit.function_prototypes.get(function_prototype_index).return_type;
+                //         const return_type = unit.types.get(return_type_index);
+                //
+                //         if (return_type_index == error_union.@"error") {
+                //             unreachable;
+                //         } else switch (return_type.*) {
+                //             .error_union => |return_type_error_union_index| {
+                //                 const return_type_error_union = unit.error_unions.get(return_type_error_union_index);
+                //                 const final_error_union = if (return_type_error_union_index == error_union_index) processed_value else final: {
+                //                     const error_extract_value = try unit.instructions.append(context.my_allocator, .{
+                //                         .extract_value = .{
+                //                             .expression = processed_value,
+                //                             .index = 0,
+                //                         },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, error_extract_value);
+                //                     const candidate = V{
+                //                         .value = .{
+                //                             .runtime = error_extract_value,
+                //                         },
+                //                         .type = error_union.@"error",
+                //                     };
+                //
+                //                     const error_union_value = if (return_type_error_union.@"error" == error_union.@"error") candidate else if (return_type_error_union.@"error" == unit.all_errors) blk: {
+                //                         const expected_error_index = unit.types.get(unit.all_errors).@"error";
+                //                         const error_index = unit.types.get( error_union.@"error").@"error";
+                //                         const expected_error = unit.errors.get(expected_error_index);
+                //                         const err = unit.errors.get(error_index);
+                //                         const result = try builder.typecheck(unit, context, expected_error.backing_type, err.backing_type);
+                //
+                //                         break :blk switch (result) {
+                //                             .zero_extend => b: {
+                //                                 const cast = try unit.instructions.append(context.my_allocator, .{
+                //                                     .cast = .{
+                //                                         .id = .zero_extend,
+                //                                         .value = .{
+                //                                             .value = .{
+                //                                                 .runtime = error_extract_value,
+                //                                             },
+                //                                             .type = error_union.@"error",
+                //                                         },
+                //                                         .type = return_type_error_union.@"error",
+                //                                     },
+                //                                     });
+                //                                 try builder.appendInstruction(unit, context, cast);
+                //
+                //                                 break :b V{
+                //                                     .value = .{
+                //                                         .runtime = cast,
+                //                                     },
+                //                                     .type = return_type_error_union.@"error",
+                //                                 };
+                //                             },
+                //                             else => |t| @panic(@tagName(t)),
+                //                         };
+                //                     } else {
+                //                         unreachable;
+                //                     };
+                //
+                //                     const error_union_builder = try unit.instructions.append(context.my_allocator, .{
+                //                         .insert_value = .{
+                //                             .expression = V{
+                //                                 .value = .{
+                //                                     .@"comptime" = .undefined,
+                //                                 },
+                //                                 .type = return_type_index,
+                //                             },
+                //                             .index = 0,
+                //                             .new_value = error_union_value,
+                //                         },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, error_union_builder);
+                //
+                //                     const final_error_union = try unit.instructions.append(context.my_allocator, .{
+                //                         .insert_value = .{
+                //                             .expression = V{
+                //                                 .value = .{
+                //                                     .runtime = error_union_builder,
+                //                                 },
+                //                                 .type = return_type_index,
+                //                             },
+                //                             .index = 1,
+                //                             .new_value = .{
+                //                                 .value = .{
+                //                                     .@"comptime" = .{
+                //                                         .bool = true,
+                //                                     },
+                //                                     },
+                //                                 .type = .bool,
+                //                             },
+                //                             },
+                //                         });
+                //                     try builder.appendInstruction(unit, context, final_error_union);
+                //                     break :final V{
+                //                         .value = .{
+                //                             .runtime = final_error_union,
+                //                         },
+                //                         .type = return_type_index,
+                //                     };
+                //                 };
+                //
+                //                 if (builder.return_block != .null) {
+                //                     unreachable;
+                //                 } else if (builder.return_phi != .null) {
+                //                     unreachable;
+                //                 } else {
+                //                     const phi_index = try unit.instructions.append(context.my_allocator, .{
+                //                         .phi = .{
+                //                             .type = return_type_index,
+                //                         },
+                //                         });
+                //                     const phi = &unit.instructions.get(phi_index).phi;
+                //                     const phi_block = try builder.newBasicBlock(unit, context);
+                //                     try phi.addIncoming(context, final_error_union, builder.current_basic_block);
+                //                     try builder.jump(unit, context, phi_block);
+                //
+                //                     const old_block = builder.current_basic_block;
+                //                     builder.current_basic_block = phi_block;
+                //
+                //                     try builder.appendInstruction(unit, context, phi_index);
+                //                     try builder.buildRet(unit, context, .{
+                //                         .value = .{
+                //                             .runtime = phi_index,
+                //                         },
+                //                         .type = return_type_index,
+                //                     });
+                //
+                //                     builder.current_basic_block = old_block;
+                //
+                //                     builder.return_phi = phi_index;
+                //                     builder.return_block = phi_block;
+                //                 }
+                //             },
+                //             else => |t| @panic(@tagName(t)),
+                //         }
+                //
+                //         assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
+                //
+                //         builder.current_basic_block = clean_block;
+                //
+                //         const result = try unit.instructions.append(context.my_allocator, .{
+                //             .extract_value = .{
+                //                 .expression = value,
+                //                 .index = 0,
+                //             },
+                //             });
+                //         try builder.appendInstruction(unit, context, result);
+                //
+                //         const v = V{
+                //             .value = .{
+                //                 .runtime = result,
+                //             },
+                //             .type = error_union.type,
+                //         };
+                //
+                //         return switch (type_expect) {
+                //             .none => v,
+                //             else => |t| @panic(@tagName(t)),
+                //         };
+                //     },
+                // }
+            },
+            else => |t| @panic(@tagName(t)),
+        }
     }
 
     fn resolveContainerLiteral(builder: *Builder, unit: *Unit, context: *const Context, nodes: []const Node.Index, type_index: Type.Index) !V {
@@ -9219,7 +10423,27 @@ pub const Builder = struct {
         }
 
         try builder.pushScope(unit, context, &block.scope.scope);
-        defer builder.popScope(unit, context) catch unreachable;
+        defer {
+            const cbb_index = builder.current_basic_block;
+            // TODO: fix this mess
+            if (cbb_index != .null) {
+                const cbb = unit.basic_blocks.get(cbb_index);
+                if (cbb.instructions.length > 0) {
+                    builder.popScope(unit, context) catch unreachable;
+                } else {
+                    if (builder.return_block != .null) {
+                        // TODO: warning unsafe
+                        // unreachable;
+                    } else {
+                        // TODO: warning unsafe
+                        //unreachable;
+                    }
+                    // builder.current_basic_block = builder.return_block;
+                    // builder.popScope(unit, context) catch unreachable;
+                    // builder.current_basic_block = cbb_index;
+                }
+            }
+        }
 
         const statement_node_list = unit.getNodeList(block_node.left);
 
@@ -9742,35 +10966,38 @@ pub const Builder = struct {
                     const expression = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, statement_node.left, .left);
                     const expression_type = unit.types.get(expression.type);
                     switch (expression_type.*) {
-                        .error_union => |error_union| switch (unit.types.get(error_union.type).*) {
-                            .void => {
-                                const extract_value = try unit.instructions.append(context.my_allocator, .{
-                                    .extract_value = .{
-                                        .expression = expression,
-                                        .index = 1,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, extract_value);
+                        .error_union => |error_union_index| {
+                            const error_union = unit.error_unions.get(error_union_index);
+                            switch (unit.types.get(error_union.type).*) {
+                                .void => {
+                                    const extract_value = try unit.instructions.append(context.my_allocator, .{
+                                        .extract_value = .{
+                                            .expression = expression,
+                                            .index = 1,
+                                        },
+                                        });
+                                    try builder.appendInstruction(unit, context, extract_value);
 
-                                const error_block = try builder.newBasicBlock(unit, context);
-                                const clean_block = try builder.newBasicBlock(unit, context);
-                                try builder.branch(unit, context, extract_value, error_block, clean_block);
-                                builder.current_basic_block = error_block;
+                                    const error_block = try builder.newBasicBlock(unit, context);
+                                    const clean_block = try builder.newBasicBlock(unit, context);
+                                    try builder.branch(unit, context, extract_value, error_block, clean_block);
+                                    builder.current_basic_block = error_block;
 
-                                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, statement_node.right, .left);
-                                _ = v; // autofix
-                                assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
+                                    const v = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, statement_node.right, .left);
+                                    _ = v; // autofix
+                                    assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
 
-                                builder.current_basic_block = clean_block;
-                                // // try unit.instructions.append(context.my_allocator, .{
-                                // //     .branch = .{
-                                // //         .condition = extract_value,
-                                // //         .from = builder.current_basic_block,
-                                // //     },
-                                // // });
-                                // unreachable;
-                            },
-                            else => |t| @panic(@tagName(t)),
+                                    builder.current_basic_block = clean_block;
+                                    // // try unit.instructions.append(context.my_allocator, .{
+                                    // //     .branch = .{
+                                    // //         .condition = extract_value,
+                                    // //         .from = builder.current_basic_block,
+                                    // //     },
+                                    // // });
+                                    // unreachable;
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
                         },
                         else => builder.reportCompileError(unit, context, .{
                             .message = "expected error union expression",
@@ -9779,41 +11006,159 @@ pub const Builder = struct {
                     }
                 },
                 .try_expression => {
-                    assert(statement_node.left != .null);
-                    assert(statement_node.right == .null);
-
-                    const expression = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, statement_node.left, .left);
-                    const expression_type = unit.types.get(expression.type);
-                    switch (expression_type.*) {
-                        .error_union => |error_union| switch (unit.types.get(error_union.type).*) {
-                            .void => {
-                                const extract_value = try unit.instructions.append(context.my_allocator, .{
-                                    .extract_value = .{
-                                        .expression = expression,
-                                        .index = 1,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, extract_value);
-                                const error_block = try builder.newBasicBlock(unit, context);
-                                const clean_block = try builder.newBasicBlock(unit, context);
-                                try builder.branch(unit, context, extract_value, error_block, clean_block);
-                                builder.current_basic_block = error_block;
-
-                                try builder.buildRet(unit, context, expression);
-                                assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
-
-                                builder.current_basic_block = clean_block;
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
+                    _ = try builder.resolveTryExpression(unit, context, Type.Expect{ .type = .void }, statement_node_index, .left);
                 },
                 else => |t| @panic(@tagName(t)),
             }
         }
 
         return block_index;
+    }
+
+    fn resolveCatchExpression(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) !V {
+        const node = unit.getNode(node_index);
+        assert(node.left != .null);
+        assert(node.right != .null);
+
+        const expression = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
+        const expression_type = unit.types.get(expression.type);
+        switch (expression_type.*) {
+            .error_union => |error_union_index| {
+                const error_union = unit.error_unions.get(error_union_index);
+                switch (type_expect) {
+                    .none => {},
+                    .type => |type_index| {
+                        switch (try builder.typecheck(unit, context, type_index, error_union.type)) {
+                            .success => {},
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+                const catch_type_expect = Type.Expect{ .type = error_union.type };
+                const extract_value = try unit.instructions.append(context.my_allocator, .{
+                    .extract_value = .{
+                        .expression = expression,
+                        .index = 1,
+                    },
+                });
+                try builder.appendInstruction(unit, context, extract_value);
+
+                const error_block = try builder.newBasicBlock(unit, context);
+                const clean_block = try builder.newBasicBlock(unit, context);
+                try builder.branch(unit, context, extract_value, error_block, clean_block);
+                builder.current_basic_block = error_block;
+
+                const right_node = unit.getNode(node.right);
+                const catch_expression_node_index =  switch (right_node.id) {
+                    .catch_payload => b: {
+                        const payload_node = unit.getNode(right_node.left);
+                        const emit = true;
+                        const error_extract_value = try unit.instructions.append(context.my_allocator, .{
+                            .extract_value = .{
+                                .expression = expression,
+                                .index = 0,
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, error_extract_value);
+                        const error_value = V{
+                            .value = .{
+                                .runtime = error_extract_value,
+                            },
+                            .type = error_union.@"error",
+                        };
+                        _ = try builder.emitLocalVariableDeclaration(unit, context, payload_node.token, .@"const", error_union.@"error", error_value, emit, null);
+                        break :b right_node.right;
+                    },
+                    else => node.right,
+                };
+
+                const v = try builder.resolveRuntimeValue(unit, context, catch_type_expect, catch_expression_node_index, side);
+
+                switch (unit.types.get(error_union.type).*) {
+                    .void => {
+                        assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
+
+                        builder.current_basic_block = clean_block;
+
+                        return undefined;
+                    },
+                    else => {
+                        const is_block_terminated = unit.basic_blocks.get( builder.current_basic_block).terminated;
+                        const CatchInfo = struct{
+                            phi: Instruction.Index,
+                            exit_block: BasicBlock.Index,
+                        };
+                        const catch_info: ?CatchInfo = if (!is_block_terminated) blk: {
+                            const expected_type = error_union.type;
+                            assert(v.type == expected_type);
+                            const phi_index = try unit.instructions.append(context.my_allocator, .{
+                                .phi = .{
+                                    .type = expected_type,
+                                },
+                            });
+                            const phi = &unit.instructions.get(phi_index).phi;
+                            try phi.addIncoming(context, v, builder.current_basic_block);
+
+                            const phi_block = try builder.newBasicBlock(unit, context);
+                            try builder.jump(unit, context, phi_block);
+                            break :blk .{
+                                .phi = phi_index,
+                                .exit_block = phi_block,
+                            };
+                        } else null;
+
+                        assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
+                        builder.current_basic_block = clean_block;
+
+                        const no_error_extract_value = try unit.instructions.append(context.my_allocator, .{
+                            .extract_value = .{
+                                .expression = expression,
+                                .index = 0,
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, no_error_extract_value);
+
+                        // switch (type_expect) {
+                        //     .none => {},
+                        //     else => |t| @panic(@tagName(t)),
+                        // }
+
+                        const value = V{
+                            .value = .{
+                                .runtime = no_error_extract_value,
+                            },
+                            .type = error_union.type,
+                        };
+                        if (is_block_terminated) {
+                            return value;
+                        } else {
+                            const phi_index = catch_info.?.phi;
+                            const phi = &unit.instructions.get(phi_index).phi;
+                            const exit_block = catch_info.?.exit_block;
+
+                            try phi.addIncoming(context, value, builder.current_basic_block);
+
+                            try builder.jump(unit, context, exit_block);
+                            builder.current_basic_block = exit_block;
+
+                            try builder.appendInstruction(unit, context, phi_index);
+
+                            return .{
+                                .value = .{
+                                    .runtime = phi_index,
+                                },
+                                .type = error_union.type,
+                            };
+                        }
+                    },
+                }
+            },
+            else => builder.reportCompileError(unit, context, .{
+                .message = "expected error union expression",
+                .node = node.left,
+            }),
+        }
     }
 
     fn resolveBranchPayload(builder: *Builder, unit: *Unit, context: *const Context, arguments: struct {
@@ -10020,7 +11365,9 @@ pub const Builder = struct {
             }
         }
 
-        builder.current_basic_block = exit_block;
+        if (unit.basic_blocks.get(exit_block).predecessors.length > 0) {
+            builder.current_basic_block = exit_block;
+        }
     }
 
     fn branch(builder: *Builder, unit: *Unit, context: *const Context, condition: Instruction.Index, taken_block: BasicBlock.Index, non_taken_block: BasicBlock.Index) !void {
@@ -10036,8 +11383,8 @@ pub const Builder = struct {
         try builder.appendInstruction(unit, context, br);
 
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
-        unit.basic_blocks.get(taken_block).predecessor = builder.current_basic_block;
-        unit.basic_blocks.get(non_taken_block).predecessor = builder.current_basic_block;
+        try unit.basic_blocks.get(taken_block).predecessors.append(context.my_allocator, builder.current_basic_block);
+        try unit.basic_blocks.get(non_taken_block).predecessors.append(context.my_allocator, builder.current_basic_block);
     }
 
     fn jump(builder: *Builder, unit: *Unit, context: *const Context, new_basic_block: BasicBlock.Index) !void {
@@ -10051,10 +11398,10 @@ pub const Builder = struct {
         try builder.appendInstruction(unit, context, instruction);
 
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
-        unit.basic_blocks.get(new_basic_block).predecessor = builder.current_basic_block;
+        try unit.basic_blocks.get(new_basic_block).predecessors.append(context.my_allocator, builder.current_basic_block);
     }
 
-    fn resolveSwitch(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) !V {
+    fn resolveSwitch(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) !V {
         const node = unit.getNode(node_index);
         assert(node.id == .@"switch");
         const expression_to_switch_on = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .right);
@@ -10080,9 +11427,123 @@ pub const Builder = struct {
                     const true_switch_case_node = unit.getNode(case_nodes[group_index]);
                     return try builder.resolveRuntimeValue(unit, context, type_expect, true_switch_case_node.right, .right);
                 },
+                .bool => |boolean| {
+                    assert(case_nodes.len == 2);
+                    for (case_nodes) |case_node_index| {
+                        const case_node = unit.getNode(case_node_index);
+                        assert(case_node.left != .null);
+                        assert(case_node.right != .null);
+                        const boolean_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .bool }, .{}, case_node.left, null);
+                        switch (boolean_value) {
+                            .bool => |case_boolean| {
+                                if (case_boolean == boolean) {
+                                    return try builder.resolveRuntimeValue(unit, context, type_expect, case_node.right, side);
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    } else {
+                        unreachable;
+                    }
+                },
                 else => |t| @panic(@tagName(t)),
             },
-            .runtime => todo(),
+            .runtime => {
+                const condition_type = expression_to_switch_on.type;
+                switch (unit.types.get(condition_type).*) {
+                    .comptime_int => unreachable,
+                    else => {},
+                }
+                switch (type_expect) {
+                    .type => |type_index| switch (type_index) {
+                        .void => unreachable,
+                        .noreturn => unreachable,
+                        else => {
+                            const switch_instruction_index = try unit.instructions.append(context.my_allocator, .{
+                                .@"switch" = .{
+                                    .condition = expression_to_switch_on,
+                                    .block_type = type_index,
+                                },
+                            });
+                            try builder.appendInstruction(unit, context, switch_instruction_index);
+                            const switch_instruction = &unit.instructions.get(switch_instruction_index).@"switch";
+                            const phi_index = try unit.instructions.append(context.my_allocator, .{
+                                .phi = .{
+                                    .type = type_index,
+                                },
+                            });
+                            const phi = &unit.instructions.get(phi_index).phi;
+
+                            const phi_block = try builder.newBasicBlock(unit, context);
+
+                            const before_switch_bb = builder.current_basic_block;
+                            for (case_nodes) |case_node_index| {
+                                builder.current_basic_block = before_switch_bb;
+                                const case_node = unit.getNode(case_node_index);
+                                assert(case_node.right != .null);
+                                var conditions = UnpinnedArray(V.Comptime){};
+                                switch (case_node.left) {
+                                    .null => {},
+                                    else => {
+                                        const condition_node = unit.getNode(case_node.left);
+                                        switch (condition_node.id) {
+                                            .node_list => {
+                                                const condition_nodes = unit.getNodeListFromNode(condition_node);
+                                                try conditions.ensure_capacity(context.my_allocator, @intCast(condition_nodes.len));
+                                                for (condition_nodes) |condition_node_index| {
+                                                    const condition = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null);
+                                                    conditions.append_with_capacity(condition);
+                                                }
+                                            },
+                                            else => {
+                                                const v = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, case_node.left, null);
+                                                try conditions.ensure_capacity(context.my_allocator, 1);
+                                                conditions.append_with_capacity(v);
+                                            },
+                                        }
+                                    },
+                                }
+
+                                const case_block = try builder.newBasicBlock(unit, context);
+                                builder.current_basic_block = case_block;
+                                const v = try builder.resolveRuntimeValue(unit, context, type_expect, case_node.right, .right);
+
+                                if (!unit.basic_blocks.get( builder.current_basic_block).terminated) {
+                                    try phi.addIncoming(context, v, case_block);
+                                    try builder.jump(unit, context, phi_block);
+                                }
+
+                                if (conditions.length > 0) {
+                                    for (conditions.slice()) |condition| {
+                                        const case = Instruction.Switch.Case{
+                                            .condition = condition,
+                                            .basic_block = case_block,
+                                        };
+                                        try switch_instruction.cases.append(context.my_allocator, case);
+                                    }
+                                } else {
+                                    switch_instruction.else_block = case_block;
+                                }
+                            }
+
+                            if (phi.values.length > 0) {
+
+                            builder.current_basic_block = phi_block;
+                            try builder.appendInstruction(unit, context, phi_index);
+
+                            return V{
+                                .value = .{
+                                    .runtime = phi_index,
+                                },
+                                .type = type_index,
+                            };
+                            } else return undefined;
+                        },
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+                todo();
+            },
             else => |t| @panic(@tagName(t)),
         }
     }
@@ -10751,6 +12212,12 @@ pub const Builder = struct {
         return result;
     }
 
+    fn isCurrentFunction(builder: *Builder, unit: *Unit, name: []const u8) bool {
+        const hash = unit.code_to_emit.get(builder.current_function).?.declaration.name;
+        const identifier = unit.getIdentifier(hash);
+        return byte_equal(identifier, name);
+    }
+
     fn emitReturn(builder: *Builder, unit: *Unit, context: *const Context, return_node_index: Node.Index) !void {
         const return_node = unit.getNode(return_node_index);
         assert(return_node.id == .@"return");
@@ -10765,8 +12232,7 @@ pub const Builder = struct {
         if (builder.return_block != .null) {
             if (builder.return_phi != .null) {
                 const phi = &unit.instructions.get(builder.return_phi).phi;
-                try phi.values.append(context.my_allocator, return_value);
-                try phi.basic_blocks.append(context.my_allocator, builder.current_basic_block);
+                try phi.addIncoming(context, return_value, builder.current_basic_block);
             }
 
             assert(builder.current_basic_block != builder.return_block);
@@ -10786,8 +12252,7 @@ pub const Builder = struct {
             try builder.appendInstruction(unit, context, builder.return_phi);
 
             const phi = &unit.instructions.get(builder.return_phi).phi;
-            try phi.values.append(context.my_allocator, return_value);
-            try phi.basic_blocks.append(context.my_allocator, current_basic_block);
+            try phi.addIncoming(context, return_value, current_basic_block);
 
             try builder.buildRet(unit, context, .{
                 .value = .{
@@ -10825,22 +12290,30 @@ pub const Builder = struct {
     }
 
     fn reportCompileError(builder: *Builder, unit: *Unit, context: *const Context, err: Error) noreturn {
+        _ = context; // autofix
         const err_node = unit.getNode(err.node);
         const file = unit.files.get(builder.current_file);
+        _ = file; // autofix
         const token_debug_info = builder.getTokenDebugInfo(unit, err_node.token);
-        std.io.getStdOut().writer().print("{s}:{}:{}: \x1b[31merror:\x1b[0m ", .{ file.getPath(context.allocator) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1 }) catch unreachable;
-        std.io.getStdOut().writer().writeAll(err.message) catch unreachable;
-        std.io.getStdOut().writer().writeByte('\n') catch unreachable;
+        _ = token_debug_info; // autofix
+        // std.io.getStdOut().writer().print("{s}:{}:{}: \x1b[31merror:\x1b[0m ", .{ file.getPath(context.allocator) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1 }) catch unreachable;
+        // std.io.getStdOut().writer().writeAll(err.message) catch unreachable;
+        // std.io.getStdOut().writer().writeByte('\n') catch unreachable;
         std.os.abort();
     }
 
     fn reportFormattedCompileError(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index, comptime format: []const u8, args: anytype) noreturn {
+        _ = context; // autofix
+        _ = format; // autofix
+        _ = args; // autofix
         const err_node = unit.getNode(node_index);
         const file = unit.files.get(builder.current_file);
+        _ = file; // autofix
         const token_debug_info = builder.getTokenDebugInfo(unit, err_node.token);
-        std.io.getStdOut().writer().print("{s}:{}:{}: \x1b[31merror:\x1b[0m ", .{ file.getPath(context.allocator) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1 }) catch unreachable;
-        std.io.getStdOut().writer().print(format, args) catch unreachable;
-        std.io.getStdOut().writer().writeByte('\n') catch unreachable;
+        _ = token_debug_info; // autofix
+        // std.io.getStdOut().writer().print("{s}:{}:{}: \x1b[31merror:\x1b[0m ", .{ file.getPath(context.allocator) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1 }) catch unreachable;
+        // std.io.getStdOut().writer().print(format, args) catch unreachable;
+        // std.io.getStdOut().writer().writeByte('\n') catch unreachable;
         std.os.abort();
     }
 
@@ -10978,6 +12451,7 @@ pub const Unit = struct {
     errors: Type.Error.List = .{},
     error_sets: Type.Error.Set.List = .{},
     error_fields: Type.Error.Field.List = .{},
+    error_unions: Type.Error.Union.List = .{},
     token_buffer: Token.Buffer = .{},
     node_lists: UnpinnedArray(UnpinnedArray(Node.Index)) = .{},
     file_token_offsets: MyHashMap(Token.Range, Debug.File.Index) = .{},
@@ -10999,6 +12473,8 @@ pub const Unit = struct {
     type_declarations: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
     struct_type_map: MyHashMap(Struct.Index, Type.Index) = .{},
     test_functions: MyHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global) = .{},
+    error_union_map: MyHashMap(Type.Error.Union.Descriptor, Type.Index) = .{},
+    error_alternative_map: MyHashMap(Type.Index, Type.Index) = .{},
     scope: Debug.Scope.Global = .{
         .scope = .{
             .file = .null,
@@ -11011,144 +12487,188 @@ pub const Unit = struct {
     },
     root_package: *Package = undefined,
     main_package: ?*Package = null,
+    all_errors: Type.Index = .null,
     descriptor: Descriptor,
     discard_identifiers: usize = 0,
     anon_i: usize = 0,
     anon_arr: usize = 0,
 
-    fn dumpFunctionDefinition(unit: *Unit, function_definition_index: Function.Definition.Index) void {
-        const function_definition = unit.function_definitions.get(function_definition_index);
-        _ = function_definition; // autofix
+    fn dumpInstruction(instruction_index: Instruction.Index) !void {
+        try write(.ir, "%");
+        try dumpInt(Instruction.unwrap(instruction_index), 10, false);
+    }
 
-        // for (function_definition.basic_blocks.slice()) |basic_block_index| {
-        //     const basic_block = unit.basic_blocks.get(basic_block_index);
-        //     // logln(.compilation, .ir, "[#{}]:", .{BasicBlock.unwrap(basic_block_index)});
-        //
-        //     for (basic_block.instructions.slice()) |instruction_index| {
-        //         const instruction = unit.instructions.get(instruction_index);
-        //         // log(.compilation, .ir, "    %{}: {s} ", .{ Instruction.unwrap(instruction_index), @tagName(instruction.*) });
-        //
-        //         switch (instruction.*) {
-        //             .call => |call| {
-        //                 switch (call.callable.value) {
-        //                     .@"comptime" => |ct| switch (ct) {
-        //                         .global => |global| {},//log(.compilation, .ir, "{s}(", .{unit.getIdentifier(global.declaration.name)}),
-        //                         else => unreachable,
-        //                     },
-        //                     .runtime => |ii| log(.compilation, .ir, "%{}(", .{Instruction.unwrap(ii)}),
-        //                     else => |t| @panic(@tagName(t)),
-        //                 }
-        //
-        //                 for (call.arguments) |arg| {
-        //                     switch (arg.value) {
-        //                         .@"comptime" => log(.compilation, .ir, "comptime", .{}),
-        //                         .runtime => |ii| log(.compilation, .ir, "%{}, ", .{Instruction.unwrap(ii)}),
-        //                         else => |t| @panic(@tagName(t)),
-        //                     }
-        //                 }
-        //
-        //                 log(.compilation, .ir, ")", .{});
-        //             },
-        //             .insert_value => |insert_value| {
-        //                 log(.compilation, .ir, "aggregate ", .{});
-        //                 switch (insert_value.expression.value) {
-        //                     .@"comptime" => log(.compilation, .ir, "comptime", .{}),
-        //                     .runtime => |ii| log(.compilation, .ir, "%{}", .{Instruction.unwrap(ii)}),
-        //                     else => unreachable,
-        //                 }
-        //                 log(.compilation, .ir, ", {}, ", .{insert_value.index});
-        //                 switch (insert_value.new_value.value) {
-        //                     .@"comptime" => log(.compilation, .ir, "comptime", .{}),
-        //                     .runtime => |ii| log(.compilation, .ir, "%{}", .{Instruction.unwrap(ii)}),
-        //                     else => unreachable,
-        //                 }
-        //             },
-        //             .extract_value => |extract_value| {
-        //                 log(.compilation, .ir, "aggregate ", .{});
-        //                 switch (extract_value.expression.value) {
-        //                     .@"comptime" => log(.compilation, .ir, "comptime", .{}),
-        //                     .runtime => |ii| log(.compilation, .ir, "%{}", .{Instruction.unwrap(ii)}),
-        //                     else => unreachable,
-        //                 }
-        //                 log(.compilation, .ir, ", {}", .{extract_value.index});
-        //             },
-        //             .get_element_pointer => |gep| {
-        //                 log(.compilation, .ir, "aggregate %{}, ", .{Instruction.unwrap(gep.pointer)});
-        //                 switch (gep.index.value) {
-        //                     .@"comptime" => log(.compilation, .ir, "comptime", .{}),
-        //                     .runtime => |ii| log(.compilation, .ir, "%{}", .{Instruction.unwrap(ii)}),
-        //                     else => unreachable,
-        //                 }
-        //             },
-        //             .load => |load| {
-        //                 switch (load.value.value) {
-        //                     .@"comptime" => |ct| switch (ct) {
-        //                         .global => |global| log(.compilation, .ir, "{s}", .{unit.getIdentifier(global.declaration.name)}),
-        //                         else => |t| @panic(@tagName(t)),
-        //                     },
-        //                     .runtime => |ii| {
-        //                         log(.compilation, .ir, "%{}", .{@intFromEnum(ii)});
-        //                     },
-        //                     else => unreachable,
-        //                 }
-        //             },
-        //             .push_scope => |push_scope| {
-        //                 log(.compilation, .ir, "0x{x} -> 0x{x}", .{ @as(u24, @truncate(@intFromPtr(push_scope.old))), @as(u24, @truncate(@intFromPtr(push_scope.new))) });
-        //             },
-        //             .pop_scope => |pop_scope| {
-        //                 log(.compilation, .ir, "0x{x} <- 0x{x}", .{ @as(u24, @truncate(@intFromPtr(pop_scope.new))), @as(u24, @truncate(@intFromPtr(pop_scope.old))) });
-        //             },
-        //             .debug_checkpoint => |checkpoint| {
-        //                 log(.compilation, .ir, "{}, {}", .{ checkpoint.line, checkpoint.column });
-        //             },
-        //             .argument_declaration => |arg| {
-        //                 log(.compilation, .ir, "\"{s}\"", .{unit.getIdentifier(arg.declaration.name)});
-        //             },
-        //             .cast => |cast| {
-        //                 log(.compilation, .ir, "{s}", .{@tagName(cast.id)});
-        //             },
-        //             .jump => |jump| {
-        //                 log(.compilation, .ir, "[#{}]", .{BasicBlock.unwrap(jump.to)});
-        //             },
-        //             .branch => |branch| {
-        //                 log(.compilation, .ir, "bool %{}, [#{}, #{}]", .{ Instruction.unwrap(branch.condition), BasicBlock.unwrap(branch.taken), BasicBlock.unwrap(branch.not_taken) });
-        //             },
-        //             .phi => |phi| {
-        //                 for (phi.values.pointer[0..phi.values.length], phi.basic_blocks.pointer[0..phi.basic_blocks.length]) |value, bb| {
-        //                     log(.compilation, .ir, "(%{}, #{}), ", .{ switch (value.value) {
-        //                         .@"comptime" => 0xffff_ffff,
-        //                         .runtime => |ii| @intFromEnum(ii),
-        //                         else => unreachable,
-        //                     }, @intFromEnum(bb) });
-        //                 }
-        //             },
-        //             .integer_compare => |compare| {
-        //                 log(.compilation, .ir, "{s} ", .{@tagName(compare.id)});
-        //                 switch (compare.left.value) {
-        //                     .@"comptime" => {
-        //                         log(.compilation, .ir, "$comptime, ", .{});
-        //                     },
-        //                     .runtime => |ii| {
-        //                         log(.compilation, .ir, "%{}, ", .{@intFromEnum(ii)});
-        //                     },
-        //                     else => unreachable,
-        //                 }
-        //
-        //                 switch (compare.right.value) {
-        //                     .@"comptime" => {
-        //                         log(.compilation, .ir, "$comptime", .{});
-        //                     },
-        //                     .runtime => |ii| {
-        //                         log(.compilation, .ir, "%{}", .{@intFromEnum(ii)});
-        //                     },
-        //                     else => unreachable,
-        //                 }
-        //             },
-        //             else => {},
-        //         }
-        //         // logln(.compilation, .ir, "", .{});
-        //     }
-        // }
+    fn dumpInt(value: u64, base: u8, signed: bool) !void{
+        var buffer: [65]u8 = undefined;
+        const formatted_int = format_int(&buffer, value, base, signed);
+        try write(.ir, formatted_int);
+    }
+
+    fn dumpBasicBlock(basic_block: BasicBlock.Index) !void {
+        try write(.ir, "#");
+        try dumpInt(BasicBlock.unwrap(basic_block), 10, false);
+    }
+
+    fn dumpFunctionDefinition(unit: *Unit, function_definition_index: Function.Definition.Index) !void {
+        const function_definition = unit.function_definitions.get(function_definition_index);
+
+        for (function_definition.basic_blocks.slice()) |basic_block_index| {
+            const basic_block = unit.basic_blocks.get(basic_block_index);
+            try write(.ir, "[");
+            try dumpBasicBlock(basic_block_index);
+            try write(.ir, "]:\n");
+
+            for (basic_block.instructions.slice()) |instruction_index| {
+                const instruction = unit.instructions.get(instruction_index);
+                try write(.ir, "    ");
+                try dumpInstruction(instruction_index);
+                try write(.ir, ": ");
+                try write(.ir, @tagName(instruction.*));
+                try write(.ir, " ");
+
+                switch (instruction.*) {
+                    .call => |call| {
+                        switch (call.callable.value) {
+                            .@"comptime" => |ct| switch (ct) {
+                                .global => |global| {
+                                    _ = global; // autofix
+                                },//log(.compilation, .ir, "{s}(", .{unit.getIdentifier(global.declaration.name)}),
+                                else => unreachable,
+                            },
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => |t| @panic(@tagName(t)),
+                        }
+
+                        for (call.arguments) |arg| {
+                            switch (arg.value) {
+                                .@"comptime" => try write(.ir, "comptime"),
+                                .runtime => |ii| try dumpInstruction(ii),
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        }
+
+                        try write(.ir, ")");
+                    },
+                    .insert_value => |insert_value| {
+                        try write(.ir, "aggregate ");
+                        switch (insert_value.expression.value) {
+                            .@"comptime" => try write(.ir, "comptime"),
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => unreachable,
+                        }
+
+                        try write(.ir, ", ");
+                        try dumpInt(insert_value.index, 10, false);
+                        try write(.ir, ", ");
+                        switch (insert_value.new_value.value) {
+                            .@"comptime" => try write(.ir, "comptime"),
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => unreachable,
+                        }
+                    },
+                    .extract_value => |extract_value| {
+                        try write(.ir, "aggregate ");
+                        switch (extract_value.expression.value) {
+                            .@"comptime" => try write(.ir, "$comptime"),
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => unreachable,
+                        }
+                        try write(.ir, ", ");
+                        try dumpInt(extract_value.index, 10, false);
+                    },
+                    .get_element_pointer => |gep| {
+                        try write(.ir, "aggregate ");
+                        try dumpInstruction(gep.pointer);
+                        try write(.ir, ", ");
+                        switch (gep.index.value) {
+                            .@"comptime" => try write(.ir, "$comptime"),
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => unreachable,
+                        }
+                    },
+                    .load => |load| {
+                        switch (load.value.value) {
+                            .@"comptime" => |ct| switch (ct) {
+                                .global => |global| try write(.ir, unit.getIdentifier(global.declaration.name)),
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => unreachable,
+                        }
+                    },
+                    .push_scope => |push_scope| {
+                        try dumpInt(@as(u24, @truncate(@intFromPtr(push_scope.old))), 16, false);
+                        try write(.ir, " -> ");
+                        try dumpInt(@as(u24, @truncate(@intFromPtr(push_scope.new))), 16, false);
+                    },
+                    .pop_scope => |pop_scope| {
+                        try dumpInt(@as(u24, @truncate(@intFromPtr(pop_scope.new))), 16, false);
+                        try write(.ir, " <- ");
+                        try dumpInt(@as(u24, @truncate(@intFromPtr(pop_scope.old))), 16, false);
+                    },
+                    .debug_checkpoint => |checkpoint| {
+                        try dumpInt(checkpoint.line, 10, false);
+                        try write(.ir, ", ");
+                        try dumpInt(checkpoint.column, 10, false);
+                    },
+                    .argument_declaration => |arg| {
+                        try write(.ir, "\"");
+                        try write(.ir, unit.getIdentifier(arg.declaration.name));
+                        try write(.ir, "\"");
+                    },
+                    .cast => |cast| {
+                        try write(.ir, @tagName(cast.id));
+                    },
+                    .jump => |jump| {
+                        try write(.ir, "[#");
+                        try dumpInt(BasicBlock.unwrap(jump.to), 10, false);
+                        try write(.ir, "]");
+                    },
+                    .branch => |branch| {
+                        try dumpInstruction(branch.condition);
+                        try write(.ir, ", [");
+                        try dumpInt(BasicBlock.unwrap(branch.taken), 10, false);
+                        try write(.ir, ", ");
+                        try dumpInt(BasicBlock.unwrap(branch.not_taken), 10, false);
+                        try write(.ir, "]");
+                    },
+                    .phi => |phi| {
+                        for (phi.values.pointer[0..phi.values.length], phi.basic_blocks.pointer[0..phi.basic_blocks.length]) |value, bb| {
+                            try write(.ir, "(");
+                            switch (value.value) {
+                                .@"comptime" => try write(.ir, "$comptime"), 
+                                .runtime => |ii| try dumpInstruction(ii),
+                                else => |t| @panic(@tagName(t)),
+                            }
+                            try write(.ir, "#");
+                            try dumpInt(@intFromEnum(bb), 10, false);
+                            try write(.ir, ")");
+                        }
+                    },
+                    .integer_compare => |compare| {
+                        try write(.ir, @tagName(compare.id));
+                        try write(.ir, " ");
+                        switch (compare.left.value) {
+                            .@"comptime" => try write(.ir, "$comptime "),
+                            .runtime => |ii| {
+                                try dumpInstruction(ii);
+                                try write(.ir, ", ");
+                            },
+                            else => unreachable,
+                        }
+
+                        switch (compare.right.value) {
+                            .@"comptime" => try write(.ir, "$comptime"),
+                            .runtime => |ii| try dumpInstruction(ii),
+                            else => unreachable,
+                        }
+                    },
+                    else => {},
+                }
+                try write(.ir, "\n");
+                // logln(.compilation, .ir, "", .{});
+            }
+        }
     }
 
     fn getReturnType(unit: *Unit, function_index: Function.Definition.Index) Type.Index {
@@ -11306,6 +12826,7 @@ pub const Unit = struct {
                 },
                 .backing_type = .null,
                 .optional = true,
+                .error_union_alternative = false,
                 .type = .null,
             });
             const optional_struct = unit.structs.get(optional_struct_index);
@@ -11405,6 +12926,7 @@ pub const Unit = struct {
         return existing_type_index;
     }
 
+
     fn processIdentifier(unit: *Unit, context: *const Context, string: []const u8) !u32 {
         const hash = data_structures.my_hash(string);
         if (unit.identifiers.get_pointer(hash) == null) {
@@ -11475,9 +12997,15 @@ pub const Unit = struct {
 
         for (unit.code_to_emit.values()) |function_declaration| {
             const function_definition_index = function_declaration.initial_value.function_definition;
-            // logln(.compilation, .ir, "Function #{} {s}", .{ Function.Definition.unwrap(function_definition_index), unit.getIdentifier(function_declaration.declaration.name) });
+            try write(.ir, "\nFunction #");
+            try dumpInt(Function.Definition.unwrap(function_definition_index), 16, false);
+            try write(.ir, ": ");
+            const function_name = unit.getIdentifier(function_declaration.declaration.name);
+            try write(.ir, function_name);
+            try write(.ir, "\n\n");
+            // logln(.compilation, .ir, "Function #{} {s}", .{ Function.Definition.unwrap(function_definition_index),  });
 
-            unit.dumpFunctionDefinition(function_definition_index);
+            try unit.dumpFunctionDefinition(function_definition_index);
         }
     }
 
@@ -11600,6 +13128,34 @@ pub const Unit = struct {
                 .index = file_index,
                 .is_new = true,
             };
+        }
+    }
+
+    fn getErrorUnionTypeForError(unit: *Unit, error_union_type_index: Type.Index) !Type.Index{
+        const error_union_index = unit.types.get(error_union_type_index).error_union;
+        const error_union = unit.error_unions.get(error_union_index);
+        if (error_union.alternate_type != .null) {
+            if (error_union.alternate_index) {
+                return error_union.alternate_type;
+            } else {
+                return error_union_type_index;
+            }
+        } else {
+            return error_union_type_index;
+        }
+    }
+
+    fn getErrorUnionTypeForType(unit: *Unit, error_union_type_index: Type.Index) !Type.Index{
+        const error_union_index = unit.types.get(error_union_type_index).error_union;
+        const error_union = unit.error_unions.get(error_union_index);
+        if (error_union.alternate_type != .null) {
+            if (error_union.alternate_index) {
+                return error_union_type_index;
+            } else {
+                return error_union.alternate_type;
+            }
+        } else {
+            return error_union_type_index;
         }
     }
 
@@ -11751,6 +13307,8 @@ pub const FixedKeyword = enum {
     @"try",
     @"orelse",
     @"error",
+    @"and",
+    @"or",
 };
 
 pub const Descriptor = struct {
@@ -11897,6 +13455,7 @@ pub const Token = struct {
         operator_optional,
         operator_dollar,
         operator_switch_case,
+        operator_backtick,
         // Binary
         operator_assign,
         operator_add,
@@ -11956,6 +13515,8 @@ pub const Token = struct {
         fixed_keyword_catch,
         fixed_keyword_orelse,
         fixed_keyword_error,
+        fixed_keyword_and,
+        fixed_keyword_or,
         unused1,
         unused2,
         unused3,
@@ -12059,3 +13620,23 @@ pub const InlineAssembly = struct {
         };
     };
 };
+
+const LogKind = enum{
+    parser,
+    ir,
+    llvm,
+    panic,
+};
+
+const should_log_map = std.EnumSet(LogKind).initMany(&.{
+    // .parser,
+    // .ir,
+    // .llvm,
+    .panic,
+});
+
+pub fn write(kind: LogKind, string: []const u8) !void {
+    if (should_log_map.contains(kind)) {
+        try std.io.getStdOut().writeAll(string);
+    }
+}

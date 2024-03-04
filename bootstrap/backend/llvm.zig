@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Compilation = @import("../Compilation.zig");
+const write = Compilation.write;
 // const log = Compilation.log;
 // const logln = Compilation.logln;
 const Module = Compilation.Module;
@@ -106,6 +107,7 @@ pub const LLVM = struct {
         const createCast = bindings.NativityLLVMBuilderCreateCast;
         const createBranch = bindings.NativityLLVMBuilderCreateBranch;
         const createConditionalBranch = bindings.NativityLLVMBuilderCreateConditionalBranch;
+        const createSwitch = bindings.NativityLLVMBuilderCreateSwitch;
         const createGEP = bindings.NativityLLVMBuilderCreateGEP;
         const createStructGEP = bindings.NativityLLVMBuilderCreateStructGEP;
         const createICmp = bindings.NativityLLVMBuilderCreateICmp;
@@ -812,6 +814,12 @@ pub const LLVM = struct {
                 }
             };
 
+            pub const Switch = opaque{
+                fn toValue(this: *@This()) *Value {
+                    return @ptrCast(this);
+                }
+            };
+
             pub const Ret = opaque {
                 fn toValue(this: *@This()) *Value {
                     return @ptrCast(this);
@@ -1139,6 +1147,8 @@ pub const LLVM = struct {
             fn toValue(this: *@This()) *Value {
                 return @ptrCast(this);
             }
+
+            const toInt = bindings.NativityLLVMConstantToInt;
         };
 
         pub const InlineAssembly = opaque {
@@ -1264,38 +1274,56 @@ pub const LLVM = struct {
                     const array_type = LLVM.Type.Array.get(element_type, array.count + @intFromBool(extra_element)) orelse return Type.Error.array;
                     break :blk array_type.toType();
                 },
-                .error_union => |error_union| {
-                    const error_type = try llvm.getType(unit, context, error_union.@"error");
-                    const payload_type = try llvm.getType(unit, context, error_union.type);
-                    const payload_type_size = unit.types.get(error_union.type).getBitSize(unit);
-
-                    switch (payload_type_size) {
-                        0 => {
-                            const integer_type = llvm.context.getIntegerType(31) orelse unreachable;
-                            const boolean_type = try llvm.getType(unit, context, .bool);
-                            const types = [2]*LLVM.Type{ integer_type.toType(), boolean_type };
-                            const is_packed = false;
-                            const struct_type = llvm.context.getStructType(&types, types.len, is_packed) orelse return Type.Error.@"struct";
-                            return struct_type.toType();
-                        },
-                        else => unreachable,
-                    }
-                    _ = error_type;
-                    _ = payload_type;
-                    unreachable;
+                // .error_union => |error_union| {
+                //     const error_type = try llvm.getType(unit, context, error_union.@"error");
+                //     const payload_type = try llvm.getType(unit, context, error_union.type);
+                //     const payload_type_size = unit.types.get(error_union.type).getBitSize(unit);
+                //
+                //     switch (payload_type_size) {
+                //         0 => {
+                //             const integer_type = llvm.context.getIntegerType(31) orelse unreachable;
+                //             const boolean_type = try llvm.getType(unit, context, .bool);
+                //             const types = [2]*LLVM.Type{ integer_type.toType(), boolean_type };
+                //             const is_packed = false;
+                //             const struct_type = llvm.context.getStructType(&types, types.len, is_packed) orelse return Type.Error.@"struct";
+                //             return struct_type.toType();
+                //         },
+                //         else => unreachable,
+                //     }
+                //     _ = error_type;
+                //     _ = payload_type;
+                //     unreachable;
+                // },
+                // .error_set => |error_set_index| b: {
+                //     const error_set = unit.error_sets.get(error_set_index);
+                //     if (error_set.values.length > 0) {
+                //         unreachable;
+                //     } else {
+                //         const integer_type = llvm.context.getIntegerType(32) orelse unreachable;
+                //         break :b integer_type.toType();
+                //     }
+                // },
+                .@"error" => |error_index| b: {
+                    const error_type = unit.errors.get(error_index);
+                    break :b try llvm.getType(unit, context, error_type.backing_type);
+                    // const integer_type = llvm.context.getIntegerType(31) orelse unreachable;
+                    // break :b integer_type.toType();
                 },
-                .error_set => |error_set_index| b: {
-                    const error_set = unit.error_sets.get(error_set_index);
-                    if (error_set.values.length > 0) {
-                        unreachable;
-                    } else {
-                        const integer_type = llvm.context.getIntegerType(32) orelse unreachable;
-                        break :b integer_type.toType();
-                    }
-                },
-                .@"error" => b: {
-                    const integer_type = llvm.context.getIntegerType(31) orelse unreachable;
-                    break :b integer_type.toType();
+                .@"error_union" => |error_union_index| b: {
+                    const error_union = unit.error_unions.get(error_union_index);
+                    const t = try llvm.getType(unit, context, error_union.type);
+                    const e = try llvm.getType(unit, context, error_union.@"error");
+                    const union_type = unit.types.get(error_union.type);
+                    const union_error = unit.types.get(error_union.@"error");
+                    const type_bitsize = union_type.getBitSize(unit);
+                    const error_bitsize = union_error.getBitSize(unit);
+                    const is_type_bigger = type_bitsize >= error_bitsize;
+                    const union_t = if (is_type_bigger) t else e;
+                    const boolean = llvm.context.getIntegerType(1) orelse unreachable;
+                    const types = [2]*LLVM.Type{union_t, boolean.toType()};
+                    const is_packed =false;
+                    const struct_type = llvm.context.getStructType(&types, types.len, is_packed) orelse return Type.Error.@"struct";
+                    break :b struct_type.toType();
                 },
                 else => |t| @panic(@tagName(t)),
             };
@@ -1922,6 +1950,27 @@ pub const LLVM = struct {
                         const enumeration_type = llvm.debug_info_builder.createEnumerationType(scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.pointer, enumerators.length, backing_type) orelse unreachable;
                         break :b enumeration_type.toType();
                     },
+                    .@"error" => |error_index| b: {
+                        const error_type = unit.errors.get(error_index);
+                        var enumerators = try UnpinnedArray(*LLVM.DebugInfo.Type.Enumerator).initialize_with_capacity(context.my_allocator, error_type.fields.length);
+                        for (error_type.fields.slice()) |error_field_index| {
+                            const enum_field = unit.error_fields.get(error_field_index);
+                            const enum_field_name = unit.getIdentifier(enum_field.name);
+
+                            const is_unsigned = true;
+                            const enumerator = llvm.debug_info_builder.createEnumerator(enum_field_name.ptr, enum_field_name.len, enum_field.value, is_unsigned) orelse unreachable;
+                            enumerators.append_with_capacity(enumerator);
+                        }
+                        const type_declaration = unit.type_declarations.get(sema_type_index).?;
+                        const file = try llvm.getDebugInfoFile(unit, context, type_declaration.declaration.scope.file);
+                        const bit_size = unit.types.get(error_type.backing_type).integer.bit_count;
+                        const backing_type = try llvm.getDebugType(unit, context, error_type.backing_type);
+                        const alignment = 0;
+                        const line = type_declaration.declaration.line + 1;
+                        const scope = try llvm.getScope(unit, context, error_type.scope.scope.parent.?);
+                        const enumeration_type = llvm.debug_info_builder.createEnumerationType(scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.pointer, enumerators.length, backing_type) orelse unreachable;
+                        break :b enumeration_type.toType();
+                    },
                     .slice => |slice| b: {
                         const pointer_type = try llvm.getDebugType(unit, context, slice.child_pointer_type);
                         const len_type = try llvm.getDebugType(unit, context, .usize);
@@ -1983,7 +2032,6 @@ pub const LLVM = struct {
                         const array_type = llvm.debug_info_builder.createArrayType(bit_size, 1, element_type, array.count) orelse unreachable;
                         break :b array_type.toType();
                     },
-
                     .function => |function_prototype_index| b: {
                         const function_prototype = unit.function_prototypes.get(function_prototype_index);
                         var parameter_types = try UnpinnedArray(*LLVM.DebugInfo.Type).initialize_with_capacity(context.my_allocator, @intCast(function_prototype.argument_types.len));
@@ -2165,8 +2213,15 @@ pub const LLVM = struct {
             },
             .error_value => |error_field_index| {
                 const error_field = unit.error_fields.get(error_field_index);
-                const signed = false;
-                const bit_count = 31;
+                const error_type_index = error_field.type;
+                const error_index = unit.types.get(error_type_index).@"error";
+                const error_type = unit.errors.get(error_index);
+                const backing_integer = unit.types.get(error_type.backing_type).integer;
+                const bit_count = backing_integer.bit_count;
+                const signed = switch (backing_integer.signedness) {
+                    .unsigned => false,
+                    .signed => true,
+                };
                 const constant_int = llvm.context.getConstantInt(bit_count, error_field.value, signed) orelse unreachable;
                 return constant_int.toConstant();
             },
@@ -2574,7 +2629,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             const basic_block = llvm.llvm_block_map.get(basic_block_index).?;
             llvm.builder.setInsertPoint(basic_block);
 
+            var last_block = block_node;
+
             for (sema_basic_block.instructions.slice()) |instruction_index| {
+                //if (@intFromEnum(instruction_index) == 474) @breakpoint();
                 const sema_instruction = unit.instructions.get(instruction_index);
 
                 switch (sema_instruction.*) {
@@ -2765,6 +2823,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 const truncate = llvm.builder.createCast(.truncate, value, dest_type, "truncate", "truncate".len) orelse return LLVM.Value.Instruction.Error.cast;
                                 try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, truncate);
                             },
+                            .error_union_type_int_to_pointer, .error_union_type_upcast, .error_union_type_downcast => unreachable,
                         }
                     },
                     .load => |load| {
@@ -3098,7 +3157,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     .jump => |jump| {
                         const target_block = if (llvm.llvm_block_map.get(jump.to)) |target_block| target_block else blk: {
                             const jump_target_block_node = try llvm.createBasicBlock(context, jump.to, "jmp_target");
-                            block_command_list.append(jump_target_block_node);
+                            block_command_list.insertAfter(last_block, jump_target_block_node);
+                            last_block = jump_target_block_node;
 
                             // TODO: make this efficient
                             break :blk llvm.llvm_block_map.get(jump_target_block_node.data).?;
@@ -3110,8 +3170,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     .branch => |branch| {
                         const taken_node = try llvm.createBasicBlock(context, branch.taken, "taken_block");
                         const not_taken_node = try llvm.createBasicBlock(context, branch.not_taken, "not_taken_block");
-                        block_command_list.insertAfter(block_node, taken_node);
+                        block_command_list.insertAfter(last_block, taken_node);
                         block_command_list.insertAfter(taken_node, not_taken_node);
+                        last_block = not_taken_node;
                         // block_command_list.append(taken_node);
                         // block_command_list.append(taken_node);
 
@@ -3162,6 +3223,36 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const intrinsic_call = try llvm.callIntrinsic("llvm.sadd.with.overflow", &parameter_types, &arguments);
                         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
                     },
+                    .@"switch" => |switch_expression| {
+                        const condition = try llvm.emitRightValue(unit, context, switch_expression.condition);
+                        const else_block: ?*LLVM.Value.BasicBlock = if (switch_expression.else_block != .null) b: {
+                            const else_block_node = try llvm.createBasicBlock(context, switch_expression.else_block, "switch_else");
+                            const bb = llvm.llvm_block_map.get(switch_expression.else_block).?;
+                            block_command_list.insertAfter(last_block, else_block_node);
+                            last_block = else_block_node;
+                            break :b bb;
+                        } else null;
+                        var basic_block_array = try UnpinnedArray(*LLVM.Value.BasicBlock).initialize_with_capacity(context.my_allocator, switch_expression.cases.length);
+                        var condition_array = try UnpinnedArray(*LLVM.Value.Constant.Int).initialize_with_capacity(context.my_allocator, switch_expression.cases.length);
+                        for (switch_expression.cases.pointer[0..switch_expression.cases.length]) |case| {
+                            const constant_value = try llvm.emitComptimeRightValue(unit, context, case.condition, switch_expression.condition.type);
+                            const constant_int = constant_value.toInt() orelse unreachable;
+                            const block = if (llvm.llvm_block_map.get(case.basic_block)) |bb| bb else b: {
+                                const switch_block_node =  try llvm.createBasicBlock(context, case.basic_block, "case_block");
+                                block_command_list.insertAfter(last_block, switch_block_node);
+                                last_block = switch_block_node;
+                                const block = llvm.llvm_block_map.get(case.basic_block).?;
+                                break :b block;
+                            };
+                            condition_array.append_with_capacity(constant_int);
+                            basic_block_array.append_with_capacity(block);
+                        }
+
+                        const branch_weights = null;
+                        const unpredictable = null;
+                        const switch_instruction = llvm.builder.createSwitch(condition, else_block, condition_array.pointer, basic_block_array.pointer, condition_array.length, branch_weights, unpredictable);
+                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, switch_instruction.toValue());
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
             }
@@ -3171,7 +3262,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
         for (phis.keys(), phis.values()) |instruction_index, phi| {
             const instruction = unit.instructions.get(instruction_index);
-            for (instruction.phi.values.slice(), instruction.phi.basic_blocks.slice()) |sema_value, sema_block| {
+            const sema_phi = &instruction.phi;
+            for (sema_phi.values.slice(), sema_phi.basic_blocks.slice()) |sema_value, sema_block| {
+                assert(sema_value.type == sema_phi.type);
                 const value_basic_block = llvm.llvm_block_map.get(sema_block).?;
                 const value = llvm.llvm_value_map.get(sema_value) orelse try llvm.emitRightValue(unit, context, sema_value);
                 phi.addIncoming(value, value_basic_block);
@@ -3182,7 +3275,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             var message_len: usize = 0;
             const function_str = llvm.function.toString(&message_len);
             const function_dump = function_str[0..message_len];
-            try std.io.getStdOut().writeAll(function_dump);
+            try write(.panic, function_dump);
             @panic("Function block with no termination");
         }
 
@@ -3196,15 +3289,12 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             var function_len: usize = 0;
             const function_ptr = llvm.function.toString(&function_len);
             const function_ir = function_ptr[0..function_len];
-            _ = function_ir; // autofix
 
             var message_ptr: [*]const u8 = undefined;
             var message_len: usize = 0;
             const result = llvm.function.verify(&message_ptr, &message_len);
 
             if (!result) {
-                const error_message = message_ptr[0..message_len];
-                _ = error_message; // autofix
                 // std.debug.print("PANIC: Failed to verify function:\n{s}\n", .{error_message});
 
                 var module_len: usize = 0;
@@ -3212,6 +3302,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                 const module_dump = module_ptr[0..module_len];
                 _ = module_dump; // autofix
 
+                try write(.llvm, function_ir);
+                const error_message = message_ptr[0..message_len];
+                try write(.llvm, error_message);
                 // std.debug.print("\nLLVM verification for function inside module failed:\nFull module: {s}\n```\n{s}\n```\n{s}\n", .{ module_dump, function_ir, error_message });
                 @panic("LLVM function verification failed");
             }
@@ -3231,10 +3324,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         var message_len: usize = 0;
         const result = llvm.module.verify(&message_ptr, &message_len);
         if (!result) {
-            try std.io.getStdOut().writeAll("Module: \n");
-            try std.io.getStdOut().writeAll(module_string);
-            try std.io.getStdOut().writeAll("\n");
-            try std.io.getStdOut().writeAll(message_ptr[0..message_len]);
+            try write(.llvm, "Module: \n");
+            try write(.llvm, module_string);
+            try write(.llvm, "\n");
+            try write(.llvm, message_ptr[0..message_len]);
             @panic("\nLLVM module verification failed");
         }
     }
@@ -3372,10 +3465,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     if (!linking_result) {
         for (arguments.slice()) |argument| {
             const arg = data_structures.span(argument);
-            try std.io.getStdOut().writeAll(arg);
-            try std.io.getStdOut().writeAll(" ");
+            try write(.llvm, arg);
+            try write(.llvm, " ");
         }
-        try std.io.getStdOut().writeAll("\n");
+        try write(.llvm, "\n");
 
         @panic("Above linker invokation failed");
     }
