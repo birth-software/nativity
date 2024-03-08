@@ -409,6 +409,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimization,
         .single_threaded = true,
     });
+    b.default_step.dependOn(&test_runner.step);
 
     const test_command = b.addRunArtifact(test_runner);
     test_command.step.dependOn(&compiler.step);

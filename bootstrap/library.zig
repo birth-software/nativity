@@ -210,7 +210,7 @@ pub fn byte_equal_terminated(a: [*:0]const u8, b: [*:0]const u8) bool {
     return byte_equal(a_slice, b_slice);
 }
 
-const MapResult = struct{
+const MapResult = struct {
     key_pointer: *anyopaque,
     value_pointer: *anyopaque,
     capacity: IndexType,
@@ -223,8 +223,8 @@ fn ensure_capacity_hashmap(allocator: *MyAllocator, current_capacity: IndexType,
     }
 
     if (new_capacity > current_capacity) {
-        const old_key_slice = key_pointer[0..length * key_size];
-        const old_value_slice = value_pointer[0..length * value_size];
+        const old_key_slice = key_pointer[0 .. length * key_size];
+        const old_value_slice = value_pointer[0 .. length * value_size];
         const new_key_slice = try allocator.reallocate(old_key_slice, new_capacity * key_size, key_alignment);
         const new_value_slice = try allocator.reallocate(old_value_slice, new_capacity * value_size, value_alignment);
 
@@ -308,11 +308,11 @@ pub fn MyHashMap(comptime K: type, comptime V: type) type {
             map.value_pointer = @ptrCast(@alignCast(result.value_pointer));
         }
 
-        pub fn keys(map: *@This()) []K{
+        pub fn keys(map: *@This()) []K {
             return map.key_pointer[0..map.length];
         }
 
-        pub fn values(map: *@This()) []V{
+        pub fn values(map: *@This()) []V {
             return map.value_pointer[0..map.length];
         }
     };
@@ -372,7 +372,7 @@ pub fn allocate_virtual_memory(size: usize, flags: packed struct {
     };
 }
 
-pub fn free_virtual_memory(slice: []const align(0x1000) u8) void {
+pub fn free_virtual_memory(slice: []align(0x1000) const u8) void {
     switch (os) {
         .windows => {
             std.os.windows.VirtualFree(slice.ptr, slice.len, std.os.windows.MEM_RELEASE);
@@ -383,8 +383,8 @@ pub fn free_virtual_memory(slice: []const align(0x1000) u8) void {
     }
 }
 
-pub const MyAllocator = struct{
-    handler: *const fn(allocator: *MyAllocator, old_ptr: ?[*]u8, old_size: usize, new_size: usize, alignment: u16) Error![*]u8,
+pub const MyAllocator = struct {
+    handler: *const fn (allocator: *MyAllocator, old_ptr: ?[*]u8, old_size: usize, new_size: usize, alignment: u16) Error![*]u8,
 
     pub fn allocate_one(allocator: *MyAllocator, comptime T: type) !*T {
         const slice = try allocator.allocate(@sizeOf(T), @alignOf(T));
@@ -417,7 +417,7 @@ pub const MyAllocator = struct{
     };
 };
 
-pub const PageAllocator = struct{
+pub const PageAllocator = struct {
     allocator: MyAllocator = .{ .handler = handler },
 
     fn handler(allocator: *MyAllocator, maybe_old_ptr: ?[*]u8, old_size: usize, new_size: usize, alignment: u16) MyAllocator.Error![*]u8 {
@@ -442,7 +442,7 @@ pub const PageAllocator = struct{
 
 pub const IndexType = if (@sizeOf(usize) >= 8) u32 else usize;
 
-const ArrayCapacity = struct{
+const ArrayCapacity = struct {
     pointer: *anyopaque,
     capacity: IndexType,
 };
@@ -453,7 +453,7 @@ fn ensure_capacity_array(allocator: *MyAllocator, current_capacity: IndexType, d
         new_capacity *= factor;
     }
     if (new_capacity > current_capacity) {
-        const old_byte_slice = pointer[0..length * element_size];
+        const old_byte_slice = pointer[0 .. length * element_size];
         const new_byte_capacity = new_capacity * element_size;
         const new_slice = try allocator.reallocate(old_byte_slice, new_byte_capacity, element_alignment);
         return .{
@@ -472,14 +472,13 @@ const initial_item_count = 16;
 const factor = 2;
 
 pub fn UnpinnedArray(comptime T: type) type {
-
     return struct {
         pointer: [*]T = undefined,
         length: IndexType = 0,
         capacity: IndexType = 0,
 
         pub fn initialize_with_capacity(allocator: *MyAllocator, item_count: IndexType) !@This() {
-            var array = @This() {};
+            var array = @This(){};
             try array.ensure_capacity(allocator, item_count);
             return array;
         }
@@ -515,15 +514,15 @@ pub fn UnpinnedArray(comptime T: type) type {
             assert(index < array.length);
             if (array.length + 1 >= array.capacity) {
                 const after_count = array.length - index;
-                copy_backwards(T, array.pointer[index + 1..][0..after_count], array.pointer[index..][0..after_count]);
+                copy_backwards(T, array.pointer[index + 1 ..][0..after_count], array.pointer[index..][0..after_count]);
             } else {
                 const new_capacity = array.capacity * 2;
                 const new_slice = try allocator.allocate(new_capacity * @sizeOf(T), @alignOf(T));
                 const new_typed_slice: []T = @as([*]T, @ptrCast(@alignCast(new_slice.ptr)))[0..new_capacity];
                 @memcpy(new_typed_slice[0..index], array.pointer[0..index]);
                 const after_count = array.length - index;
-                @memcpy(new_typed_slice[index + 1..][0..after_count], array.pointer[index..][0..after_count]);
-                try allocator.free(@as([*]u8, @ptrCast(@alignCast(array.slice().ptr)))[0.. array.capacity * @sizeOf(T)]);
+                @memcpy(new_typed_slice[index + 1 ..][0..after_count], array.pointer[index..][0..after_count]);
+                try allocator.free(@as([*]u8, @ptrCast(@alignCast(array.slice().ptr)))[0 .. array.capacity * @sizeOf(T)]);
                 array.pointer = new_typed_slice.ptr;
                 array.capacity = new_capacity;
             }
@@ -722,5 +721,5 @@ pub fn span(ptr: [*:0]const u8) [:0]const u8 {
     while (ptr[len] != 0) {
         len += 1;
     }
-    return ptr[0..len:0];
+    return ptr[0..len :0];
 }

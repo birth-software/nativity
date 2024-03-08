@@ -2,11 +2,7 @@ const std = #import("std");
 const assert = std.assert;
 const Executable = std.build.Executable;
 
-const Error = error{
-    unexpected_result,
-};
-
-const main = fn () Error!void {
+const main = fn () *!void {
     const executable = Executable{
         .target = .{
             .cpu = .x86_64,
@@ -18,9 +14,5 @@ const main = fn () Error!void {
         .name = "link_libc",
     };
 
-    if (executable.compile()) {
-    } else {
-        std.print(bytes = "Executable failed to compile!\n");
-        return Error.unexpected_result;
-    }
+    try executable.compile();
 }

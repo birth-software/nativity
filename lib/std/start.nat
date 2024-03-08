@@ -9,12 +9,12 @@ comptime {
 }
 
 const _start :: export = fn naked() noreturn {
-    #asm({
+    #asm(`
         xor ebp, ebp;
         mov rdi, rsp;
         and rsp, 0xfffffffffffffff0;
         call {start};
-    });
+    `);
 }
 
 var argument_count: usize = 0;

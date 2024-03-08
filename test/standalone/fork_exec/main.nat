@@ -1,21 +1,12 @@
 const std = #import("std");
 
-const Error = error{
-    unexpected_result,
-};
-
-const main = fn() Error!void {
-    if (std.os.duplicate_process()) |pid| {
-        if (pid == 0) {
-            std.print(bytes = "Hello from child\n");
-            const argv = [_:null] ?[&:0]const u8{"/usr/bin/ls"};
-            _ = std.os.execute(path = "/usr/bin/ls", argv = argv.&, env = std.start.environment_values);
-            return Error.unexpected_result;
-        } else {
-            std.print(bytes = "Hello from parent\n");
-        }
+const main = fn() *!void {
+    const pid = try std.os.duplicate_process();
+    if (pid == 0) {
+        std.print(bytes = "Hello from child\n");
+        const argv = [_:null] ?[&:0]const u8{"/usr/bin/ls"};
+        try std.os.execute(path = "/usr/bin/ls", argv = argv.&, env = std.start.environment_values);
     } else {
-        std.print(bytes = "Unable to create child process\n");
-        return Error.unexpected_result;
+        std.print(bytes = "Hello from parent\n");
     }
 }

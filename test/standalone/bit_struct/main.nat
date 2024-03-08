@@ -1,7 +1,7 @@
 const std = #import("std");
 const assert = std.assert;
 
-const BitStruct = struct(u8) {
+const BitStruct = bitfield(u8) {
     a: bool,
     b: bool,
     c: bool,
