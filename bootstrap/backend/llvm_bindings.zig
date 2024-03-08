@@ -59,6 +59,7 @@ pub extern fn NativityLLVMContextGetConstantInt(context: *LLVM.Context, bit_coun
 pub extern fn NativityLLVMContextGetConstantString(context: *LLVM.Context, name_ptr: [*]const u8, name_len: usize, null_terminate: bool) ?*LLVM.Value.Constant;
 pub extern fn NativityLLVMGetConstantArray(array_type: *LLVM.Type.Array, value_ptr: [*]const *LLVM.Value.Constant, value_count: usize) ?*LLVM.Value.Constant;
 pub extern fn NativityLLVMGetConstantStruct(struct_type: *LLVM.Type.Struct, constant_ptr: [*]const *LLVM.Value.Constant, constant_len: usize) ?*LLVM.Value.Constant;
+pub extern fn NativityLLVMConstantToInt(constant: *LLVM.Value.Constant) ?*LLVM.Value.Constant.Int;
 pub extern fn NativityLLVMBuilderCreateICmp(builder: *LLVM.Builder, integer_comparison: LLVM.Value.Instruction.ICmp.Kind, left: *LLVM.Value, right: *LLVM.Value, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value;
 pub extern fn NativityLLVMBuilderCreateLoad(builder: *LLVM.Builder, type: *LLVM.Type, value: *LLVM.Value, is_volatile: bool, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value.Instruction.Load;
 pub extern fn NativityLLVMBuilderCreateRet(builder: *LLVM.Builder, value: ?*LLVM.Value) ?*LLVM.Value.Instruction.Ret;
@@ -89,6 +90,7 @@ pub extern fn NativityLLVMBuilderCreateGEP(builder: *LLVM.Builder, type: *LLVM.T
 pub extern fn NativityLLVMBuilderCreateStructGEP(builder: *LLVM.Builder, type: *LLVM.Type, pointer: *LLVM.Value, index: c_uint, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value;
 pub extern fn NativityLLVMBuilderCreateBranch(builder: *LLVM.Builder, basic_block: *LLVM.Value.BasicBlock) ?*LLVM.Value.Instruction.Branch;
 pub extern fn NativityLLVMBuilderCreateConditionalBranch(builder: *LLVM.Builder, condition: *LLVM.Value, true_block: *LLVM.Value.BasicBlock, false_block: *LLVM.Value.BasicBlock, branch_weights: ?*LLVM.Metadata.Node, unpredictable: ?*LLVM.Metadata.Node) ?*LLVM.Value.Instruction.Branch;
+pub extern fn NativityLLVMBuilderCreateSwitch(builder: *LLVM.Builder, condition: *LLVM.Value, default_block: ?*LLVM.Value.BasicBlock, case_ptr: [*]const *LLVM.Value.Constant.Int, case_block_ptr: [*]const *LLVM.Value.BasicBlock, case_count: c_uint, branch_weights: ?*LLVM.Metadata.Node, unpredictable: ?*LLVM.Metadata.Node) *LLVM.Value.Instruction.Switch;
 
 pub extern fn NativityLLVMVerifyFunction(function: *LLVM.Value.Constant.Function, message_ptr: *[*]const u8, message_len: *usize) bool;
 pub extern fn NativityLLVMVerifyModule(module: *LLVM.Module, message_ptr: *[*]const u8, message_len: *usize) bool;

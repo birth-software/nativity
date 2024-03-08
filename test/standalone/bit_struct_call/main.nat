@@ -1,11 +1,11 @@
 const std = #import("std");
 const assert = std.assert;
 
-const A = struct(u8) {
+const A = bitfield(u8) {
     a: u4,
     b: u4,
 };
-const B = struct(u8) {
+const B = bitfield(u8) {
     b: u4,
     a: u4,
 };

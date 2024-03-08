@@ -1,0 +1,21 @@
+const n = 6;
+const foo = fn() s32 {
+    var a: s32 = 0;
+    while (true) {
+        if (a == n) {
+            return a;
+        }
+
+        a += 1;
+    }
+}
+
+const Error = error{
+    unexpected_result,
+};
+
+const main = fn() Error!void{
+    if (foo() - n != 0) {
+        return Error.unexpected_result;
+    }
+}

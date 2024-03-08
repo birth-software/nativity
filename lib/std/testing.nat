@@ -1,0 +1,10 @@
+const Error = error{
+    unexpected_result,
+};
+
+const expect(ok: bool) Error!void {
+    if (!ok) {
+        return Error.unexpected_result;
+    }
+}
+

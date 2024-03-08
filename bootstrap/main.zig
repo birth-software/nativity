@@ -30,9 +30,9 @@ pub export fn main(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]
         return 0;
     } else |err| {
         const error_name: []const u8 = @errorName(err);
-        std.io.getStdOut().writeAll("Error: ") catch {};
-        std.io.getStdOut().writeAll(error_name) catch {};
-        std.io.getStdOut().writeAll("\n") catch {};
+        Compilation.write(.panic, "Error: ") catch {};
+        Compilation.write(.panic, error_name) catch {};
+        Compilation.write(.panic, "\n") catch {};
         return 1;
     }
 }
@@ -81,4 +81,3 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
         todo();
     }
 }
-

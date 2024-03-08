@@ -6,6 +6,7 @@ const log = std.log;
 const data_structures = @import("../library.zig");
 const enumFromString = data_structures.enumFromString;
 const MyAllocator = data_structures.MyAllocator;
+const UnpinnedArray = data_structures.UnpinnedArray;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
@@ -109,7 +110,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                 const string = text[start_index..][0 .. index - start_index];
                 break :blk if (enumFromString(Compilation.FixedKeyword, string)) |fixed_keyword| switch (fixed_keyword) {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
-                } else if (data_structures.byte_equal( string, "_")) .discard else .identifier;
+                } else if (data_structures.byte_equal(string, "_")) .discard else .identifier;
             },
             '0'...'9' => blk: {
                 // Detect other non-decimal literals
@@ -333,6 +334,13 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                         index += 1;
                         break :b .operator_div_assign;
                     },
+                    '/' => {
+                        while (text[index] != '\n') {
+                            index += 1;
+                        }
+
+                        continue;
+                    },
                     else => .operator_div,
                 };
 
@@ -395,6 +403,124 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                 index += 1;
 
                 break :blk .operator_dollar;
+            },
+            // Asm statement (special treatment)
+            '`' => {
+                token_buffer.append_with_capacity(.{
+                    .id = .operator_backtick,
+                    .line = line_index,
+                    .offset = start_index,
+                    .length = 1,
+                });
+
+                index += 1;
+
+                while (text[index] != '`') {
+                    const start_i = index;
+                    const start_ch = text[start_i];
+
+                    switch (start_ch) {
+                        '\n' => {
+                            index += 1;
+                            line_index += 1;
+                        },
+                        ' ' => index += 1,
+                        'A'...'Z', 'a'...'z' => {
+                            while (true) {
+                                switch (text[index]) {
+                                    'A'...'Z', 'a'...'z' => index += 1,
+                                    else => break,
+                                }
+                            }
+
+                            token_buffer.append_with_capacity(.{
+                                .id = .identifier,
+                                .offset = start_i,
+                                .length = index - start_i,
+                                .line = line_index,
+                            });
+                        },
+                        ',' => {
+                            token_buffer.append_with_capacity(.{
+                                .id = .operator_comma,
+                                .line = line_index,
+                                .offset = start_i,
+                                .length = 1,
+                            });
+                            index += 1;
+                        },
+                        ';' => {
+                            token_buffer.append_with_capacity(.{
+                                .id = .operator_semicolon,
+                                .line = line_index,
+                                .offset = start_i,
+                                .length = 1,
+                            });
+                            index += 1;
+                        },
+                        '{' => {
+                            token_buffer.append_with_capacity(.{
+                                .id = .operator_left_brace,
+                                .line = line_index,
+                                .offset = start_i,
+                                .length = 1,
+                            });
+                            index += 1;
+                        },
+                        '}' => {
+                            token_buffer.append_with_capacity(.{
+                                .id = .operator_right_brace,
+                                .line = line_index,
+                                .offset = start_i,
+                                .length = 1,
+                            });
+                            index += 1;
+                        },
+                        '0' => {
+                            index += 1;
+                            const Representation = enum {
+                                hex,
+                                bin,
+                                octal,
+                            };
+                            const representation: Representation = switch (text[index]) {
+                                'x' => .hex,
+                                else => unreachable,
+                            };
+                            index += 1;
+                            switch (representation) {
+                                .hex => {
+                                    while (true) {
+                                        switch (text[index]) {
+                                            'a'...'f', 'A'...'F', '0'...'9' => index += 1,
+                                            else => break,
+                                        }
+                                    }
+
+                                    token_buffer.append_with_capacity(.{
+                                        .id = .number_literal,
+                                        .line = line_index,
+                                        .offset = start_i,
+                                        .length = index - start_i,
+                                    });
+                                },
+                                else => unreachable,
+                            }
+                        },
+                        else => unreachable,
+                    }
+                }
+
+                token_buffer.append_with_capacity(.{
+                    .id = .operator_backtick,
+                    .line = line_index,
+                    .length = 1,
+                    .offset = index,
+                });
+
+                index += 1;
+
+                continue;
             },
             else => |ch| {
                 const ch_arr = [1]u8{ch};

@@ -1,12 +1,26 @@
 const std = #import("std");
 const Allocator = std.Allocator;
 const assert = std.assert;
-const current = #import("builtin").os;
-const system = switch (current) {
-    .linux => linux,
-    .macos => macos,
-    .windows => windows,
+const builtin = #import("builtin");
+const current = builtin.os;
+const link_libc = builtin.link_libc;
+
+const linux = #import("os/linux.nat");
+const macos = #import("os/macos.nat");
+const windows = #import("os/windows.nat");
+
+const c = std.c;
+
+const system = switch (link_libc) {
+    true => c,
+    false => switch (current) {
+        .linux => linux,
+        .macos => macos,
+        .windows => windows,
+    },
 };
+
+const unwrap_syscall = system.unwrap_syscall;
 
 const exit = fn(exit_code: s32) noreturn {
     switch (current) {
@@ -22,23 +36,23 @@ const max_file_operation_byte_count = switch (current) {
     else => #error("OS not supported"),
 };
 
-const unwrap_syscall_signed = fn(syscall_result: ssize) bool {
-    return syscall_result >= 0;
-}
-
 const FileDescriptor = struct{
     handle: system.FileDescriptor,
 
-    const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ?usize {
+    const ReadError = error{
+
+    };
+
+    const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ReadError!usize {
         if (bytes.len > 0) {
             switch (current) {
-                .linux => {
+                .linux, .macos => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                    if (linux.unwrap_syscall(syscall_result = #syscall(#cast(linux.Syscall.read), #cast(file_descriptor.handle), #cast(bytes.ptr), len))) |byte_count| {
-                        return byte_count;
-                    } else {
-                        return null;
-                    }
+                    const syscall_result = system.read(file_descriptor, bytes);
+                    const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                        else => unreachable,
+                    };
+                    return byte_count;
                 },
                 else => #error("OS not supported"),
             }
@@ -47,25 +61,19 @@ const FileDescriptor = struct{
         }
     }
 
-    const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) ?usize {
+    const WriteError = error{
+        write_failed,
+    };
+
+    const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) WriteError!usize {
         switch (current) {
-            .linux => {
+            .linux, .macos => {
                 const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                const raw_result = #syscall(#cast(linux.Syscall.write), #cast(file_descriptor.handle), #cast(bytes.ptr), len);
-                if (linux.unwrap_syscall(syscall_result = raw_result)) |byte_count| {
-                    return byte_count;
-                } else {
-                    return null;
-                }
-            },
-            .macos => {
-                const raw_result = macos.write(file_descriptor.handle, bytes.ptr, bytes.len);
-                if (unwrap_syscall_signed(raw_result)) {
-                    const bytes_written: usize = #cast(raw_result);
-                    return bytes_written;
-                } else {
-                    return null;
-                }
+                const syscall_result = system.write(file_descriptor.handle, bytes[0..len]);
+                const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                    else => return WriteError.write_failed,
+                };
+                return byte_count;
             },
             else => #error("OS not supported"),
         }
@@ -89,75 +97,81 @@ const StdFileDescriptor = enum {
     }
 };
 
-const ProtectionFlags = struct(u32){
+const ProtectionFlags = bitfield(u32){
     read: bool,
     write: bool,
     execute: bool,
 };
 
-const MapFlags = struct(u32){
+const MapFlags = bitfield(u32){
     reserve: bool,
     commit: bool,
 };
 
-const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_protection_flags: ProtectionFlags, general_map_flags: MapFlags) ?[&]u8 {
+const VirtualAllocateError = error{
+    allocation_failed,
+};
+
+const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_protection_flags: ProtectionFlags, general_map_flags: MapFlags) VirtualAllocateError![&]u8 {
     const protection_flags = system.get_protection_flags(flags = general_protection_flags);
     const map_flags = system.get_map_flags(flags = general_map_flags);
-    const fd = -1;
+    const file_descriptor = -1;
     const offset = 0;
 
     switch (current) {
-        .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.mmap(address, length, protection_flags, map_flags, fd, offset))) |result_address| {
-                const pointer: [&]u8 = #cast(result_address);
+        .linux, .macos => {
+            const syscall_result = system.mmap(address, length, protection_flags, map_flags, file_descriptor, offset);
+            if (link_libc) {
+                if (result != system.MAP_FAILED) {
+                    const result_address: [&]u8 = #cast(result);
+                    return result_address;
+                } else {
+                    // TODO:
+                    unreachable;
+                }
+            } else {
+                const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                    else => unreachable,
+                };
+
+                const pointer: [&]u8 = #cast(result);
                 return pointer;
-            } else {
-                return null;
             }
-        },
-        .macos => {
-            const result = macos.mmap(address, length, protection_flags, map_flags, fd, offset);
-            if (result != macos.MAP_FAILED) {
-                const result_address: [&]u8 = #cast(result);
-                return result_address;
-            } else {
-                return null;
-            }
-        },
-        else => #error("OS not supported"),
-    }
-
-}
-
-const free_virtual_memory = fn(bytes_ptr: [&]const u8, bytes_len: usize) bool {
-    switch (current) {
-        .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.munmap(bytes_ptr, bytes_len))) |result| {
-                return result == 0;
-            } else {
-                return false;
-            }
-        },
-        .macos => {
-            const raw_result = macos.munmap(bytes_ptr, bytes_len);
-            const result = unwrap_syscall_signed(raw_result);
-            return result;
         },
         else => #error("OS not supported"),
     }
 }
 
-const readlink = fn(file_path: [&:0]const u8, buffer: []u8) ?[]u8 {
+const FreeError = error{
+    free_failed,
+};
+const free_virtual_memory = fn(bytes: []const u8) FreeError!void {
     switch (current) {
-        .linux => {
-            const raw_result = linux.readlink(file_path, bytes_ptr = buffer.ptr, bytes_len = buffer.len);
+        .linux, .macos => {
+            const syscall_result = system.munmap(bytes);
+            _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+        },
+        else => #error("OS not supported"),
+    }
+}
 
-            if (linux.unwrap_syscall(syscall_result = raw_result)) |byte_count| {
-                const bytes = buffer[0..byte_count];
-                return bytes;
-            } else {
-                return null;
-            }
+const ReadLinkError = error{
+    failed,
+};
+
+const readlink = fn(file_path: [&:0]const u8, buffer: []u8) ReadLinkError![]u8 {
+    switch (current) {
+        .linux, .macos => {
+            const syscall_result = system.readlink(file_path, buffer);
+
+            const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+
+            const bytes = buffer[0..byte_count];
+            return bytes;
         },
         else => #error("OS not supported"),
     }
@@ -169,40 +183,43 @@ const max_path_byte_count = switch (current) {
     else => #error("OS not supported"),
 };
 
-const current_executable_path = fn(buffer: [:0]u8) ?[]u8 {
+const CurrentExecutablePath = error{
+    failed,
+};
+const current_executable_path = fn(buffer: [:0]u8) CurrentExecutablePath![]u8 {
     switch (current) {
         .linux => {
-            if (readlink(file_path = "/proc/self/exe", buffer)) |bytes| {
-                return bytes;
-            } else {
-                return null;
-            }
+            const bytes = readlink("/proc/self/exe", buffer) catch |err| switch (err) {
+                else => unreachable,
+            };
+            return bytes;
         },
-        .macos => {
-            var symlink_path_buffer: [max_path_byte_count:0]u8 = undefined;
-            var symlink_path_len: u32 = symlink_path_buffer.len + 1;
-            const ns_result = macos._NSGetExecutablePath(symlink_path_buffer.&, symlink_path_len.&);
-            if (ns_result == 0) {
-                const symlink_path = symlink_path_buffer[0..symlink_path_len];
-                const result = macos.realpath(symlink_path.ptr, buffer.ptr);
-                if (result != null) {
-                    var i: usize = 0;
-                    while (i < buffer.len) {
-                        if (result[i] == 0) {
-                            break;
-                        }
-                        i += 1;
-                    }
-                    assert(i < buffer.len);
+        //.macos => {
+            // TODO:
+            //var symlink_path_buffer: [max_path_byte_count:0]u8 = undefined;
+            //var symlink_path_len: u32 = symlink_path_buffer.len + 1;
+            //const ns_result = macos._NSGetExecutablePath(symlink_path_buffer.&, symlink_path_len.&);
+            //if (ns_result == 0) {
+            //    const symlink_path = symlink_path_buffer[0..symlink_path_len];
+            //    const result = macos.realpath(symlink_path.ptr, buffer.ptr);
+            //    if (result != null) {
+            //        var i: usize = 0;
+            //        while (i < buffer.len) {
+            //            if (result[i] == 0) {
+            //                break;
+            //            }
+            //            i += 1;
+            //        }
+            //        assert(i < buffer.len);
 
-                    return result[0..i];
-                } else {
-                    return null;
-                }
-            } else {
-                return null;
-            }
-        },
+            //        return result[0..i];
+            //    } else {
+            //        return null;
+            //    }
+            //} else {
+            //    return null;
+            //}
+        //},
         else => #error("OS not supported"),
     }
 }
@@ -211,123 +228,124 @@ const Process = struct{
     const Id = system.ProcessId;
 };
 
-const duplicate_process = fn () ?Process.Id {
+const DuplicateProcessError = error{
+    system_resources,
+    out_of_memory,
+};
+
+const duplicate_process = fn () DuplicateProcessError!Process.Id {
+    switch (current) {
+        .linux, .macos => {
+            const syscall_result = system.fork();
+            const result = unwrap_syscall(syscall_result) catch |err| return switch (err) {
+                .AGAIN, .NOMEM => DuplicateProcessError.system_resources,
+                else => unreachable,
+            };
+            const truncated: u32 = #cast(result);
+
+            const process_id: Process.Id = #cast(truncated);
+            return process_id;
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const ExecveError = error{
+    execve_failed,
+};
+const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) ExecveError!noreturn {
+    switch (current) {
+        .linux, .macos =>  {
+            const syscall_result = linux.execve(path, argv, env);
+            const signed_syscall_result: ssize = #cast(syscall_result);
+            if (signed_syscall_result == -1) {
+                return ExecveError.execve_failed;
+            } else {
+                unreachable;
+            }
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const EventFileDescriptorError = error{
+};
+const event_file_descriptor = fn(initial_value: u32, flags: u32) EventFileDescriptorError!FileDescriptor {
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.fork())) |fork_result| {
-                const unsigned: u32 = #cast(fork_result);
-                const signed: s32 = #cast(unsigned);
-                return signed;
-            } else {
-                return null;
-            }
-        },
-        .macos => {
-            const fork_result = macos.fork();
-            if (unwrap_syscall_signed(fork_result)) {
-                return fork_result;
-            } else {
-                return null;
-            }
+            const syscall_result = linux.event_file_descriptor(count = initial_value, flags);
+            const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+            const file_descriptor: system.FileDescriptor = #cast(result);
+            return file_descriptor;
         },
         else => #error("OS not supported"),
     }
 }
 
-const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) void {
-    switch (current) {
-        .linux =>  {
-            _ = linux.execve(path, argv, env);
-        },
-        .macos => {
-            _ = macos.execve(path, argv, env);
-        },
-        else => #error("OS not supported"),
-    }
-}
-
-const event_file_descriptor = fn(initial_value: u32, flags: u32) ?s32 {
+const Dup2Error = error{
+};
+const dup2 = fn(old_file_descriptor: system.FileDescriptor, new_file_descriptor: system.FileDescriptor) Dup2Error!void {
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.event_file_descriptor(count = initial_value, flags))) |raw_result| {
-                const result: s32 = #cast(raw_result);
-                return result;
-            } else {
-                return null;
-            }
+            const syscall_result = linux.dup2(old = old_file_descriptor, new = new_file_descriptor);
+            _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
         },
         else => #error("OS not supported"),
     }
 }
 
-const dup2 = fn(old_file_descriptor: system.FileDescriptor, new_file_descriptor: system.FileDescriptor) bool {
+const OpenError = error{
+
+};
+const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) OpenError!FileDescriptor{
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.dup2(old = old_file_descriptor, new = new_file_descriptor))) |_| {
-                return true;
-            } else {
-                return false;
-            }
+            const syscall_result = linux.open(path, flags, permissions);
+            const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+
+            const file_descriptor = FileDescriptor{
+                .handle = #cast(result),
+            };
+            return file_descriptor;
         },
         else => #error("OS not supported"),
     }
 }
 
-const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) ?FileDescriptor{
+const CloseError = error{
+};
+const close = fn(file_descriptor: system.FileDescriptor) CloseError!void {
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.open(path, flags, permissions))) |raw_result| {
-                const file_descriptor = FileDescriptor{
-                    .handle = #cast(raw_result),
-                };
-
-                return file_descriptor;
-            } else {
-                return null;
-            }
+            const syscall_result = system.close(file_descriptor);
+            _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
         },
         else => #error("OS not supported"),
     }
 }
 
-const close = fn(file_descriptor: s32) bool {
+const Pipe2Error = error{
+};
+const pipe2 = fn(flags: u32) Pipe2Error![2]system.FileDescriptor{
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.close(file_descriptor))) |_| {
-                return true;
-            } else {
-                return false;
-            }
+            var pipe: [2]system.FileDescriptor = undefined;
+            const syscall_result = linux.pipe2(pipe.&, flags);
+            _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+
+            return pipe;
         },
         else => #error("OS not supported"),
-    }
-}
-
-const pipe2 = fn(flags: u32) ?[2]system.FileDescriptor{
-    switch (current) {
-        .linux => {
-            var pipe: [2]s32 = undefined;
-            if (linux.unwrap_syscall(syscall_result = linux.pipe2(pipe_pointer = pipe.&, flags))) |_| {
-                return pipe;
-            } else {
-                return null;
-            }
-        },
-        else => #error("OS not supported"),
-    }
-}
-
-const set_up_child_process_io_posix = fn(io_channel_behavior: IoChannelBehavior, pipe_file_descriptor: s32, std_io_channel_descriptor: s32, dev_null_file_descriptor: s32) bool {
-    switch (io_channel_behavior) {
-        .pipe => return dup2(old_file_descriptor = pipe_file_descriptor, new_file_descriptor = std_io_channel_descriptor),
-        .close => {
-            if (!close(file_descriptor = std_io_channel_descriptor)) {
-                 unreachable;
-            }
-            return true;
-        },
-        .inherit => return true,
-        .ignore => return dup2(old_file_descriptor = dev_null_file_descriptor, new_file_descriptor = std_io_channel_descriptor),
     }
 }
 
@@ -343,33 +361,6 @@ const poll = fn(file_descriptors: []PollFileDescriptor, timeout: s32) ?usize {
             }
         },
         else => #error("OS not supported"),
-    }
-}
-
-const write_u64_pipe = fn (file_handle: s32, value: u64) ?usize {
-    const file = FileDescriptor{
-        .handle = file_handle,
-    };
-    const value_ptr: [&]u8 = #cast(value.&);
-    const bytes = value_ptr[0..#size(u64)];
-    return file.write(bytes);
-}
-
-const read_u64_pipe = fn (file_handle: s32) ?u64{ 
-    const file = FileDescriptor{
-        .handle = file_handle,
-    };
-    var value: u64 = 0;
-    const value_ptr: [&]u8 = #cast(value.&);
-    const bytes = value_ptr[0..#size(u64)];
-    if (file.read(bytes)) |character_read_count| {
-        if (character_read_count == #size(u64)) {
-            return value;
-        } else {
-            return null;
-        }
-    } else {
-        return null;
     }
 }
 
@@ -399,19 +390,21 @@ const ifsignaled = fn(status: u32) bool {
     return (status & 0xffff) - 1 < 0xff;
 }
 
-const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
+const WaitPidError = error{
+    failed,
+};
+const waitpid = fn(pid: Process.Id, flags: u32) WaitPidError!u32 {
     switch (current) {
         .linux => {
             var status: u32 = undefined;
             while (true) {
-                const raw_syscall_result = linux.waitpid(pid, status = status.&, flags, resource_usage = 0);
-                const signed_syscall_result: ssize = #cast(raw_syscall_result);
+                const syscall_result = linux.waitpid(pid, status = status.&, flags, resource_usage = 0);
+                const signed_syscall_result: ssize = #cast(syscall_result);
                 if (signed_syscall_result != -4) {
-                    if (linux.unwrap_syscall(syscall_result = raw_syscall_result)) |_| {
-                        return status;
-                    } else {
-                        return null;
-                    }
+                    _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                        else => unreachable,
+                    };
+                    return status;
                 }
             }
         },
@@ -421,7 +414,7 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
                 const status_u: u32 = #cast(status);
                 return status_u;
             } else {
-                return null;
+                unreachable;
             }
         },
         else => #error("OS not supported"),
@@ -429,18 +422,21 @@ const waitpid = fn(pid: Process.Id, flags: u32) ?u32 {
 
 }
 
-const memfd_create = fn(name: [&:0]const u8, flags: u32) ?FileDescriptor{
+const MemFdCreateError = error{
+};
+const memfd_create = fn(name: [&:0]const u8, flags: u32) MemFdCreateError!FileDescriptor{
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.memfd_create(path, flags))) |raw_result| {
-                const file_descriptor = FileDescriptor{
-                    .handle = #cast(raw_result),
-                };
+            const syscall_result = linux.memfd_create(path, flags);
+            const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
 
-                return file_descriptor;
-            } else {
-                return null;
-            }
+            const file_descriptor = FileDescriptor{
+                .handle = #cast(result),
+            };
+
+            return file_descriptor;
         },
         else => #error("OS not supported"),
     }
@@ -452,7 +448,3 @@ const IoChannelBehavior = enum{
     inherit,
     ignore,
 };
-
-const linux = #import("os/linux.nat");
-const macos = #import("os/macos.nat");
-const windows = #import("os/windows.nat");

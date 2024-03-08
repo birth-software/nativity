@@ -4,7 +4,7 @@ const FileDescriptor = s32;
 const ProcessId = s32;
 const MAP_FAILED = 0xffffffffffffffff;
 
-const MapFlags = struct(u32){
+const MapFlags = bitfield(u32){
     shared: bool,
     private: bool,
     reserved: u2 = 0,
@@ -19,7 +19,7 @@ const MapFlags = struct(u32){
     reserved3: u19 = 0,
 };
 
-const ProtectionFlags = struct(u32) {
+const ProtectionFlags = bitfield(u32) {
     read: bool,
     write: bool,
     execute: bool,

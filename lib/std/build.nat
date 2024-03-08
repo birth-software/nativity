@@ -9,57 +9,48 @@ const Executable = struct{
     link_libc: bool = false,
     name: [:0]const u8,
 
-    const compile = fn(executable: Executable) bool {
+    const compile = fn(executable: Executable) *!void {
         const argument_count = std.start.argument_count;
         const argument_values = std.start.argument_values;
         assert(ok = argument_count >= 3);
         const compiler_path = argument_values[2];
         
-        const result = executable.compile_with_compiler_path(compiler_path);
-        return result;
+        try executable.compile_with_compiler_path(compiler_path);
     }
 
-    const compile_with_compiler_path = fn(executable: Executable, compiler_path: [&:0]const u8) bool {
-        if (std.os.duplicate_process()) |pid| {
-            if (pid == 0) {
-                var link_libc_arg: [&:0]const u8 = undefined;
-                if (executable.link_libc) {
-                    link_libc_arg = "true";
-                } else {
-                    link_libc_arg = "false";
-                }
-                const argv = [_:null] ?[&:0]const u8{ compiler_path, "exe",  "-main_source_file", executable.main_source_path.ptr, "-link_libc", link_libc_arg, "-name", executable.name.ptr };
-                std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
-                return true;
-            } else {
-                if (std.os.waitpid(pid, flags = 0)) |raw_status| {
-                    if (std.os.ifexited(status = raw_status)) {
-                        const exit_status = std.os.exitstatus(status = raw_status);
+    const CompileError = error{
+        bad_exit_code,
+        signaled,
+        stopped,
+        unknown_reason,
+    };
 
-                        if (exit_status == 0) {
-                            return true;
-                        } else {
-                            std.print(bytes = "Bad exit code\n");
-                            return false;
-                        }
-                    } else if (std.os.ifsignaled(status = raw_status)) {
-                        std.print(bytes = "Signaled\n");
-                        return false;
-                    } else if (std.os.ifstopped(status = raw_status)) {
-                        std.print(bytes = "Stopped\n");
-                        return false;
-                    } else {
-                        std.print(bytes = "Unknown process termination\n");
-                        return false;
-                    }
-                } else {
-                    std.print(bytes = "Wait failed\n");
-                    return false;
-                }
+    const compile_with_compiler_path = fn(executable: Executable, compiler_path: [&:0]const u8) *!void {
+        const pid = try std.os.duplicate_process();
+        if (pid == 0) {
+            var link_libc_arg: [&:0]const u8 = undefined;
+            if (executable.link_libc) {
+                link_libc_arg = "true";
+            } else {
+                link_libc_arg = "false";
             }
+            const argv = [_:null] ?[&:0]const u8{ compiler_path, "exe",  "-main_source_file", executable.main_source_path.ptr, "-link_libc", link_libc_arg, "-name", executable.name.ptr };
+            try std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
         } else {
-            std.print(bytes = "Unable to create child process\n");
-            return false;
+            const raw_status = try std.os.waitpid(pid, flags = 0);
+            if (std.os.ifexited(status = raw_status)) {
+                const exit_status = std.os.exitstatus(status = raw_status);
+
+                if (exit_status != 0) {
+                    return CompileError.bad_exit_code;
+                }
+            } else if (std.os.ifsignaled(status = raw_status)) {
+                return CompileError.signaled;
+            } else if (std.os.ifstopped(status = raw_status)) {
+                return CompileError.stopped;
+            } else {
+                return CompileError.unknown_reason;
+            }
         }
     }
 };
