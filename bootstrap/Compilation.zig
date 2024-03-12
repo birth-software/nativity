@@ -252,6 +252,14 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8) !void {
         var clang_args = UnpinnedArray([]const u8){};
         try clang_args.append(context.my_allocator, context.executable_absolute_path);
         try clang_args.append(context.my_allocator, "clang");
+        try clang_args.append(context.my_allocator, "-nostdinc");
+        try clang_args.append_slice(context.my_allocator, &.{"-isystem", "/home/david/dev/zig/lib/include", "-isystem", "/home/david/dev/zig/lib/libc/include/x86_64-linux-gnu", "-isystem", "/home/david/dev/zig/lib/libc/include/generic-glibc", "-isystem", "/home/david/dev/zig/lib/libc/include/x86-linux-any", "-isystem", "/home/david/dev/zig/lib/libc/include/any-linux-any"});
+
+        
+        try clang_args.append(context.my_allocator, "-isystem");
+        try clang_args.append(context.my_allocator, "/usr/include");
+        try clang_args.append(context.my_allocator, "-isystem");
+        try clang_args.append(context.my_allocator, "/usr/include/linux");
         for (arguments) |arg| {
             try clang_args.append(context.my_allocator, span(arg));
         }
