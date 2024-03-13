@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) !void {
     compiler.formatted_panics = print_stack_trace;
     compiler.root_module.unwind_tables = print_stack_trace;
     compiler.root_module.omit_frame_pointer = false;
-    compiler.root_module.error_tracing = false;
+    compiler.root_module.error_tracing = print_stack_trace;
     compiler.want_lto = false;
 
     compiler.linkLibC();
