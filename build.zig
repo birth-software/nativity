@@ -25,7 +25,6 @@ pub fn build(b: *std.Build) !void {
         else => target_query.abi,
         .linux => b: {
             const os_release = try std.fs.cwd().readFileAlloc(b.allocator, "/etc/os-release", 0xffff);
-            std.debug.print("/etc/os-release:\n```\n{s}\n```\n", .{os_release});
             const attribute_name = "ID=";
             const i = std.mem.indexOf(u8, os_release, attribute_name) orelse unreachable;
             const maybe_start_quote_index = i + attribute_name.len;
