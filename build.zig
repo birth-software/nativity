@@ -8,51 +8,9 @@ pub fn build(b: *std.Build) !void {
     const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or @import("builtin").os.tag == .macos;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
-    const target_query = b.standardTargetOptionsQueryOnly(.{});
-    const os = target_query.os_tag orelse @import("builtin").os.tag;
-    _ = os; // autofix
-    // if (os == .linux) {
-    //     target_query.abi = .musl;
-    // }
-    const target = b.resolveTargetQuery(target_query);
+    const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse false;
     const compiler_options = b.addOptions();
     compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
-
-    const compiler = b.addExecutable(.{
-        .name = "nat",
-        .root_source_file = .{ .path = "bootstrap/main.zig" },
-        .target = target,
-        .optimize = optimization,
-    });
-    compiler.root_module.addOptions("configuration", compiler_options);
-    compiler.formatted_panics = print_stack_trace;
-    compiler.root_module.unwind_tables = print_stack_trace;
-    compiler.root_module.omit_frame_pointer = false;
-    compiler.root_module.error_tracing = false;
-    compiler.want_lto = false;
-
-    compiler.linkLibC();
-    compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/gcc/x86_64-pc-linux-gnu/13.2.1/../../../../lib/libstdc++.so" });
-    compiler.addIncludePath(.{ .cwd_relative = "/usr/include"});
-    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/13.2.1"});
-    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu"});
-    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib"});
-    compiler.linkSystemLibrary("LLVM");
-    compiler.linkSystemLibrary("clang-cpp");
-    compiler.linkSystemLibrary("lldCommon");
-    compiler.linkSystemLibrary("lldCOFF");
-    compiler.linkSystemLibrary("lldELF");
-    compiler.linkSystemLibrary("lldMachO");
-    compiler.linkSystemLibrary("lldWasm");
-    compiler.linkSystemLibrary("unwind");
-
-    // TODO:
-    // if (target.result.os.tag == .windows) {
-    //     compiler.linkSystemLibrary("ole32");
-    //     compiler.linkSystemLibrary("version");
-    //     compiler.linkSystemLibrary("uuid");
-    //     compiler.linkSystemLibrary("msvcrt-os");
-    // }
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
@@ -61,54 +19,38 @@ pub fn build(b: *std.Build) !void {
         .optimize = .Debug,
         .single_threaded = true,
     });
-    const llvm_version = "17.0.6";
-    const prefix = "nat/cache";
-    const llvm_path = b.option([]const u8, "llvm_path", "LLVM prefix path") orelse blk: {
-        assert(!self_hosted_ci);
-        if (third_party_ci or (!target.query.isNativeOs() or !target.query.isNativeCpu())) {
-            var llvm_directory = try std.ArrayListUnmanaged(u8).initCapacity(b.allocator, 128);
-            llvm_directory.appendSliceAssumeCapacity(prefix ++ "/");
-            llvm_directory.appendSliceAssumeCapacity("llvm-");
-            llvm_directory.appendSliceAssumeCapacity(llvm_version);
-            llvm_directory.appendSliceAssumeCapacity("-");
-            llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.cpu.arch));
-            llvm_directory.appendSliceAssumeCapacity("-");
-            llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.os.tag));
-            llvm_directory.appendSliceAssumeCapacity("-");
-            llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.abi));
-            llvm_directory.appendSliceAssumeCapacity("-");
-            const cpu = if (std.mem.eql(u8, target.result.cpu.model.name, @tagName(target.result.cpu.arch))) "baseline" else target.result.cpu.model.name;
-            llvm_directory.appendSliceAssumeCapacity(cpu);
 
-            const url = try std.mem.concat(b.allocator, u8, &.{"https://github.com/birth-software/fetch-llvm/releases/download/v", llvm_version, "/llvm-", llvm_version, "-", @tagName(target.result.cpu.arch), "-", @tagName(target.result.os.tag), "-", @tagName(target.result.abi), "-", cpu, ".tar.xz"});
-
-            var dir = std.fs.cwd().openDir(llvm_directory.items, .{}) catch {
-                const run = b.addRunArtifact(fetcher);
-                compiler.step.dependOn(&run.step);
-                run.addArg("-prefix");
-                run.addArg(prefix);
-                run.addArg("-url");
-                run.addArg(url);
-                break :blk llvm_directory.items;
+    var target_query = b.standardTargetOptionsQueryOnly(.{});
+    const abi = b.option(std.Target.Abi, "abi", "This option modifies the ABI used for the compiler") orelse if (static) switch (native_target.result.os.tag) {
+        else => target_query.abi,
+        .linux => b: {
+            const os_release = try std.fs.cwd().readFileAlloc(b.allocator, "/etc/os-release", 0xffff);
+            std.debug.print("/etc/os-release:\n```\n{s}\n```\n", .{os_release});
+            const attribute_name = "ID=";
+            const i = std.mem.indexOf(u8, os_release, attribute_name) orelse unreachable;
+            const maybe_start_quote_index = i + attribute_name.len;
+            const value = if (os_release[maybe_start_quote_index] == '\"') attr: {
+                const end_quote_index = std.mem.indexOf(u8, os_release[maybe_start_quote_index + 1 ..], "\"") orelse unreachable;
+                const attribute_value = os_release[maybe_start_quote_index + 1 ..][0..end_quote_index];
+                break :attr attribute_value;
+            } else attr: {
+                const line_feed = std.mem.indexOf(u8, os_release[maybe_start_quote_index..], "\n") orelse unreachable;
+                const attribute_value = os_release[maybe_start_quote_index..][0..line_feed];
+                break :attr attribute_value;
             };
+            break :b if (std.mem.eql(u8, value, "arch") or std.mem.eql(u8, value, "endeavouros")) .musl else target_query.abi;
+        },
+    } else target_query.abi;
+    target_query.abi = abi;
+    const target = b.resolveTargetQuery(target_query);
 
-            dir.close();
+    const compiler = b.addExecutable(.{
+        .name = "nat",
+        .root_source_file = .{ .path = "bootstrap/main.zig" },
+        .target = target,
+        .optimize = optimization,
+    });
 
-            break :blk llvm_directory.items;
-        } else {
-            const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
-            break :blk switch (use_debug) {
-                true => "../llvm-17-static-debug",
-                false => "../llvm-17-static-release",
-            };
-        }
-    };
-
-    const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
-    _ = llvm_include_dir; // autofix
-    const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
-    _ = llvm_lib_dir; // autofix
-    // compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
     const cpp_files = .{
         "src/llvm/llvm.cpp",
         "src/llvm/lld.cpp",
@@ -117,6 +59,7 @@ pub fn build(b: *std.Build) !void {
         "src/llvm/clang_cc1as.cpp",
         "src/llvm/ar.cpp",
     };
+
     compiler.addCSourceFiles(.{
         .files = &cpp_files,
         .flags = &.{
@@ -135,248 +78,325 @@ pub fn build(b: *std.Build) !void {
         },
     });
 
-    // const zlib = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
-    // const llvm_libraries = [_][]const u8{
-    //     "libLLVMAArch64AsmParser.a",
-    //     "libLLVMAArch64CodeGen.a",
-    //     "libLLVMAArch64Desc.a",
-    //     "libLLVMAArch64Disassembler.a",
-    //     "libLLVMAArch64Info.a",
-    //     "libLLVMAArch64Utils.a",
-    //     "libLLVMAggressiveInstCombine.a",
-    //     "libLLVMAMDGPUAsmParser.a",
-    //     "libLLVMAMDGPUCodeGen.a",
-    //     "libLLVMAMDGPUDesc.a",
-    //     "libLLVMAMDGPUDisassembler.a",
-    //     "libLLVMAMDGPUInfo.a",
-    //     "libLLVMAMDGPUTargetMCA.a",
-    //     "libLLVMAMDGPUUtils.a",
-    //     "libLLVMAnalysis.a",
-    //     "libLLVMARMAsmParser.a",
-    //     "libLLVMARMCodeGen.a",
-    //     "libLLVMARMDesc.a",
-    //     "libLLVMARMDisassembler.a",
-    //     "libLLVMARMInfo.a",
-    //     "libLLVMARMUtils.a",
-    //     "libLLVMAsmParser.a",
-    //     "libLLVMAsmPrinter.a",
-    //     "libLLVMAVRAsmParser.a",
-    //     "libLLVMAVRCodeGen.a",
-    //     "libLLVMAVRDesc.a",
-    //     "libLLVMAVRDisassembler.a",
-    //     "libLLVMAVRInfo.a",
-    //     "libLLVMBinaryFormat.a",
-    //     "libLLVMBitReader.a",
-    //     "libLLVMBitstreamReader.a",
-    //     "libLLVMBitWriter.a",
-    //     "libLLVMBPFAsmParser.a",
-    //     "libLLVMBPFCodeGen.a",
-    //     "libLLVMBPFDesc.a",
-    //     "libLLVMBPFDisassembler.a",
-    //     "libLLVMBPFInfo.a",
-    //     "libLLVMCFGuard.a",
-    //     "libLLVMCFIVerify.a",
-    //     "libLLVMCodeGen.a",
-    //     "libLLVMCodeGenTypes.a",
-    //     "libLLVMCore.a",
-    //     "libLLVMCoroutines.a",
-    //     "libLLVMCoverage.a",
-    //     "libLLVMDebugInfoBTF.a",
-    //     "libLLVMDebugInfoCodeView.a",
-    //     "libLLVMDebuginfod.a",
-    //     "libLLVMDebugInfoDWARF.a",
-    //     "libLLVMDebugInfoGSYM.a",
-    //     "libLLVMDebugInfoLogicalView.a",
-    //     "libLLVMDebugInfoMSF.a",
-    //     "libLLVMDebugInfoPDB.a",
-    //     "libLLVMDemangle.a",
-    //     "libLLVMDiff.a",
-    //     "libLLVMDlltoolDriver.a",
-    //     "libLLVMDWARFLinker.a",
-    //     "libLLVMDWARFLinkerParallel.a",
-    //     "libLLVMDWP.a",
-    //     "libLLVMExecutionEngine.a",
-    //     "libLLVMExtensions.a",
-    //     "libLLVMFileCheck.a",
-    //     "libLLVMFrontendHLSL.a",
-    //     "libLLVMFrontendOpenACC.a",
-    //     "libLLVMFrontendOpenMP.a",
-    //     "libLLVMFuzzerCLI.a",
-    //     "libLLVMFuzzMutate.a",
-    //     "libLLVMGlobalISel.a",
-    //     "libLLVMHexagonAsmParser.a",
-    //     "libLLVMHexagonCodeGen.a",
-    //     "libLLVMHexagonDesc.a",
-    //     "libLLVMHexagonDisassembler.a",
-    //     "libLLVMHexagonInfo.a",
-    //     "libLLVMInstCombine.a",
-    //     "libLLVMInstrumentation.a",
-    //     "libLLVMInterfaceStub.a",
-    //     "libLLVMInterpreter.a",
-    //     "libLLVMipo.a",
-    //     "libLLVMIRPrinter.a",
-    //     "libLLVMIRReader.a",
-    //     "libLLVMJITLink.a",
-    //     "libLLVMLanaiAsmParser.a",
-    //     "libLLVMLanaiCodeGen.a",
-    //     "libLLVMLanaiDesc.a",
-    //     "libLLVMLanaiDisassembler.a",
-    //     "libLLVMLanaiInfo.a",
-    //     "libLLVMLibDriver.a",
-    //     "libLLVMLineEditor.a",
-    //     "libLLVMLinker.a",
-    //     "libLLVMLoongArchAsmParser.a",
-    //     "libLLVMLoongArchCodeGen.a",
-    //     "libLLVMLoongArchDesc.a",
-    //     "libLLVMLoongArchDisassembler.a",
-    //     "libLLVMLoongArchInfo.a",
-    //     "libLLVMLTO.a",
-    //     "libLLVMMC.a",
-    //     "libLLVMMCA.a",
-    //     "libLLVMMCDisassembler.a",
-    //     "libLLVMMCJIT.a",
-    //     "libLLVMMCParser.a",
-    //     "libLLVMMipsAsmParser.a",
-    //     "libLLVMMipsCodeGen.a",
-    //     "libLLVMMipsDesc.a",
-    //     "libLLVMMipsDisassembler.a",
-    //     "libLLVMMipsInfo.a",
-    //     "libLLVMMIRParser.a",
-    //     "libLLVMMSP430AsmParser.a",
-    //     "libLLVMMSP430CodeGen.a",
-    //     "libLLVMMSP430Desc.a",
-    //     "libLLVMMSP430Disassembler.a",
-    //     "libLLVMMSP430Info.a",
-    //     "libLLVMNVPTXCodeGen.a",
-    //     "libLLVMNVPTXDesc.a",
-    //     "libLLVMNVPTXInfo.a",
-    //     "libLLVMObjCARCOpts.a",
-    //     "libLLVMObjCopy.a",
-    //     "libLLVMObject.a",
-    //     "libLLVMObjectYAML.a",
-    //     "libLLVMOption.a",
-    //     "libLLVMOrcJIT.a",
-    //     "libLLVMOrcShared.a",
-    //     "libLLVMOrcTargetProcess.a",
-    //     "libLLVMPasses.a",
-    //     "libLLVMPowerPCAsmParser.a",
-    //     "libLLVMPowerPCCodeGen.a",
-    //     "libLLVMPowerPCDesc.a",
-    //     "libLLVMPowerPCDisassembler.a",
-    //     "libLLVMPowerPCInfo.a",
-    //     "libLLVMProfileData.a",
-    //     "libLLVMRemarks.a",
-    //     "libLLVMRISCVAsmParser.a",
-    //     "libLLVMRISCVCodeGen.a",
-    //     "libLLVMRISCVDesc.a",
-    //     "libLLVMRISCVDisassembler.a",
-    //     "libLLVMRISCVInfo.a",
-    //     "libLLVMRISCVTargetMCA.a",
-    //     "libLLVMRuntimeDyld.a",
-    //     "libLLVMScalarOpts.a",
-    //     "libLLVMSelectionDAG.a",
-    //     "libLLVMSparcAsmParser.a",
-    //     "libLLVMSparcCodeGen.a",
-    //     "libLLVMSparcDesc.a",
-    //     "libLLVMSparcDisassembler.a",
-    //     "libLLVMSparcInfo.a",
-    //     "libLLVMSupport.a",
-    //     "libLLVMSymbolize.a",
-    //     "libLLVMSystemZAsmParser.a",
-    //     "libLLVMSystemZCodeGen.a",
-    //     "libLLVMSystemZDesc.a",
-    //     "libLLVMSystemZDisassembler.a",
-    //     "libLLVMSystemZInfo.a",
-    //     "libLLVMTableGen.a",
-    //     "libLLVMTableGenCommon.a",
-    //     "libLLVMTableGenGlobalISel.a",
-    //     "libLLVMTarget.a",
-    //     "libLLVMTargetParser.a",
-    //     "libLLVMTextAPI.a",
-    //     "libLLVMTransformUtils.a",
-    //     "libLLVMVEAsmParser.a",
-    //     "libLLVMVECodeGen.a",
-    //     "libLLVMVectorize.a",
-    //     "libLLVMVEDesc.a",
-    //     "libLLVMVEDisassembler.a",
-    //     "libLLVMVEInfo.a",
-    //     "libLLVMWebAssemblyAsmParser.a",
-    //     "libLLVMWebAssemblyCodeGen.a",
-    //     "libLLVMWebAssemblyDesc.a",
-    //     "libLLVMWebAssemblyDisassembler.a",
-    //     "libLLVMWebAssemblyInfo.a",
-    //     "libLLVMWebAssemblyUtils.a",
-    //     "libLLVMWindowsDriver.a",
-    //     "libLLVMWindowsManifest.a",
-    //     "libLLVMX86AsmParser.a",
-    //     "libLLVMX86CodeGen.a",
-    //     "libLLVMX86Desc.a",
-    //     "libLLVMX86Disassembler.a",
-    //     "libLLVMX86Info.a",
-    //     "libLLVMX86TargetMCA.a",
-    //     "libLLVMXCoreCodeGen.a",
-    //     "libLLVMXCoreDesc.a",
-    //     "libLLVMXCoreDisassembler.a",
-    //     "libLLVMXCoreInfo.a",
-    //     "libLLVMXRay.a",
-    //     //LLD
-    //     "liblldCOFF.a",
-    //     "liblldCommon.a",
-    //     "liblldELF.a",
-    //     "liblldMachO.a",
-    //     "liblldMinGW.a",
-    //     "liblldWasm.a",
-    //     // Zlib
-    //     zlib,
-    //     "libz.a",
-    //     // Clang
-    //     "libclangAnalysis.a",
-    //     "libclangAnalysisFlowSensitive.a",
-    //     "libclangAnalysisFlowSensitiveModels.a",
-    //     "libclangAPINotes.a",
-    //     "libclangARCMigrate.a",
-    //     "libclangAST.a",
-    //     "libclangASTMatchers.a",
-    //     "libclangBasic.a",
-    //     "libclangCodeGen.a",
-    //     "libclangCrossTU.a",
-    //     "libclangDependencyScanning.a",
-    //     "libclangDirectoryWatcher.a",
-    //     "libclangDriver.a",
-    //     "libclangDynamicASTMatchers.a",
-    //     "libclangEdit.a",
-    //     "libclangExtractAPI.a",
-    //     "libclangFormat.a",
-    //     "libclangFrontend.a",
-    //     "libclangFrontendTool.a",
-    //     "libclangHandleCXX.a",
-    //     "libclangHandleLLVM.a",
-    //     "libclangIndex.a",
-    //     "libclangIndexSerialization.a",
-    //     "libclangInterpreter.a",
-    //     "libclangLex.a",
-    //     "libclangParse.a",
-    //     "libclangRewrite.a",
-    //     "libclangRewriteFrontend.a",
-    //     "libclangSema.a",
-    //     "libclangSerialization.a",
-    //     "libclangStaticAnalyzerCheckers.a",
-    //     "libclangStaticAnalyzerCore.a",
-    //     "libclangStaticAnalyzerFrontend.a",
-    //     "libclangSupport.a",
-    //     "libclangTooling.a",
-    //     "libclangToolingASTDiff.a",
-    //     "libclangToolingCore.a",
-    //     "libclangToolingInclusions.a",
-    //     "libclangToolingInclusionsStdlib.a",
-    //     "libclangToolingRefactoring.a",
-    //     "libclangToolingSyntax.a",
-    //     "libclangTransformer.a",
-    // };
+    compiler.root_module.addOptions("configuration", compiler_options);
+    compiler.formatted_panics = print_stack_trace;
+    compiler.root_module.unwind_tables = print_stack_trace;
+    compiler.root_module.omit_frame_pointer = false;
+    compiler.root_module.error_tracing = false;
+    compiler.want_lto = false;
 
-    // for (llvm_libraries) |llvm_library| {
-    //     compiler.addObjectFile(std.Build.LazyPath.relative(try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
-    // }
+    compiler.linkLibC();
+
+    if (static) {
+        compiler.linkage = .static;
+        compiler.linkLibCpp();
+
+        const prefix = "nat/cache";
+        const llvm_version = "17.0.6";
+        const llvm_path = b.option([]const u8, "llvm_path", "LLVM prefix path") orelse blk: {
+            assert(!self_hosted_ci);
+            if (third_party_ci or (!target.query.isNativeOs() or !target.query.isNativeCpu())) {
+                var llvm_directory = try std.ArrayListUnmanaged(u8).initCapacity(b.allocator, 128);
+                llvm_directory.appendSliceAssumeCapacity(prefix ++ "/");
+                llvm_directory.appendSliceAssumeCapacity("llvm-");
+                llvm_directory.appendSliceAssumeCapacity(llvm_version);
+                llvm_directory.appendSliceAssumeCapacity("-");
+                llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.cpu.arch));
+                llvm_directory.appendSliceAssumeCapacity("-");
+                llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.os.tag));
+                llvm_directory.appendSliceAssumeCapacity("-");
+                llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.abi));
+                llvm_directory.appendSliceAssumeCapacity("-");
+                const cpu = if (std.mem.eql(u8, target.result.cpu.model.name, @tagName(target.result.cpu.arch))) "baseline" else target.result.cpu.model.name;
+                llvm_directory.appendSliceAssumeCapacity(cpu);
+
+                const url = try std.mem.concat(b.allocator, u8, &.{ "https://github.com/birth-software/fetch-llvm/releases/download/v", llvm_version, "/llvm-", llvm_version, "-", @tagName(target.result.cpu.arch), "-", @tagName(target.result.os.tag), "-", @tagName(target.result.abi), "-", cpu, ".tar.xz" });
+
+                var dir = std.fs.cwd().openDir(llvm_directory.items, .{}) catch {
+                    const run = b.addRunArtifact(fetcher);
+                    compiler.step.dependOn(&run.step);
+                    run.addArg("-prefix");
+                    run.addArg(prefix);
+                    run.addArg("-url");
+                    run.addArg(url);
+                    break :blk llvm_directory.items;
+                };
+
+                dir.close();
+
+                break :blk llvm_directory.items;
+            } else {
+                const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
+                break :blk switch (use_debug) {
+                    true => "../llvm-17-static-debug",
+                    false => "../llvm-17-static-release",
+                };
+            }
+        };
+
+        const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
+        compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
+        const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
+
+        const zstd = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
+
+        const llvm_libraries = [_][]const u8{
+            "libLLVMAArch64AsmParser.a",
+            "libLLVMAArch64CodeGen.a",
+            "libLLVMAArch64Desc.a",
+            "libLLVMAArch64Disassembler.a",
+            "libLLVMAArch64Info.a",
+            "libLLVMAArch64Utils.a",
+            "libLLVMAggressiveInstCombine.a",
+            "libLLVMAMDGPUAsmParser.a",
+            "libLLVMAMDGPUCodeGen.a",
+            "libLLVMAMDGPUDesc.a",
+            "libLLVMAMDGPUDisassembler.a",
+            "libLLVMAMDGPUInfo.a",
+            "libLLVMAMDGPUTargetMCA.a",
+            "libLLVMAMDGPUUtils.a",
+            "libLLVMAnalysis.a",
+            "libLLVMARMAsmParser.a",
+            "libLLVMARMCodeGen.a",
+            "libLLVMARMDesc.a",
+            "libLLVMARMDisassembler.a",
+            "libLLVMARMInfo.a",
+            "libLLVMARMUtils.a",
+            "libLLVMAsmParser.a",
+            "libLLVMAsmPrinter.a",
+            "libLLVMAVRAsmParser.a",
+            "libLLVMAVRCodeGen.a",
+            "libLLVMAVRDesc.a",
+            "libLLVMAVRDisassembler.a",
+            "libLLVMAVRInfo.a",
+            "libLLVMBinaryFormat.a",
+            "libLLVMBitReader.a",
+            "libLLVMBitstreamReader.a",
+            "libLLVMBitWriter.a",
+            "libLLVMBPFAsmParser.a",
+            "libLLVMBPFCodeGen.a",
+            "libLLVMBPFDesc.a",
+            "libLLVMBPFDisassembler.a",
+            "libLLVMBPFInfo.a",
+            "libLLVMCFGuard.a",
+            "libLLVMCFIVerify.a",
+            "libLLVMCodeGen.a",
+            "libLLVMCodeGenTypes.a",
+            "libLLVMCore.a",
+            "libLLVMCoroutines.a",
+            "libLLVMCoverage.a",
+            "libLLVMDebugInfoBTF.a",
+            "libLLVMDebugInfoCodeView.a",
+            "libLLVMDebuginfod.a",
+            "libLLVMDebugInfoDWARF.a",
+            "libLLVMDebugInfoGSYM.a",
+            "libLLVMDebugInfoLogicalView.a",
+            "libLLVMDebugInfoMSF.a",
+            "libLLVMDebugInfoPDB.a",
+            "libLLVMDemangle.a",
+            "libLLVMDiff.a",
+            "libLLVMDlltoolDriver.a",
+            "libLLVMDWARFLinker.a",
+            "libLLVMDWARFLinkerParallel.a",
+            "libLLVMDWP.a",
+            "libLLVMExecutionEngine.a",
+            "libLLVMExtensions.a",
+            "libLLVMFileCheck.a",
+            "libLLVMFrontendHLSL.a",
+            "libLLVMFrontendOpenACC.a",
+            "libLLVMFrontendOpenMP.a",
+            "libLLVMFuzzerCLI.a",
+            "libLLVMFuzzMutate.a",
+            "libLLVMGlobalISel.a",
+            "libLLVMHexagonAsmParser.a",
+            "libLLVMHexagonCodeGen.a",
+            "libLLVMHexagonDesc.a",
+            "libLLVMHexagonDisassembler.a",
+            "libLLVMHexagonInfo.a",
+            "libLLVMInstCombine.a",
+            "libLLVMInstrumentation.a",
+            "libLLVMInterfaceStub.a",
+            "libLLVMInterpreter.a",
+            "libLLVMipo.a",
+            "libLLVMIRPrinter.a",
+            "libLLVMIRReader.a",
+            "libLLVMJITLink.a",
+            "libLLVMLanaiAsmParser.a",
+            "libLLVMLanaiCodeGen.a",
+            "libLLVMLanaiDesc.a",
+            "libLLVMLanaiDisassembler.a",
+            "libLLVMLanaiInfo.a",
+            "libLLVMLibDriver.a",
+            "libLLVMLineEditor.a",
+            "libLLVMLinker.a",
+            "libLLVMLoongArchAsmParser.a",
+            "libLLVMLoongArchCodeGen.a",
+            "libLLVMLoongArchDesc.a",
+            "libLLVMLoongArchDisassembler.a",
+            "libLLVMLoongArchInfo.a",
+            "libLLVMLTO.a",
+            "libLLVMMC.a",
+            "libLLVMMCA.a",
+            "libLLVMMCDisassembler.a",
+            "libLLVMMCJIT.a",
+            "libLLVMMCParser.a",
+            "libLLVMMipsAsmParser.a",
+            "libLLVMMipsCodeGen.a",
+            "libLLVMMipsDesc.a",
+            "libLLVMMipsDisassembler.a",
+            "libLLVMMipsInfo.a",
+            "libLLVMMIRParser.a",
+            "libLLVMMSP430AsmParser.a",
+            "libLLVMMSP430CodeGen.a",
+            "libLLVMMSP430Desc.a",
+            "libLLVMMSP430Disassembler.a",
+            "libLLVMMSP430Info.a",
+            "libLLVMNVPTXCodeGen.a",
+            "libLLVMNVPTXDesc.a",
+            "libLLVMNVPTXInfo.a",
+            "libLLVMObjCARCOpts.a",
+            "libLLVMObjCopy.a",
+            "libLLVMObject.a",
+            "libLLVMObjectYAML.a",
+            "libLLVMOption.a",
+            "libLLVMOrcJIT.a",
+            "libLLVMOrcShared.a",
+            "libLLVMOrcTargetProcess.a",
+            "libLLVMPasses.a",
+            "libLLVMPowerPCAsmParser.a",
+            "libLLVMPowerPCCodeGen.a",
+            "libLLVMPowerPCDesc.a",
+            "libLLVMPowerPCDisassembler.a",
+            "libLLVMPowerPCInfo.a",
+            "libLLVMProfileData.a",
+            "libLLVMRemarks.a",
+            "libLLVMRISCVAsmParser.a",
+            "libLLVMRISCVCodeGen.a",
+            "libLLVMRISCVDesc.a",
+            "libLLVMRISCVDisassembler.a",
+            "libLLVMRISCVInfo.a",
+            "libLLVMRISCVTargetMCA.a",
+            "libLLVMRuntimeDyld.a",
+            "libLLVMScalarOpts.a",
+            "libLLVMSelectionDAG.a",
+            "libLLVMSparcAsmParser.a",
+            "libLLVMSparcCodeGen.a",
+            "libLLVMSparcDesc.a",
+            "libLLVMSparcDisassembler.a",
+            "libLLVMSparcInfo.a",
+            "libLLVMSupport.a",
+            "libLLVMSymbolize.a",
+            "libLLVMSystemZAsmParser.a",
+            "libLLVMSystemZCodeGen.a",
+            "libLLVMSystemZDesc.a",
+            "libLLVMSystemZDisassembler.a",
+            "libLLVMSystemZInfo.a",
+            "libLLVMTableGen.a",
+            "libLLVMTableGenCommon.a",
+            "libLLVMTableGenGlobalISel.a",
+            "libLLVMTarget.a",
+            "libLLVMTargetParser.a",
+            "libLLVMTextAPI.a",
+            "libLLVMTransformUtils.a",
+            "libLLVMVEAsmParser.a",
+            "libLLVMVECodeGen.a",
+            "libLLVMVectorize.a",
+            "libLLVMVEDesc.a",
+            "libLLVMVEDisassembler.a",
+            "libLLVMVEInfo.a",
+            "libLLVMWebAssemblyAsmParser.a",
+            "libLLVMWebAssemblyCodeGen.a",
+            "libLLVMWebAssemblyDesc.a",
+            "libLLVMWebAssemblyDisassembler.a",
+            "libLLVMWebAssemblyInfo.a",
+            "libLLVMWebAssemblyUtils.a",
+            "libLLVMWindowsDriver.a",
+            "libLLVMWindowsManifest.a",
+            "libLLVMX86AsmParser.a",
+            "libLLVMX86CodeGen.a",
+            "libLLVMX86Desc.a",
+            "libLLVMX86Disassembler.a",
+            "libLLVMX86Info.a",
+            "libLLVMX86TargetMCA.a",
+            "libLLVMXCoreCodeGen.a",
+            "libLLVMXCoreDesc.a",
+            "libLLVMXCoreDisassembler.a",
+            "libLLVMXCoreInfo.a",
+            "libLLVMXRay.a",
+            //LLD
+            "liblldCOFF.a",
+            "liblldCommon.a",
+            "liblldELF.a",
+            "liblldMachO.a",
+            "liblldMinGW.a",
+            "liblldWasm.a",
+            // Zlib
+            "libz.a",
+            // Zstd
+            zstd,
+            // Clang
+            "libclangAnalysis.a",
+            "libclangAnalysisFlowSensitive.a",
+            "libclangAnalysisFlowSensitiveModels.a",
+            "libclangAPINotes.a",
+            "libclangARCMigrate.a",
+            "libclangAST.a",
+            "libclangASTMatchers.a",
+            "libclangBasic.a",
+            "libclangCodeGen.a",
+            "libclangCrossTU.a",
+            "libclangDependencyScanning.a",
+            "libclangDirectoryWatcher.a",
+            "libclangDriver.a",
+            "libclangDynamicASTMatchers.a",
+            "libclangEdit.a",
+            "libclangExtractAPI.a",
+            "libclangFormat.a",
+            "libclangFrontend.a",
+            "libclangFrontendTool.a",
+            "libclangHandleCXX.a",
+            "libclangHandleLLVM.a",
+            "libclangIndex.a",
+            "libclangIndexSerialization.a",
+            "libclangInterpreter.a",
+            "libclangLex.a",
+            "libclangParse.a",
+            "libclangRewrite.a",
+            "libclangRewriteFrontend.a",
+            "libclangSema.a",
+            "libclangSerialization.a",
+            "libclangStaticAnalyzerCheckers.a",
+            "libclangStaticAnalyzerCore.a",
+            "libclangStaticAnalyzerFrontend.a",
+            "libclangSupport.a",
+            "libclangTooling.a",
+            "libclangToolingASTDiff.a",
+            "libclangToolingCore.a",
+            "libclangToolingInclusions.a",
+            "libclangToolingInclusionsStdlib.a",
+            "libclangToolingRefactoring.a",
+            "libclangToolingSyntax.a",
+            "libclangTransformer.a",
+        };
+
+        for (llvm_libraries) |llvm_library| {
+            compiler.addObjectFile(std.Build.LazyPath.relative(try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
+        }
+    } else {
+        compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/gcc/x86_64-pc-linux-gnu/13.2.1/../../../../lib/libstdc++.so" });
+        compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
+        compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/13.2.1" });
+        compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu" });
+        compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+        compiler.linkSystemLibrary("LLVM");
+        compiler.linkSystemLibrary("clang-cpp");
+        compiler.linkSystemLibrary("lldCommon");
+        compiler.linkSystemLibrary("lldCOFF");
+        compiler.linkSystemLibrary("lldELF");
+        compiler.linkSystemLibrary("lldMachO");
+        compiler.linkSystemLibrary("lldWasm");
+        compiler.linkSystemLibrary("unwind");
+    }
 
     const install_exe = b.addInstallArtifact(compiler, .{});
     b.getInstallStep().dependOn(&install_exe.step);
@@ -435,23 +455,6 @@ pub fn build(b: *std.Build) !void {
         debug_command.addArgs(args);
         test_command.addArgs(args);
     }
-    
-    // const tests = b.addTest(.{
-    //     .name = "nat_test",
-    //     .root_source_file = .{ .path = "bootstrap/main.zig" },
-    //     .target = target,
-    //     .optimize = optimization,
-    // });
-    // tests.root_module.addOptions("configuration", compiler_options);
-    // tests.formatted_panics = print_stack_trace;
-    // tests.root_module.unwind_tables = print_stack_trace;
-    // tests.root_module.omit_frame_pointer = false;
-    // tests.want_lto = false;
-    //
-    //
-    // const run_tests = b.addRunArtifact(tests);
-    // b.installArtifact(tests);
-    // run_tests.step.dependOn(b.getInstallStep());
 
     const run_step = b.step("run", "Test the Nativity compiler");
     run_step.dependOn(&run_command.step);
@@ -460,10 +463,6 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Test the Nativity compiler");
     test_step.dependOn(&test_command.step);
 
-    // const test_lib = b.step("test_lib", "Test the Nativity Zig library");
-    // test_lib.dependOn(&run_tests.step);
-
     const test_all = b.step("test_all", "Test all");
-    // test_all.dependOn(&run_tests.step);
     test_all.dependOn(&test_command.step);
 }
