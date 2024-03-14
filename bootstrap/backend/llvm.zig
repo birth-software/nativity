@@ -1952,15 +1952,23 @@ pub const LLVM = struct {
         const const_slice = unit.constant_slices.get(constant_slice_index);
         const const_slice_type = try llvm.getType(unit, context, const_slice.type);
         const slice_struct_type = const_slice_type.toStruct() orelse unreachable;
-        const ptr = llvm.global_variable_map.get(const_slice.array).?;
-        const signed = false;
-        assert(const_slice.start == 0);
-        const len = llvm.context.getConstantInt(@bitSizeOf(usize), const_slice.end, signed) orelse unreachable;
-        const slice_fields = [2]*LLVM.Value.Constant{
-            ptr.toConstant(),
-            len.toConstant(),
-        };
+        const slice_fields: [2]*LLVM.Value.Constant = if (const_slice.array) |array| b: {
+            const ptr = llvm.global_variable_map.get(array).?;
+            const signed = false;
+            assert(const_slice.start == 0);
+            const len = llvm.context.getConstantInt(@bitSizeOf(usize), const_slice.end, signed) orelse unreachable;
+            const slice_fields = [2]*LLVM.Value.Constant{
+                ptr.toConstant(),
+                len.toConstant(),
+            };
 
+            break :b slice_fields;
+        } else b: {
+            const ptr = llvm.pointer_type.?.toType().getPoison() orelse unreachable;
+            const len = llvm.context.getConstantInt(64, 0, false) orelse unreachable;
+            break :b .{ ptr.toConstant(), len.toConstant() };
+        };
+        
         const constant_slice = slice_struct_type.getConstant(&slice_fields, slice_fields.len) orelse unreachable;
         return constant_slice;
     }
