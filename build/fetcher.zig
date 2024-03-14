@@ -8,14 +8,13 @@ pub fn main() !void {
     var url_arg: ?[:0]const u8 = null;
     var prefix_arg: [:0]const u8 = "nat";
 
-    const State = enum{
+    const State = enum {
         none,
         prefix,
         url,
     };
 
     var state = State.none;
-
 
     for (arguments[1..]) |argument| {
         switch (state) {
@@ -43,8 +42,8 @@ pub fn main() !void {
     if (state != .none) return error.InvalidInput;
 
     const dot_index = std.mem.lastIndexOfScalar(u8, url, '.') orelse return error.InvalidInput;
-    const extension_string = url[dot_index + 1..];
-    const Extension = enum{
+    const extension_string = url[dot_index + 1 ..];
+    const Extension = enum {
         xz,
         gz,
         zip,
@@ -61,7 +60,7 @@ pub fn main() !void {
     };
     defer http_client.deinit();
 
-    var buffer: [16*1024]u8 = undefined;
+    var buffer: [16 * 1024]u8 = undefined;
     var request = try http_client.open(.GET, uri, .{
         .server_header_buffer = &buffer,
     });

@@ -12,6 +12,7 @@ test {
 const build = #import("build.nat");
 const builtin = #import("builtin.nat");
 const os = #import("os.nat");
+const c = #import("c.nat");
 const start = #import("start.nat");
 const testing = #import("testing.nat");
 

@@ -10,7 +10,7 @@ const main = fn() *!void {
         },
         .main_source_path = "main.nat",
         .name = "c-abi",
-        .c_source_files = .{ "foo.c" }.&,
+        .c_source_files = .{ "c.c" }.&,
     };
 
     try executable.compile();

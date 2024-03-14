@@ -55,7 +55,7 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
         return error.InvalidInput;
     }
 
-    if (std.process.can_execv and std.os.getenvZ(env_detecting_libc_paths) != null) {
+    if (std.process.can_execv and std.posix.getenvZ(env_detecting_libc_paths) != null) {
         todo();
     }
 

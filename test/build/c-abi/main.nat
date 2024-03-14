@@ -1,7 +1,490 @@
 const std = #import("std");
 const expect = std.testing.expect;
-const foo :: extern = fn(arg: u32) u32;
+const run_c_tests :: extern = fn cc(.c) () void;
+const has_i128 = false;
+
 const main = fn () *!void {
-    const arg = 0xabcdef;
-    try expect(foo(arg) == arg);
+    run_c_tests();
+
+    c_u8(0xff);
+    c_u16(0xfffe);
+    c_u32(0xfffffffd);
+    c_u64(0xfffffffffffffffc);
+
+    if (has_i128) {
+        c_struct_u128(.{ .value = 0xfffffffffffffffc, });
+    }
+
+    c_s8(-1);
+    c_s16(-2);
+    c_s32(-3);
+    c_s64(-4);
+
+    if (has_i128) {
+        c_struct_i128(.{ .value = -6, });
+    }
+
+    c_bool(true);
+
+    c_five_integers(12, 34, 56, 78, 90);
+
+    const s = c_ret_struct_u64_u64();
+    try expect(s.a == 21);
+    try expect(s.b == 22);
+    c_struct_u64_u64_0(.{ .a = 23, .b = 24, });
+    c_struct_u64_u64_1(0, .{ .a = 25, .b = 26, });
+    c_struct_u64_u64_2(0, 1, .{ .a = 27, .b = 28, });
+    c_struct_u64_u64_3(0, 1, 2, .{ .a = 29, .b = 30, });
+    c_struct_u64_u64_4(0, 1, 2, 3, .{ .a = 31, .b = 32, });
+    c_struct_u64_u64_5(0, 1, 2, 3, 4, .{ .a = 33, .b = 34, });
+    c_struct_u64_u64_6(0, 1, 2, 3, 4, 5, .{ .a = 35, .b = 36, });
+    c_struct_u64_u64_7(0, 1, 2, 3, 4, 5, 6, .{ .a = 37, .b = 38, });
+    c_struct_u64_u64_8(0, 1, 2, 3, 4, 5, 6, 7, .{ .a = 39, .b = 40, });
+
+    const big_struct = BigStruct{
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+        .e = 5,
+    };
+    c_big_struct(big_struct);
+
+    const small = SmallStructInts{
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+    };
+    c_small_struct_ints(small);
+    const small2 = c_ret_small_struct_ints();
+    try expect(small2.a == 1);
+    try expect(small2.b == 2);
+    try expect(small2.c == 3);
+    try expect(small2.d == 4);
+
+    const med = MedStructInts{
+        .x = 1,
+        .y = 2,
+        .z = 3,
+    };
+    c_med_struct_ints(med);
+    const med2 = c_ret_med_struct_ints();
+    try expect(med2.x == 1);
+    try expect(med2.y == 2);
+    try expect(med2.z == 3);
+
+    const p = SmallPackedStruct{ .a = 0, .b = 1, .c = 2, .d = 3, };
+    c_small_packed_struct(p);
+    const p2 = c_ret_small_packed_struct();
+    try expect(p2.a == 0);
+    try expect(p2.b == 1);
+    try expect(p2.c == 2);
+    try expect(p2.d == 3);
+
+    const split = SplitStructInt{
+        .a = 1234,
+        .b = 100,
+        .c = 1337,
+    };
+    c_split_struct_ints(split);
+
+    const big = BigStruct{
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+        .e = 5,
+    };
+    const big2 = c_big_struct_both(big);
+    try expect(big2.a == 10);
+    try expect(big2.b == 11);
+    try expect(big2.c == 12);
+    try expect(big2.d == 13);
+    try expect(big2.e == 14);
+
+    const r1 = Rect{
+        .left = 1,
+        .right = 21,
+        .top = 16,
+        .bottom = 4,
+    };
+    const r2 = Rect{
+        .left = 178,
+        .right = 189,
+        .top = 21,
+        .bottom = 15,
+    };
+    c_multiple_struct_ints(r1, r2);
+
+    try expect(c_ret_bool() == true);
+
+    try expect(c_ret_u8() == 0xff);
+    try expect(c_ret_u16() == 0xffff);
+    try expect(c_ret_u32() == 0xffffffff);
+    try expect(c_ret_u64() == 0xffffffffffffffff);
+
+    try expect(c_ret_s8() == -1);
+    try expect(c_ret_s16() == -1);
+    try expect(c_ret_s32() == -1);
+    try expect(c_ret_s64() == -1);
+
+    c_struct_with_array(.{ .a = 1, .padding = undefined, .b = 2, });
+
+    const x = c_ret_struct_with_array();
+    try expect(x.a == 4);
+    try expect(x.b == 155);
+
+    const res = c_modify_by_ref_param(.{ .val = 1, .arr = undefined, });
+    try expect(res.val == 42);
+
+    var function_pointer = c_func_ptr_byval.&;
+    function_pointer(1, 2, .{ .origin = .{ .x = 9, .y = 10, .z = 11, }, .size = .{ .width = 12, .height = 13, .depth = 14, }, }, 3, 4, 5);
+}
+
+const ByRef = struct {
+    val: s32,
+    arr: [15]s32,
+};
+
+const ByVal = struct {
+    origin: ByValOrigin,
+    size: ByValSize,
+};
+
+const ByValOrigin = struct{
+    x: u64,
+    y: u64,
+    z: u64,
+};
+
+const ByValSize = struct{
+    width: u64,
+    height: u64,
+    depth: u64,
+};
+
+const c_u8 :: extern = fn cc(.c) (x: u8) void;
+const c_u16 :: extern = fn cc(.c) (x: u16) void;
+const c_u32 :: extern = fn cc(.c) (x: u32) void;
+const c_u64 :: extern = fn cc(.c) (x: u64) void;
+
+const c_s8 :: extern = fn cc(.c)  (x: s8) void;
+const c_s16 :: extern = fn cc(.c) (x: s16) void;
+const c_s32 :: extern = fn cc(.c) (x: s32) void;
+const c_s64 :: extern = fn cc(.c) (x: s64) void;
+
+const c_bool :: extern = fn cc(.c) (x: bool) void;
+
+const c_five_integers :: extern = fn cc(.c) (a: s32, b: s32, c: s32, d: s32, e: s32) void;
+
+const c_ret_struct_u64_u64 :: extern = fn cc(.c) () Struct_u64_u64;
+
+const c_struct_u64_u64_0 :: extern = fn cc(.c) (x: Struct_u64_u64) void;
+const c_struct_u64_u64_1 :: extern = fn cc(.c) (a: usize, b: Struct_u64_u64) void;
+const c_struct_u64_u64_2 :: extern = fn cc(.c) (a: usize, b: usize, c: Struct_u64_u64) void;
+const c_struct_u64_u64_3 :: extern = fn cc(.c) (a: usize, b: usize, c: usize, d: Struct_u64_u64) void;
+const c_struct_u64_u64_4 :: extern = fn cc(.c) (a: usize, b: usize, c: usize, d: usize, e: Struct_u64_u64) void;
+const c_struct_u64_u64_5 :: extern = fn cc(.c) (a: usize, b: usize, c: usize, d: usize, e: usize, f: Struct_u64_u64) void;
+const c_struct_u64_u64_6 :: extern = fn cc(.c) (a: usize, b: usize, c: usize, d: usize, e: usize, f: usize, g: Struct_u64_u64) void;
+const c_struct_u64_u64_7 :: extern = fn cc(.c) (a: usize, b: usize, c: usize, d: usize, e: usize, f: usize, g: usize, h: Struct_u64_u64) void;
+const c_struct_u64_u64_8 :: extern = fn cc(.c) (a: usize, b: usize, c: usize, d: usize, e: usize, f: usize, g: usize, h: usize, i: Struct_u64_u64) void;
+
+const c_big_struct :: extern = fn cc(.c) (x: BigStruct) void;
+
+const c_small_struct_ints :: extern = fn cc(.c) (x: SmallStructInts) void;
+const c_ret_small_struct_ints :: extern = fn cc(.c) () SmallStructInts;
+
+const c_med_struct_ints :: extern = fn cc(.c) (x: MedStructInts) void;
+const c_ret_med_struct_ints :: extern = fn cc(.c) () MedStructInts;
+
+const c_small_packed_struct :: extern = fn cc(.c) (x: SmallPackedStruct) void;
+const c_ret_small_packed_struct :: extern = fn cc(.c) () SmallPackedStruct;
+
+const c_split_struct_ints :: extern = fn cc(.c) (x: SplitStructInt) void;
+
+const c_big_struct_both :: extern = fn cc(.c) (x: BigStruct) BigStruct;
+
+const c_multiple_struct_ints :: extern = fn cc(.c) (r1: Rect, r2: Rect) void;
+
+const c_ret_bool :: extern = fn cc(.c) () bool;
+
+const c_ret_u8 :: extern = fn cc(.c) () u8;
+const c_ret_u16 :: extern = fn cc(.c) () u16;
+const c_ret_u32 :: extern = fn cc(.c) () u32;
+const c_ret_u64 :: extern = fn cc(.c) () u64;
+
+const c_ret_s8 :: extern = fn cc(.c) ()  s8;
+const c_ret_s16 :: extern = fn cc(.c) () s16;
+const c_ret_s32 :: extern = fn cc(.c) () s32;
+const c_ret_s64 :: extern = fn cc(.c) () s64;
+
+const StructWithArray = struct{
+    a: s32,
+    padding: [4]u8,
+    b: s64,
+};
+
+const c_struct_with_array :: extern = fn cc(.c) (x: StructWithArray) void;
+const c_ret_struct_with_array :: extern = fn cc(.c) () StructWithArray;
+const c_modify_by_ref_param :: extern = fn cc(.c) (x: ByRef) ByRef;
+
+const c_func_ptr_byval :: extern = fn cc(.c) (a: usize, b: usize, c: ByVal, d: u64, e: u64, f: u64) void;
+
+const nat_u8 :: export = fn cc(.c) (x: u8) void {
+    expect(x == 0xff) catch #trap();
+}
+
+const nat_u16 :: export = fn cc(.c) (x: u16) void {
+    expect(x == 0xfffe) catch #trap();
+}
+
+const nat_u32 :: export = fn cc(.c) (x: u32) void {
+    expect(x == 0xfffffffd) catch #trap();
+}
+
+const nat_u64 :: export = fn cc(.c) (x: u64) void {
+    expect(x == 0xfffffffffffffffc) catch #trap();
+}
+
+const nat_s8 :: export = fn cc(.c) (x: s8) void {
+    expect(x == -1) catch #trap();
+}
+
+const nat_s16 :: export = fn cc(.c) (x: s16) void {
+    expect(x == -2) catch #trap();
+}
+
+const nat_s32 :: export = fn cc(.c) (x: s32) void {
+    expect(x == -3) catch #trap();
+}
+
+const nat_s64 :: export = fn cc(.c) (x: s64) void {
+    expect(x == -4) catch #trap();
+}
+
+// TODO: transform into a real pointer
+const nat_ptr :: export = fn cc(.c) (x: usize) void {
+    expect(x == 0xdeadbeef) catch #trap();
+}
+
+const nat_five_integers :: export = fn cc(.c) (a: s32, b: s32, c: s32, d: s32, e: s32) void {
+    expect(a == 12) catch #trap();
+    expect(b == 34) catch #trap();
+    expect(c == 56) catch #trap();
+    expect(d == 78) catch #trap();
+    expect(e == 90) catch #trap();
+}
+
+const nat_bool:: export = fn cc(.c) (x: bool) void {
+    expect(x) catch #trap();
+}
+
+const Struct_u64_u64 = struct{
+    a: u64,
+    b: u64,
+};
+
+const nat_ret_struct_u64_u64 :: export = fn cc(.c) () Struct_u64_u64 {
+    return .{ .a = 1, .b = 2, };
+}
+
+const nat_struct_u64_u64_0 :: export = fn cc(.c) (s: Struct_u64_u64) void {
+    expect(s.a == 3) catch #trap();
+    expect(s.b == 4) catch #trap();
+}
+
+const nat_struct_u64_u64_1 :: export = fn cc(.c) (_: usize, s: Struct_u64_u64) void {
+    expect(s.a == 5) catch #trap();
+    expect(s.b == 6) catch #trap();
+}
+
+const nat_struct_u64_u64_2 :: export = fn cc(.c) (_: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 7) catch #trap();
+    expect(s.b == 8) catch #trap();
+}
+
+const nat_struct_u64_u64_3 :: export = fn cc(.c) (_: usize, _: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 9) catch #trap();
+    expect(s.b == 10) catch #trap();
+}
+
+const nat_struct_u64_u64_4 :: export = fn cc(.c) (_: usize, _: usize, _: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 11) catch #trap();
+    expect(s.b == 12) catch #trap();
+}
+
+const nat_struct_u64_u64_5 :: export = fn cc(.c) (_: usize, _: usize, _: usize, _: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 13) catch #trap();
+    expect(s.b == 14) catch #trap();
+}
+
+const nat_struct_u64_u64_6 :: export = fn cc(.c) (_: usize, _: usize, _: usize, _: usize, _: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 15) catch #trap();
+    expect(s.b == 16) catch #trap();
+}
+
+const nat_struct_u64_u64_7 :: export = fn cc(.c) (_: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 17) catch #trap();
+    expect(s.b == 18) catch #trap();
+}
+
+const nat_struct_u64_u64_8 :: export = fn cc(.c) (_: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, s: Struct_u64_u64) void {
+    expect(s.a == 19) catch #trap();
+    expect(s.b == 20) catch #trap();
+}
+
+const BigStruct = struct {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u8,
+};
+
+const nat_big_struct:: export = fn cc(.c) (x: BigStruct) void {
+    expect(x.a == 1) catch #trap();
+    expect(x.b == 2) catch #trap();
+    expect(x.c == 3) catch #trap();
+    expect(x.d == 4) catch #trap();
+    expect(x.e == 5) catch #trap();
+}
+
+const SmallStructInts = struct {
+    a: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+};
+
+const nat_small_struct_ints :: export = fn cc(.c) (x: SmallStructInts) void {
+    expect(x.a == 1) catch #trap();
+    expect(x.b == 2) catch #trap();
+    expect(x.c == 3) catch #trap();
+    expect(x.d == 4) catch #trap();
+}
+
+const MedStructInts = struct {
+    x: s32,
+    y: s32,
+    z: s32,
+};
+
+const nat_med_struct_ints :: export = fn cc(.c) (s: MedStructInts) void {
+    expect(s.x == 1) catch #trap();
+    expect(s.y == 2) catch #trap();
+    expect(s.z == 3) catch #trap();
+}
+
+const SmallPackedStruct = bitfield(u8) {
+    a: u2,
+    b: u2,
+    c: u2,
+    d: u2,
+};
+
+const nat_small_packed_struct :: export = fn cc(.c) (x: SmallPackedStruct) void {
+    expect(x.a == 0) catch #trap();
+    expect(x.b == 1) catch #trap();
+    expect(x.c == 2) catch #trap();
+    expect(x.d == 3) catch #trap();
+}
+
+const SplitStructInt = struct {
+    a: u64,
+    b: u8,
+    c: u32,
+};
+
+const nat_split_struct_ints :: export = fn cc(.c) (x: SplitStructInt) void {
+    expect(x.a == 1234) catch #trap();
+    expect(x.b == 100) catch #trap();
+    expect(x.c == 1337) catch #trap();
+}
+
+const nat_big_struct_both :: export = fn cc(.c) (x: BigStruct) BigStruct {
+    expect(x.a == 30) catch #trap();
+    expect(x.b == 31) catch #trap();
+    expect(x.c == 32) catch #trap();
+    expect(x.d == 33) catch #trap();
+    expect(x.e == 34) catch #trap();
+    const s = BigStruct{
+        .a = 20,
+        .b = 21,
+        .c = 22,
+        .d = 23,
+        .e = 24,
+    };
+    return s;
+}
+
+const Rect = struct {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32,
+};
+
+const nat_multiple_struct_ints :: export = fn cc(.c) (x: Rect, y: Rect) void {
+    expect(x.left == 1) catch #trap();
+    expect(x.right == 21) catch #trap();
+    expect(x.top == 16) catch #trap();
+    expect(x.bottom == 4) catch #trap();
+    expect(y.left == 178) catch #trap();
+    expect(y.right == 189) catch #trap();
+    expect(y.top == 21) catch #trap();
+    expect(y.bottom == 15) catch #trap();
+}
+
+const nat_ret_bool :: export = fn cc(.c) () bool {
+    return true;
+}
+
+const nat_ret_u8 :: export = fn cc(.c) () u8 {
+    return 0xff;
+}
+
+const nat_ret_u16 :: export = fn cc(.c) () u16 {
+    return 0xffff;
+}
+
+const nat_ret_u32 :: export = fn cc(.c) () u32 {
+    return 0xffffffff;
+}
+
+const nat_ret_u64 :: export = fn cc(.c) () u64 {
+    return 0xffffffffffffffff;
+}
+
+const nat_ret_s8 :: export = fn cc(.c) () s8 {
+    return -1;
+}
+
+const nat_ret_s16 :: export = fn cc(.c) () s16 {
+    return -1;
+}
+
+const nat_ret_s32 :: export = fn cc(.c) () s32 {
+    return -1;
+}
+
+const nat_ret_s64 :: export = fn cc(.c) () s64 {
+    return -1;
+}
+
+const nat_ret_small_struct_ints :: export = fn cc(.c) () SmallStructInts {
+    return .{
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+    };
+}
+
+const nat_ret_med_struct_ints :: export = fn cc(.c) () MedStructInts {
+    return .{
+        .x = 1,
+        .y = 2,
+        .z = 3,
+    };
 }

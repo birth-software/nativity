@@ -2,13 +2,13 @@ const std = #import("std");
 const builtin = #import("builtin");
 comptime {
     if (builtin.link_libc) {
-        _ = main;
+        #export(main);
     } else {
-        _ = _start;
+        #export(_start);
     }
 }
 
-const _start :: export = fn naked() noreturn {
+const _start = fn naked cc(.c) () noreturn {
     #asm(`
         xor ebp, ebp;
         mov rdi, rsp;
@@ -21,7 +21,7 @@ var argument_count: usize = 0;
 var argument_values: [&]const [&:0]const u8 = undefined;
 var environment_values: [&:null]const ?[&:null]const u8 = undefined;
 
-const start :: export = fn (argc_argv_address: usize) noreturn {
+const start = fn cc(.c) (argc_argv_address: usize) noreturn {
     var argument_address_iterator = argc_argv_address;
     const argument_count_ptr: &usize = #cast(argument_address_iterator);
     argument_count = argument_count_ptr.@;
@@ -35,7 +35,7 @@ const start :: export = fn (argc_argv_address: usize) noreturn {
     std.os.exit(0);
 }
 
-const main :: export = fn (argc: s32, argv: [&]const [&:0]const u8, env: [&:null]const ?[&:null]const u8) s32 {
+const main = fn cc(.c) (argc: s32, argv: [&]const [&:0]const u8, env: [&:null]const ?[&:null]const u8) s32 {
     const argc_u: u32 = #cast(argc);
     argument_count = argc_u;
     argument_values = argv;

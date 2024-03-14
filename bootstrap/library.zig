@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const os = builtin.os.tag;
 const arch = builtin.cpu.arch;
+const page_size = std.mem.page_size;
 
 pub fn assert(ok: bool) void {
     if (!ok) unreachable;
@@ -257,7 +258,7 @@ pub fn MyHashMap(comptime K: type, comptime V: type) type {
                         .Slice => byte_equal(k, key),
                         else => k == key,
                     },
-                    .Struct => equal(k, key),
+                    .Struct, .Array => equal(k, key),
                     else => k == key,
                 };
 
@@ -331,7 +332,6 @@ pub fn enumFromString(comptime E: type, string: []const u8) ?E {
     } else null;
 }
 
-const page_size = std.mem.page_size;
 extern fn pthread_jit_write_protect_np(enabled: bool) void;
 
 pub fn allocate_virtual_memory(size: usize, flags: packed struct {
@@ -353,10 +353,10 @@ pub fn allocate_virtual_memory(size: usize, flags: packed struct {
                 .linux => u32,
                 .macos => c_int,
                 else => @compileError("OS not supported"),
-            } = if (flags.executable) std.os.PROT.EXEC else 0;
-            const protection_flags: u32 = @intCast(std.os.PROT.READ | std.os.PROT.WRITE | execute_flag);
+            } = if (flags.executable) std.posix.PROT.EXEC else 0;
+            const protection_flags: u32 = @intCast(std.posix.PROT.READ | std.posix.PROT.WRITE | execute_flag);
 
-            const result = try std.os.mmap(null, size, protection_flags, .{
+            const result = try std.posix.mmap(null, size, protection_flags, .{
                 .TYPE = .PRIVATE,
                 .ANONYMOUS = true,
             }, -1, 0);
@@ -372,13 +372,13 @@ pub fn allocate_virtual_memory(size: usize, flags: packed struct {
     };
 }
 
-pub fn free_virtual_memory(slice: []align(0x1000) const u8) void {
+pub fn free_virtual_memory(slice: []align(page_size) const u8) void {
     switch (os) {
         .windows => {
             std.os.windows.VirtualFree(slice.ptr, slice.len, std.os.windows.MEM_RELEASE);
         },
         else => {
-            std.os.munmap(slice);
+            std.posix.munmap(slice);
         },
     }
 }
@@ -726,7 +726,7 @@ pub fn span(ptr: [*:0]const u8) [:0]const u8 {
 
 pub fn last(bytes: []const u8, byte: u8) ?usize {
     var i = bytes.len;
-    while (i > 0)  {
+    while (i > 0) {
         i -= 1;
 
         if (bytes[i] == byte) {
@@ -735,4 +735,9 @@ pub fn last(bytes: []const u8, byte: u8) ?usize {
     }
 
     return null;
+}
+
+pub fn align_forward(value: u64, alignment: u64) u64 {
+    const mask = alignment - 1;
+    return (value + mask) & ~mask;
 }

@@ -420,11 +420,21 @@ const Analyzer = struct {
                 if (data_structures.byte_equal(identifier_name, enum_field.name)) {
                     const attribute = @field(Compilation.Function.Attribute, enum_field.name);
                     const attribute_node = switch (attribute) {
-                        .naked,
-                        => try analyzer.addNode(.{
+                        .naked => try analyzer.addNode(.{
                             .id = @field(Node.Id, "function_attribute_" ++ @tagName(attribute)),
                             .token = identifier,
                             .left = .null,
+                            .right = .null,
+                        }),
+                        .cc => try analyzer.addNode(.{
+                            .id = .function_attribute_cc,
+                            .token = identifier,
+                            .left = b: {
+                                _ = try analyzer.expectToken(.operator_left_parenthesis);
+                                const cc = try analyzer.expression();
+                                _ = try analyzer.expectToken(.operator_right_parenthesis);
+                                break :b cc;
+                            },
                             .right = .null,
                         }),
                         else => |t| @panic(@tagName(t)),
@@ -462,7 +472,11 @@ const Analyzer = struct {
         var list = UnpinnedArray(Node.Index){};
 
         while (analyzer.peekToken() != end_token) {
-            const identifier = try analyzer.expectToken(.identifier);
+            const identifier_token = analyzer.token_i;
+            switch (analyzer.peekToken()) {
+                .identifier, .discard => analyzer.consumeToken(),
+                else => |t| @panic(@tagName(t)),
+            }
             _ = try analyzer.expectToken(.operator_colon);
             const type_expression = try analyzer.typeExpression();
 
@@ -472,7 +486,7 @@ const Analyzer = struct {
 
             try list.append(analyzer.my_allocator, try analyzer.addNode(.{
                 .id = .argument_declaration,
-                .token = identifier,
+                .token = identifier_token,
                 .left = type_expression,
                 .right = Node.Index.null,
             }));
