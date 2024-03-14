@@ -8,6 +8,7 @@ const Executable = struct{
     main_source_path: [:0]const u8,
     link_libc: bool = false,
     name: [:0]const u8,
+    c_source_files: []const []const u8 = .{}.&,
 
     const compile = fn(executable: Executable) *!void {
         const argument_count = std.start.argument_count;

@@ -3065,7 +3065,7 @@ pub const V = struct {
         @"unreachable",
 
         pub const ConstantSlice = struct {
-            array: *Debug.Declaration.Global,
+            array: ?*Debug.Declaration.Global,
             start: usize,
             end: usize,
             type: Type.Index,
@@ -4720,6 +4720,43 @@ pub const Builder = struct {
                             },
                             else => |t| @panic(@tagName(t)),
                         }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            .address_of => {
+                assert(node.left != .null);
+                assert(node.right == .null);
+
+                const appointee = unit.getNode(node.left);
+                switch (appointee.id) {
+                    .anonymous_empty_literal => switch (type_expect) {
+                        .type => |type_index| switch (unit.types.get(type_index).*) {
+                            .slice => |slice| {
+                                _ = slice; // autofix
+                                var field_list = try UnpinnedArray(V.Comptime).initialize_with_capacity(context.my_allocator, 2);
+
+                                field_list.append_with_capacity(.undefined);
+                                field_list.append_with_capacity(V.Comptime{
+                                    .constant_int = .{
+                                        .value = 0,
+                                    },
+                                });
+
+                                const constant_slice = try unit.constant_slices.append(context.my_allocator, .{
+                                    .array = null,
+                                    .start = 0,
+                                    .end = 0,
+                                    .type = type_index,
+                                });
+
+                                return .{
+                                    .constant_slice = constant_slice,
+                                };
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        else => |t| @panic(@tagName(t)),
                     },
                     else => |t| @panic(@tagName(t)),
                 }

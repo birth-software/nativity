@@ -2,4 +2,15 @@ const std = #import("std");
 const build = std.build;
 
 const main = fn() *!void {
+    const executable = Executable{
+        .target = .{
+            .cpu = .x86_64,
+            .os = .linux,
+            .abi = .gnu,
+        },
+        .main_source_path = "main.nat",
+        .name = "first",
+    };
+
+    try executable.compile();
 }
