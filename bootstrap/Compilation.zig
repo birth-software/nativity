@@ -87,6 +87,7 @@ pub fn compileBuildExecutable(context: *const Context, arguments: [][*:0]u8) !vo
             .generate_debug_information = true,
             .name = "build",
             .is_test = false,
+            .c_source_files = &.{},
         },
     };
 
@@ -102,13 +103,18 @@ pub fn compileBuildExecutable(context: *const Context, arguments: [][*:0]u8) !vo
         else => false,
     };
     if (!success) {
-        // std.debug.print("The following command terminated with failure ({s}): {s}\n", .{ @tagName(result.term), argv });
-        // if (result.stdout.len > 0) {
-        //     std.debug.print("STDOUT:\n{s}\n", .{result.stdout});
-        // }
-        // if (result.stderr.len > 0) {
-        //     std.debug.print("STDOUT:\n{s}\n", .{result.stderr});
-        // }
+        try write(.panic, "The following command terminated with failure: (");
+        try write(.panic, @tagName(result.term));
+        try write(.panic, "):\n");
+        for (argv) |arg| {
+            try write(.panic, arg);
+            try write(.panic, ", ");
+        }
+        try write(.panic, "\n");
+        try write(.panic, result.stdout);
+        try write(.panic, "\n");
+        try write(.panic, result.stderr);
+        try write(.panic, "\n");
         std.os.abort();
     }
 }
@@ -2181,6 +2187,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
     var maybe_only_parse: ?bool = null;
     var link_libc = false;
     var maybe_executable_name: ?[]const u8 = null;
+    var c_source_files = UnpinnedArray([*:0]u8){};
     const generate_debug_information = true;
 
     if (arguments.len == 0) return error.InvalidInput;
@@ -2287,6 +2294,17 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
+        } else if (byte_equal(current_argument, "-c_source_files")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                try c_source_files.ensure_capacity(context.my_allocator, @intCast(arguments.len - i));
+                while (i < arguments.len) : (i += 1) {
+                    c_source_files.append_with_capacity(arguments[i]);
+                }
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
         } else {
             @panic(current_argument);
             // std.debug.panic("Unrecognized argument: {s}", .{current_argument});
@@ -2328,6 +2346,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
             .generate_debug_information = generate_debug_information,
             .name = executable_name,
             .is_test = options.is_test,
+            .c_source_files = c_source_files.slice(),
         },
     };
 
@@ -9886,7 +9905,7 @@ pub const Builder = struct {
                 break :blk switch (result.value) {
                     .@"comptime" => |ct| switch (ct) {
                         .global => |global| switch (global.initial_value) {
-                            .function_definition => .{
+                            .function_definition, .function_declaration => .{
                                 .value = .{
                                     .@"comptime" = .{
                                         .global = global,
@@ -12163,6 +12182,7 @@ pub const Unit = struct {
     main_package: ?*Package = null,
     all_errors: Type.Index = .null,
     descriptor: Descriptor,
+    object_files: UnpinnedArray([*:0]const u8) = .{},
     discard_identifiers: usize = 0,
     anon_i: usize = 0,
     anon_arr: usize = 0,
@@ -12885,6 +12905,20 @@ pub const Unit = struct {
         }
 
         if (!unit.descriptor.only_parse) {
+            try unit.object_files.ensure_capacity(context.my_allocator, @intCast(unit.descriptor.c_source_files.len));
+            for (unit.descriptor.c_source_files) |c_source_file| {
+                const c_src = span(c_source_file);
+                const dot_index = data_structures.last(c_src, '.') orelse unreachable;
+                const path_without_extension = c_src[0..dot_index];
+                const basename = std.fs.path.basename(path_without_extension);
+                const basename_z = try std.mem.joinZ(context.allocator, "/", &.{"nat", basename});
+                var c_flag = "-c".*;
+                var o_flag = "-o".*;
+                var arguments = [_][*:0]u8{&c_flag, c_source_file, &o_flag, basename_z};
+                try compileCSourceFile(context, &arguments);
+                unit.object_files.append_with_capacity(basename_z);
+            }
+
             try unit.analyze(context);
 
             try llvm.codegen(unit, context);
@@ -12938,6 +12972,7 @@ pub const Descriptor = struct {
     link_libc: bool,
     is_test: bool,
     generate_debug_information: bool,
+    c_source_files: []const [*:0]u8,
     name: []const u8,
 };
 

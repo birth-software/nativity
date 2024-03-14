@@ -3062,6 +3062,11 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
     try arguments.append(context.my_allocator, object_file_path.ptr);
 
+    try arguments.append_slice(context.my_allocator, unit.object_files.slice());
+    // for (unit.object_files.slice()) |object_file| {
+    //     _ = object_file; // autofix
+    // }
+
     switch (unit.descriptor.os) {
         .macos => {
             try arguments.append(context.my_allocator, "-dynamic");
@@ -3126,13 +3131,14 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     }
 
     if (!linking_result) {
+        try write(.panic, "\n");
         for (arguments.slice()) |argument| {
             const arg = data_structures.span(argument);
-            try write(.llvm, arg);
-            try write(.llvm, " ");
+            try write(.panic, arg);
+            try write(.panic, " ");
         }
-        try write(.llvm, "\n");
+        try write(.panic, "\n");
 
-        @panic("Above linker invokation failed");
+        @panic(stderr_ptr[0..stderr_len]);
     }
 }

@@ -1,5 +1,5 @@
 const std = #import("std");
-const expect = std.test.expect;
+const expect = std.testing.expect;
 const foo :: extern = fn(arg: u32) u32;
 const main = fn () *!void {
     const arg = 0xabcdef;
