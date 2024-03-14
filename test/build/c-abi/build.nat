@@ -1,5 +1,5 @@
 const std = #import("std");
-const build = std.build;
+const Executable  = std.build.Executable;
 
 const main = fn() *!void {
     const executable = Executable{
@@ -9,7 +9,8 @@ const main = fn() *!void {
             .abi = .gnu,
         },
         .main_source_path = "main.nat",
-        .name = "first",
+        .name = "c-abi",
+        .c_source_files = .{ "foo.c" }.&,
     };
 
     try executable.compile();

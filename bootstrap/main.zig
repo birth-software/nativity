@@ -29,10 +29,19 @@ pub export fn main(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]
     if (entry_point(arguments)) |_| {
         return 0;
     } else |err| {
-        const error_name: []const u8 = @errorName(err);
-        Compilation.write(.panic, "Error: ") catch {};
-        Compilation.write(.panic, error_name) catch {};
-        Compilation.write(.panic, "\n") catch {};
+        const print_stack_trace = @import("configuration").print_stack_trace;
+        switch (print_stack_trace) {
+            true => if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace.*);
+            },
+            false => {
+                const error_name: []const u8 = @errorName(err);
+                Compilation.write(.panic, "Error: ") catch {};
+                Compilation.write(.panic, error_name) catch {};
+                Compilation.write(.panic, "\n") catch {};
+            },
+        }
+
         return 1;
     }
 }

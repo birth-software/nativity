@@ -723,3 +723,16 @@ pub fn span(ptr: [*:0]const u8) [:0]const u8 {
     }
     return ptr[0..len :0];
 }
+
+pub fn last(bytes: []const u8, byte: u8) ?usize {
+    var i = bytes.len;
+    while (i > 0)  {
+        i -= 1;
+
+        if (bytes[i] == byte) {
+            return i;
+        }
+    }
+
+    return null;
+}

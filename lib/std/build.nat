@@ -8,7 +8,7 @@ const Executable = struct{
     main_source_path: [:0]const u8,
     link_libc: bool = false,
     name: [:0]const u8,
-    c_source_files: []const []const u8 = .{}.&,
+    c_source_files: []const [:0]const u8 = .{}.&,
 
     const compile = fn(executable: Executable) *!void {
         const argument_count = std.start.argument_count;
@@ -35,8 +35,15 @@ const Executable = struct{
             } else {
                 link_libc_arg = "false";
             }
-            const argv = [_:null] ?[&:0]const u8{ compiler_path, "exe",  "-main_source_file", executable.main_source_path.ptr, "-link_libc", link_libc_arg, "-name", executable.name.ptr };
-            try std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
+
+            if (executable.c_source_files.len > 0) {
+                assert(executable.c_source_files.len == 1);
+                const argv = [_:null] ?[&:0]const u8{ compiler_path, "exe",  "-main_source_file", executable.main_source_path.ptr, "-link_libc", link_libc_arg, "-name", executable.name.ptr, "-c_source_files", executable.c_source_files[0].ptr };
+                try std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
+            } else {
+                const argv = [_:null] ?[&:0]const u8{ compiler_path, "exe",  "-main_source_file", executable.main_source_path.ptr, "-link_libc", link_libc_arg, "-name", executable.name.ptr };
+                try std.os.execute(path = compiler_path, argv = argv.&, env = std.start.environment_values);
+            }
         } else {
             const raw_status = try std.os.waitpid(pid, flags = 0);
             if (std.os.ifexited(status = raw_status)) {
