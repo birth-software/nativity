@@ -166,7 +166,7 @@ const MuslContext = struct {
     }
 };
 
-const CSourceKind = enum{
+const CSourceKind = enum {
     c,
     cpp,
 };
@@ -264,37 +264,46 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: C
     try clang_args.append(context.my_allocator, context.executable_absolute_path);
     try clang_args.append(context.my_allocator, "clang");
 
+    if (kind == .cpp) {
+        try clang_args.append(context.my_allocator, "-nostdinc++");
+
+        try clang_args.append_slice(context.my_allocator, &.{
+            "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
+            "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
+            "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+            "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
+            "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
+            "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
+            "-D_LIBCPP_ABI_VERSION=1",
+            "-D_LIBCPP_ABI_NAMESPACE=__1",
+        });
+        switch (@import("builtin").os.tag) {
+            .linux => {},
+            .macos => {},
+            else => @compileError("Operating system not supported"),
+        }
+    }
+
     if (kind == .c or kind == .cpp) {
         try clang_args.append(context.my_allocator, "-nostdinc");
 
         switch (@import("builtin").os.tag) {
             .linux => {
-                try clang_args.append_slice(context.my_allocator, &.{ "-isystem", "/home/david/dev/zig/lib/include", "-isystem", "/home/david/dev/zig/lib/libc/include/x86_64-linux-gnu", "-isystem", "/home/david/dev/zig/lib/libc/include/generic-glibc", "-isystem", "/home/david/dev/zig/lib/libc/include/x86-linux-any", "-isystem", "/home/david/dev/zig/lib/libc/include/any-linux-any" });
-                try clang_args.append(context.my_allocator, "-isystem");
-                try clang_args.append(context.my_allocator, "/usr/include");
-                try clang_args.append(context.my_allocator, "-isystem");
-                try clang_args.append(context.my_allocator, "/usr/include/linux");
+                try clang_args.append_slice(context.my_allocator, &.{
+                    "-isystem", try context.pathFromCompiler("lib/include"),
+                    "-isystem", try context.pathFromCompiler("lib/libc/include/x86_64-linux-gnu"),
+                    "-isystem", try context.pathFromCompiler("lib/libc/include/generic-glibc"),
+                    "-isystem", try context.pathFromCompiler("lib/libc/include/x86-linux-any"),
+                    "-isystem", try context.pathFromCompiler("lib/libc/include/any-linux-any"),
+                    "-isystem", "/usr/include",
+                    "-isystem", "/usr/include/linux",
+                });
             },
             .macos => {
                 try clang_args.append_slice(context.my_allocator, &.{
                     "-iframework", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
                     "-isystem",    try context.pathFromCompiler("lib/include"),
                     "-isystem",    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
-                });
-            },
-            else => @compileError("Operating system not supported"),
-        }
-    }
-
-    if (kind == .cpp) {
-        try clang_args.append(context.my_allocator, "-nostdinc++");
-        switch (@import("builtin").os.tag) {
-            .linux => {
-            },
-            .macos => {
-                try clang_args.append_slice(context.my_allocator, &.{
-                    "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
-                    "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
                 });
             },
             else => @compileError("Operating system not supported"),
@@ -2973,7 +2982,7 @@ pub const Instruction = union(enum) {
     trap,
     @"unreachable",
 
-    const Memcpy = struct{
+    const Memcpy = struct {
         destination: V,
         source: V,
         destination_alignment: ?u32,
@@ -6533,7 +6542,7 @@ pub const Builder = struct {
                             for (0..array.count) |_| {
                                 const element_classes = builder.classify_systemv_x86_64(unit, context, array.type, offset);
                                 offset += element_size;
-                                const merge_result = [2]Class_SystemVx86_64{Class_SystemVx86_64.merge(result[0], element_classes[0]), Class_SystemVx86_64.merge(result[1], element_classes[1])};
+                                const merge_result = [2]Class_SystemVx86_64{ Class_SystemVx86_64.merge(result[0], element_classes[0]), Class_SystemVx86_64.merge(result[1], element_classes[1]) };
                                 result = merge_result;
                                 if (result[0] == .memory or result[1] == .memory) {
                                     break;
@@ -6890,7 +6899,7 @@ pub const Builder = struct {
                             .pointer = pointer_type,
                             .alignment = alignment,
                         },
-                        },
+                    },
                     .attributes = .{
                         .by_value = true,
                     },
@@ -11576,7 +11585,7 @@ pub const Builder = struct {
                             .destination = argument_alloca,
                             .source = argument_value,
                         },
-                        });
+                    });
                     try builder.appendInstruction(unit, context, store);
 
                     const target_type = unit.types.get(coerced_type_index);
@@ -11595,7 +11604,7 @@ pub const Builder = struct {
                                 .value = argument_alloca,
                                 .type = coerced_type_index,
                             },
-                            });
+                        });
                         try builder.appendInstruction(unit, context, load);
 
                         argument_list.append_with_capacity(V{
@@ -11634,7 +11643,7 @@ pub const Builder = struct {
                                 .type = coerced_type_index,
                                 .alignment = alignment,
                             },
-                            });
+                        });
                         try builder.appendInstruction(unit, context, load);
 
                         argument_list.append_with_capacity(V{
@@ -11730,11 +11739,10 @@ pub const Builder = struct {
                                     .destination = coerced_pointer,
                                     .source = argument_value,
                                 },
-                                });
+                            });
                             try builder.appendInstruction(unit, context, coerced_store);
 
                             break :b coerced_pointer;
-
                         } else b: {
                             const pointer_type = try unit.getPointerType(context, .{
                                 .type = argument_type_index,
@@ -11756,7 +11764,7 @@ pub const Builder = struct {
                                     .destination = argument_alloca,
                                     .source = argument_value,
                                 },
-                                });
+                            });
                             try builder.appendInstruction(unit, context, store);
 
                             break :b argument_alloca;
@@ -11772,12 +11780,12 @@ pub const Builder = struct {
                                             .constant_int = .{
                                                 .value = 0,
                                             },
-                                            },
                                         },
-                                        .type = .u32,
                                     },
-                                    },
-                                });
+                                    .type = .u32,
+                                },
+                            },
+                        });
                         try builder.appendInstruction(unit, context, gep0);
 
                         const load0 = try unit.instructions.append(context.my_allocator, .{
@@ -11796,7 +11804,7 @@ pub const Builder = struct {
                                 },
                                 .type = pair[0],
                             },
-                            });
+                        });
                         try builder.appendInstruction(unit, context, load0);
 
                         const gep1 = try unit.instructions.append(context.my_allocator, .{
@@ -11810,12 +11818,12 @@ pub const Builder = struct {
                                             .constant_int = .{
                                                 .value = 1,
                                             },
-                                            },
                                         },
-                                        .type = .u32,
                                     },
-                                    },
-                                });
+                                    .type = .u32,
+                                },
+                            },
+                        });
                         try builder.appendInstruction(unit, context, gep1);
 
                         const load1 = try unit.instructions.append(context.my_allocator, .{
@@ -11834,9 +11842,8 @@ pub const Builder = struct {
                                 },
                                 .type = pair[1],
                             },
-                            });
+                        });
                         try builder.appendInstruction(unit, context, load1);
-
 
                         argument_list.append_with_capacity(V{
                             .value = .{
@@ -14014,7 +14021,7 @@ pub const Builder = struct {
                                 .type = struct_type_index,
                                 .alignment = alignment,
                             },
-                            });
+                        });
                         try builder.appendInstruction(unit, context, load);
 
                         break :b V{
@@ -15091,8 +15098,11 @@ pub const Unit = struct {
                 const dot_index = data_structures.last(c_src, '.') orelse unreachable;
                 const path_without_extension = c_src[0..dot_index];
                 const basename = std.fs.path.basename(path_without_extension);
-                const o_file = try std.mem.concat(context.allocator, u8, &.{ basename, ".o"});
-                const basename_z = try std.mem.joinZ(context.allocator, "/", &.{ "nat", o_file, });
+                const o_file = try std.mem.concat(context.allocator, u8, &.{ basename, ".o" });
+                const basename_z = try std.mem.joinZ(context.allocator, "/", &.{
+                    "nat",
+                    o_file,
+                });
                 var c_flag = "-c".*;
                 var o_flag = "-o".*;
                 var g_flag = "-g".*;
