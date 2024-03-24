@@ -512,7 +512,7 @@ pub fn UnpinnedArray(comptime T: type) type {
 
         pub fn insert(array: *@This(), allocator: *MyAllocator, index: IndexType, item: T) !void {
             assert(index < array.length);
-            if (array.length + 1 >= array.capacity) {
+            if (array.length + 1 <= array.capacity) {
                 const after_count = array.length - index;
                 copy_backwards(T, array.pointer[index + 1 ..][0..after_count], array.pointer[index..][0..after_count]);
             } else {
