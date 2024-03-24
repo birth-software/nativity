@@ -69,11 +69,9 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
         // const exit_code = try clangMain(allocator, arguments);
         // std.process.exit(exit_code);
     } else if (byte_equal(command, "cc")) {
-        // TODO: transform our arguments to Clang and invoke it
-        try Compilation.compileCSourceFile(context, command_arguments);
+        try Compilation.compileCSourceFile(context, command_arguments, .c);
     } else if (byte_equal(command, "c++")) {
-        // TODO: transform our arguments to Clang and invoke it
-        todo();
+        try Compilation.compileCSourceFile(context, command_arguments, .cpp);
     } else if (byte_equal(command, "exe")) {
         try Compilation.buildExecutable(context, command_arguments, .{
             .is_test = false,

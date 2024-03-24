@@ -166,7 +166,12 @@ const MuslContext = struct {
     }
 };
 
-pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8) !void {
+const CSourceKind = enum{
+    c,
+    cpp,
+};
+
+pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: CSourceKind) !void {
     const musl = try MuslContext.init(context);
     var exists = true;
     var dir = std.fs.cwd().openDir(musl.global_cache_dir, .{}) catch b: {
@@ -258,24 +263,42 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8) !void {
     var clang_args = UnpinnedArray([]const u8){};
     try clang_args.append(context.my_allocator, context.executable_absolute_path);
     try clang_args.append(context.my_allocator, "clang");
-    try clang_args.append(context.my_allocator, "-nostdinc");
-    // TODO: fix
-    switch (@import("builtin").os.tag) {
-        .linux => {
-            try clang_args.append_slice(context.my_allocator, &.{ "-isystem", "/home/david/dev/zig/lib/include", "-isystem", "/home/david/dev/zig/lib/libc/include/x86_64-linux-gnu", "-isystem", "/home/david/dev/zig/lib/libc/include/generic-glibc", "-isystem", "/home/david/dev/zig/lib/libc/include/x86-linux-any", "-isystem", "/home/david/dev/zig/lib/libc/include/any-linux-any" });
-            try clang_args.append(context.my_allocator, "-isystem");
-            try clang_args.append(context.my_allocator, "/usr/include");
-            try clang_args.append(context.my_allocator, "-isystem");
-            try clang_args.append(context.my_allocator, "/usr/include/linux");
-        },
-        .macos => {
-            try clang_args.append_slice(context.my_allocator, &.{
-                "-iframework", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
-                "-isystem",    try context.pathFromCompiler("lib/include"),
-                "-isystem",    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
-            });
-        },
-        else => @compileError("Foo"),
+
+    if (kind == .c or kind == .cpp) {
+        try clang_args.append(context.my_allocator, "-nostdinc");
+
+        switch (@import("builtin").os.tag) {
+            .linux => {
+                try clang_args.append_slice(context.my_allocator, &.{ "-isystem", "/home/david/dev/zig/lib/include", "-isystem", "/home/david/dev/zig/lib/libc/include/x86_64-linux-gnu", "-isystem", "/home/david/dev/zig/lib/libc/include/generic-glibc", "-isystem", "/home/david/dev/zig/lib/libc/include/x86-linux-any", "-isystem", "/home/david/dev/zig/lib/libc/include/any-linux-any" });
+                try clang_args.append(context.my_allocator, "-isystem");
+                try clang_args.append(context.my_allocator, "/usr/include");
+                try clang_args.append(context.my_allocator, "-isystem");
+                try clang_args.append(context.my_allocator, "/usr/include/linux");
+            },
+            .macos => {
+                try clang_args.append_slice(context.my_allocator, &.{
+                    "-iframework", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
+                    "-isystem",    try context.pathFromCompiler("lib/include"),
+                    "-isystem",    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
+                });
+            },
+            else => @compileError("Operating system not supported"),
+        }
+    }
+
+    if (kind == .cpp) {
+        try clang_args.append(context.my_allocator, "-nostdinc++");
+        switch (@import("builtin").os.tag) {
+            .linux => {
+            },
+            .macos => {
+                try clang_args.append_slice(context.my_allocator, &.{
+                    "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
+                    "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
+                });
+            },
+            else => @compileError("Operating system not supported"),
+        }
     }
 
     for (arguments) |arg| {
@@ -15076,7 +15099,7 @@ pub const Unit = struct {
                 var stack_protector = "-fno-stack-protector".*;
 
                 var arguments = [_][*:0]u8{ &c_flag, c_source_file, &o_flag, basename_z, &g_flag, &stack_protector };
-                try compileCSourceFile(context, &arguments);
+                try compileCSourceFile(context, &arguments, .c);
                 unit.object_files.append_with_capacity(basename_z);
             }
 
