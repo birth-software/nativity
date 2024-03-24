@@ -14,15 +14,17 @@ concurrency:
 
 jobs:
   self_hosted_linux:
-    runs-on: [ self-hosted, Linux, x64 ]
+    #runs-on: [ self-hosted, Linux, x64 ]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Test
         run: |
-          zig build test -Dself_hosted_ci=true -Dstatic=true -Dllvm_path=../../../../../dev/llvm/llvm-static-release-zen4-17.0.6/out/x86_64-linux-musl-native 
-          zig build test -Dself_hosted_ci=true -Dstatic=false
+          echo "TODO"
+          #zig build test -Dself_hosted_ci=true -Dstatic=true -Dllvm_path=../../../../../dev/llvm/llvm-static-release-zen4-17.0.6/out/x86_64-linux-musl-native 
+          #zig build test -Dself_hosted_ci=true -Dstatic=false
   # macos_m1:
   #   runs-on: macos-14
   #   timeout-minutes: 15

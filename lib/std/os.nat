@@ -15,7 +15,7 @@ const system = switch (link_libc) {
     true => c,
     false => switch (current) {
         .linux => linux,
-        .macos => macos,
+        .macos => c,
         .windows => windows,
     },
 };
@@ -25,7 +25,7 @@ const unwrap_syscall = system.unwrap_syscall;
 const exit = fn(exit_code: s32) noreturn {
     switch (current) {
         .linux => _ = #syscall(#cast(linux.Syscall.exit_group), #cast(exit_code)),
-        .macos => macos.exit(exit_code),
+        .macos => system.exit(exit_code),
         .windows => windows.ExitProcess(#cast(exit_code)),
     }
 }
@@ -46,7 +46,15 @@ const FileDescriptor = struct{
     const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ReadError!usize {
         if (bytes.len > 0) {
             switch (current) {
-                .linux, .macos => {
+                .linux => {
+                    const len: usize = #min(max_file_operation_byte_count, bytes.len);
+                    const syscall_result = system.read(file_descriptor, bytes);
+                    const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                        else => unreachable,
+                    };
+                    return byte_count;
+                },
+                .macos => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.len);
                     const syscall_result = system.read(file_descriptor, bytes);
                     const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
@@ -67,9 +75,17 @@ const FileDescriptor = struct{
 
     const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) WriteError!usize {
         switch (current) {
-            .linux, .macos => {
+            .linux => {
                 const len: usize = #min(max_file_operation_byte_count, bytes.len);
                 const syscall_result = system.write(file_descriptor.handle, bytes[0..len]);
+                const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                    else => return WriteError.write_failed,
+                };
+                return byte_count;
+            },
+            .macos => {
+                const len: usize = #min(max_file_operation_byte_count, bytes.len);
+                const syscall_result = system.write(file_descriptor.handle, bytes.ptr, bytes.len);
                 const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
                     else => return WriteError.write_failed,
                 };
@@ -122,8 +138,8 @@ const allocate_virtual_memory = fn(address: ?[&]u8, length: usize, general_prote
         .linux, .macos => {
             const syscall_result = system.mmap(address, length, protection_flags, map_flags, file_descriptor, offset);
             if (link_libc) {
-                if (result != system.MAP_FAILED) {
-                    const result_address: [&]u8 = #cast(result);
+                if (syscall_result != system.MAP_FAILED) {
+                    const result_address: [&]u8 = #cast(syscall_result);
                     return result_address;
                 } else {
                     // TODO:
@@ -147,8 +163,14 @@ const FreeError = error{
 };
 const free_virtual_memory = fn(bytes: []const u8) FreeError!void {
     switch (current) {
-        .linux, .macos => {
+        .linux => {
             const syscall_result = system.munmap(bytes);
+            _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+        },
+        .macos => {
+            const syscall_result = system.munmap(bytes.ptr, bytes.len);
             _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
                 else => unreachable,
             };
@@ -194,32 +216,31 @@ const current_executable_path = fn(buffer: [:0]u8) CurrentExecutablePath![]u8 {
             };
             return bytes;
         },
-        //.macos => {
-            // TODO:
-            //var symlink_path_buffer: [max_path_byte_count:0]u8 = undefined;
-            //var symlink_path_len: u32 = symlink_path_buffer.len + 1;
-            //const ns_result = macos._NSGetExecutablePath(symlink_path_buffer.&, symlink_path_len.&);
-            //if (ns_result == 0) {
-            //    const symlink_path = symlink_path_buffer[0..symlink_path_len];
-            //    const result = macos.realpath(symlink_path.ptr, buffer.ptr);
-            //    if (result != null) {
-            //        var i: usize = 0;
-            //        while (i < buffer.len) {
-            //            if (result[i] == 0) {
-            //                break;
-            //            }
-            //            i += 1;
-            //        }
-            //        assert(i < buffer.len);
+        .macos => {
+            var symlink_path_buffer: [max_path_byte_count:0]u8 = undefined;
+            var symlink_path_len: u32 = symlink_path_buffer.len + 1;
+            const ns_result = c._NSGetExecutablePath(symlink_path_buffer.&, symlink_path_len.&);
+            if (ns_result == 0) {
+                const symlink_path = symlink_path_buffer[0..symlink_path_len];
+                if (c.realpath(symlink_path.ptr, buffer.ptr)) |result| {
+                    var i: usize = 0;
+                    while (i < buffer.len) {
+                        if (result[i] == 0) {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    assert(i < buffer.len);
 
-            //        return result[0..i];
-            //    } else {
-            //        return null;
-            //    }
-            //} else {
-            //    return null;
-            //}
-        //},
+                    const r: []u8 = result[0..i];
+                    return r;
+                } else {
+                    return CurrentExecutablePath.failed;
+                }
+            } else {
+                return CurrentExecutablePath.failed;
+            }
+        },
         else => #error("OS not supported"),
     }
 }
@@ -256,13 +277,11 @@ const ExecveError = error{
 const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) ExecveError!noreturn {
     switch (current) {
         .linux, .macos =>  {
-            const syscall_result = linux.execve(path, argv, env);
-            const signed_syscall_result: ssize = #cast(syscall_result);
-            if (signed_syscall_result == -1) {
-                return ExecveError.execve_failed;
-            } else {
-                unreachable;
-            }
+            const syscall_result = system.execve(path, argv, env);
+            _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => return ExecveError.execve_failed,
+            };
+            unreachable;
         },
         else => #error("OS not supported"),
     }
@@ -410,7 +429,7 @@ const waitpid = fn(pid: Process.Id, flags: u32) WaitPidError!u32 {
         },
         .macos => {
             var status: s32 = undefined;
-            if (macos.waitpid(pid, status.&, #cast(flags)) != -1) {
+            if (system.waitpid(pid, status.&, #cast(flags)) != -1) {
                 const status_u: u32 = #cast(status);
                 return status_u;
             } else {

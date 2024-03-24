@@ -288,6 +288,7 @@ extern "C" Function* NativityLLVMModuleGetFunction(Module& module, const char* n
 
 extern "C" void NativityLLVMFunctionAddAttributeKey(Function& function, Attribute::AttrKind attribute)
 {
+    static_assert(sizeof(Attribute) == sizeof(size_t));
     function.addFnAttr(attribute);
 }
 
@@ -357,6 +358,12 @@ extern "C" void NativityLLVMFunctionGetArguments(Function& function, Argument** 
     }
 }
 
+extern "C" Argument* NativityLLVMFunctionGetArgument(Function& function, unsigned index)
+{
+    auto* arg = function.getArg(index);
+    return arg;
+}
+
 extern "C" void NativityLLVMFunctionSetSubprogram(Function& function, DISubprogram* subprogram)
 {
     function.setSubprogram(subprogram);
@@ -386,16 +393,21 @@ extern "C" ConstantInt* NativityLLVMConstantToInt(Constant* constant)
     return constant_int;
 }
 
-extern "C" StoreInst* NativityLLVMBuilderCreateStore(IRBuilder<>& builder, Value* value, Value* pointer, bool is_volatile)
+extern "C" StoreInst* NativityLLVMBuilderCreateStore(IRBuilder<>& builder, Value* value, Value* pointer, bool is_volatile, uint32_t alignment)
 {
-    auto* store = builder.CreateStore(value, pointer, is_volatile);
+    auto align = Align{alignment};
+    auto* basic_block = builder.GetInsertBlock();
+    auto* store = new StoreInst(value, pointer, is_volatile, align,
+            AtomicOrdering::NotAtomic, SyncScope::System, basic_block);
     return store;
 }
 
-extern "C" AllocaInst* NativityLLVMBuilderCreateAlloca(IRBuilder<>& builder, Type* type, unsigned address_space, Value* array_size, const char* name_ptr, size_t name_len)
+extern "C" AllocaInst* NativityLLVMBuilderCreateAlloca(IRBuilder<>& builder, Type* type, unsigned address_space, Value* array_size, const char* name_ptr, size_t name_len, uint32_t alignment)
 {
     auto name = StringRef(name_ptr, name_len);
-    auto* alloca = builder.CreateAlloca(type, address_space, array_size, name);
+    auto align = Align{ alignment };
+    BasicBlock* insert_block = builder.GetInsertBlock();
+    AllocaInst* alloca = new AllocaInst(type, address_space, array_size, align, name, insert_block);
     return alloca;
 }
 
@@ -412,10 +424,13 @@ extern "C" Value* NativityLLVMBuilderCreateICmp(IRBuilder<>& builder, CmpInst::P
     return icmp;
 }
 
-extern "C" LoadInst* NativityLLVMBuilderCreateLoad(IRBuilder<>& builder, Type* type, Value* value, bool is_volatile, const char* name_ptr, size_t name_len)
+extern "C" LoadInst* NativityLLVMBuilderCreateLoad(IRBuilder<>& builder, Type* type, Value* pointer, bool is_volatile, const char* name_ptr, size_t name_len, uint32_t alignment)
 {
+    auto align = Align{alignment};
     auto name = StringRef(name_ptr, name_len);
-    auto* load = builder.CreateLoad(type, value, is_volatile, name);
+    auto* basic_block = builder.GetInsertBlock();
+    auto* load = new LoadInst(type, pointer, name, is_volatile,
+           align, AtomicOrdering::NotAtomic, SyncScope::System, basic_block);
     return load;
 }
 
@@ -940,15 +955,61 @@ extern "C" bool NativityLLVMModuleAddPassesToEmitFile(Module& module, TargetMach
     return true;
 }
 
-extern "C" bool NativityLLVMCompareTypes(Type* a, Type* b)
+extern "C" Attribute NativityLLVMContextGetAttributeFromEnum(LLVMContext& context, Attribute::AttrKind kind, uint64_t value)
 {
-    if (auto* int_a = dyn_cast<IntegerType>(a)) {
-        auto* int_b = dyn_cast<IntegerType>(b);
-        assert(int_b);
-        auto a_bit_count = int_a->getBitWidth();
-        auto b_bit_count = int_b->getBitWidth();
-        assert(a_bit_count == b_bit_count);
-    }
+    static_assert(sizeof(Attribute) == sizeof(uintptr_t));
+    auto attribute = Attribute::get(context, kind, value);
+    return attribute;
+}
 
-    return a == b;
+extern "C" Attribute NativityLLVMContextGetAttributeFromType(LLVMContext& context, Attribute::AttrKind kind, Type* type)
+{
+    static_assert(sizeof(Attribute) == sizeof(uintptr_t));
+    auto attribute = Attribute::get(context, kind, type);
+    return attribute;
+}
+
+extern "C" Attribute NativityLLVMContextGetAttributeFromString(LLVMContext& context, const char* kind_ptr, size_t kind_len, const char* value_ptr, size_t value_len)
+{
+    static_assert(sizeof(Attribute) == sizeof(uintptr_t));
+    auto kind = StringRef(kind_ptr, kind_len);
+    auto value = StringRef(value_ptr, value_len);
+    auto attribute = Attribute::get(context, kind, value);
+    return attribute;
+}
+
+extern "C" AttributeSet NativityLLVMContextGetAttributeSet(LLVMContext& context, const Attribute* attribute_ptr, size_t attribute_count)
+{
+    static_assert(sizeof(AttributeSet) == sizeof(uintptr_t));
+    auto attributes = ArrayRef<Attribute>(attribute_ptr, attribute_count);
+    auto attribute_set = AttributeSet::get(context, attributes);
+    return attribute_set;
+}
+
+extern "C" void NativityLLVMFunctionSetAttributes(Function& function, LLVMContext& context, AttributeSet function_attributes, AttributeSet return_attributes, const AttributeSet* parameter_attribute_set_ptr, size_t parameter_attribute_set_count)
+{
+    auto parameter_attribute_sets = ArrayRef<AttributeSet>(parameter_attribute_set_ptr, parameter_attribute_set_count);
+    auto attribute_list = AttributeList::get(context, function_attributes, return_attributes, parameter_attribute_sets);
+    function.setAttributes(attribute_list);
+}
+
+extern "C" void NativityLLVMCallSetAttributes(CallInst& call, LLVMContext& context, AttributeSet function_attributes, AttributeSet return_attributes, const AttributeSet* parameter_attribute_set_ptr, size_t parameter_attribute_set_count)
+{
+    auto parameter_attribute_sets = ArrayRef<AttributeSet>(parameter_attribute_set_ptr, parameter_attribute_set_count);
+    auto attribute_list = AttributeList::get(context, function_attributes, return_attributes, parameter_attribute_sets);
+    call.setAttributes(attribute_list);
+}
+
+extern "C" CallInst* NativityLLVMBuilderCreateMemcpy(IRBuilder<>& builder, Value* destination, uint32_t destination_alignment, Value* source, uint32_t source_alignment, uint64_t size, bool is_volatile)
+{
+    auto dst_alignment = MaybeAlign(destination_alignment);
+    auto src_alignment = MaybeAlign(source_alignment);
+    auto memcpy = builder.CreateMemCpy(destination, dst_alignment, source, src_alignment, size, is_volatile);
+
+    return memcpy;
+}
+
+extern "C" void NativityLLVMTypeAssertEqual(Type* a, Type* b)
+{
+    assert(a == b);
 }

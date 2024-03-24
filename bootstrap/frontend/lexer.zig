@@ -67,7 +67,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
     var index: u32 = 0;
     var line_index: u32 = lexer.line_offset;
 
-    try token_buffer.ensure_with_capacity(allocator, len / 4);
+    try token_buffer.ensure_with_capacity(allocator, len / 3);
 
     // logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
