@@ -513,7 +513,15 @@ pub fn main() !void {
         errors = true;
     };
 
-    // try runCmakeTests(allocator);
+    switch (@import("builtin").os.tag) {
+        .macos => {},
+        .linux => switch (@import("builtin").abi) {
+            .gnu => try runCmakeTests(allocator),
+            .musl => {},
+            else => @compileError("ABI not supported"),
+        },
+        else => @compileError("OS not supported"),
+    }
 
     if (errors) {
         return error.fail;
