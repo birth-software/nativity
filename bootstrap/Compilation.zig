@@ -171,7 +171,7 @@ const CSourceKind = enum {
     cpp,
 };
 
-pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: CSourceKind) !void {
+fn compileMusl(context: *const Context) MuslContext{
     const musl = try MuslContext.init(context);
     var exists = true;
     var dir = std.fs.cwd().openDir(musl.global_cache_dir, .{}) catch b: {
@@ -260,26 +260,63 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: C
         }
     }
 
+    return musl;
+}
+
+pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: CSourceKind) !void {
     var clang_args = UnpinnedArray([]const u8){};
     try clang_args.append(context.my_allocator, context.executable_absolute_path);
     try clang_args.append(context.my_allocator, "clang");
 
+    const Mode = enum{
+        object,
+        link,
+    };
+    const mode: Mode = for (arguments) |argz| {
+        const arg = span(argz);
+        if (byte_equal(arg, "-c")) break .object;
+    } else .link;
+    _ = mode; // autofix
+
     if (kind == .cpp) {
         try clang_args.append(context.my_allocator, "-nostdinc++");
 
-        try clang_args.append_slice(context.my_allocator, &.{
-            "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
-            "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
-            "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
-            "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
-            "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
-            "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
-            "-D_LIBCPP_ABI_VERSION=1",
-            "-D_LIBCPP_ABI_NAMESPACE=__1",
-        });
         switch (@import("builtin").os.tag) {
-            .linux => {},
-            .macos => {},
+            .linux => {
+                switch (@import("builtin").abi) {
+                    .gnu => {
+                        try clang_args.append_slice(context.my_allocator, &.{
+                            "-isystem", "/usr/include/c++/13.2.1",
+                            "-isystem", "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
+                        });
+                    },
+                    .musl => {
+                        try clang_args.append_slice(context.my_allocator, &.{
+                            "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
+                            "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
+                            "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+                            "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
+                            "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
+                            "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
+                            "-D_LIBCPP_ABI_VERSION=1",
+                            "-D_LIBCPP_ABI_NAMESPACE=__1",
+                        });
+                    },
+                    else => unreachable,
+                }
+            },
+            .macos => {
+                try clang_args.append_slice(context.my_allocator, &.{
+                    "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
+                    "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
+                    "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+                    "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
+                    "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
+                    "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
+                    "-D_LIBCPP_ABI_VERSION=1",
+                    "-D_LIBCPP_ABI_NAMESPACE=__1",
+                });
+            },
             else => @compileError("Operating system not supported"),
         }
     }
@@ -289,15 +326,25 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: C
 
         switch (@import("builtin").os.tag) {
             .linux => {
-                try clang_args.append_slice(context.my_allocator, &.{
-                    "-isystem", try context.pathFromCompiler("lib/include"),
-                    "-isystem", try context.pathFromCompiler("lib/libc/include/x86_64-linux-gnu"),
-                    "-isystem", try context.pathFromCompiler("lib/libc/include/generic-glibc"),
-                    "-isystem", try context.pathFromCompiler("lib/libc/include/x86-linux-any"),
-                    "-isystem", try context.pathFromCompiler("lib/libc/include/any-linux-any"),
-                    "-isystem", "/usr/include",
-                    "-isystem", "/usr/include/linux",
-                });
+                switch (@import("builtin").abi) {
+                    .gnu => {
+                        try clang_args.append_slice(context.my_allocator, &.{
+                            "-isystem", "/usr/lib/clang/17/include",
+                            "-isystem", "/usr/include",
+                            "-isystem", "/usr/include/linux",
+                        });
+                    },
+                    .musl => {
+                        try clang_args.append_slice(context.my_allocator, &.{
+                            "-isystem", try context.pathFromCompiler("lib/include"),
+                            "-isystem", try context.pathFromCompiler("lib/libc/include/x86_64-linux-gnu"),
+                            "-isystem", try context.pathFromCompiler("lib/libc/include/generic-glibc"),
+                            "-isystem", try context.pathFromCompiler("lib/libc/include/x86-linux-any"),
+                            "-isystem", try context.pathFromCompiler("lib/libc/include/any-linux-any"),
+                        });
+                    },
+                    else => @compileError("Abi not supported"),
+                }
             },
             .macos => {
                 try clang_args.append_slice(context.my_allocator, &.{
@@ -310,6 +357,24 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: C
         }
     }
 
+    if (kind == .cpp) {
+        switch (@import("builtin").os.tag) {
+            .linux => {
+                switch (@import("builtin").abi) {
+                    .gnu => {
+                        try clang_args.append(context.my_allocator, "-lstdc++");
+                    },
+                    .musl => {
+                        unreachable;
+                    },
+                    else => @compileError("Abi not supported"),
+                }
+            },
+            .macos => unreachable,
+            else => @compileError("OS not supported"),
+        }
+    }
+
     for (arguments) |arg| {
         try clang_args.append(context.my_allocator, span(arg));
     }
@@ -319,43 +384,43 @@ pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: C
         unreachable;
     }
 
-    const output_object_file = "nat/main.o";
+    // const output_object_file = "nat/main.o";
     // const exit_code = try clangMain(context.allocator, &.{ context.executable_absolute_path, "--no-default-config", "-target", "x86_64-unknown-linux-musl", "-nostdinc", "-fno-spell-checking", "-isystem", "lib/include", "-isystem", "lib/libc/include/x86_64-linux-musl", "-isystem", "lib/libc/include/generic-musl", "-isystem", "lib/libc/include/x86-linux-any", "-isystem", "lib/libc/include/any-linux-any", "-c", argument, "-o", output_object_file });
     // if (exit_code != 0) {
     //     unreachable;
     // }
 
-    const link = false;
-    if (link) {
-        var lld_args = UnpinnedArray([*:0]const u8){};
-        try lld_args.append(context.my_allocator, "ld.lld");
-        try lld_args.append(context.my_allocator, "--error-limit=0");
-        try lld_args.append(context.my_allocator, "--entry");
-        try lld_args.append(context.my_allocator, "_start");
-        try lld_args.append(context.my_allocator, "-z");
-        try lld_args.append(context.my_allocator, "stack-size=16777216");
-        try lld_args.append(context.my_allocator, "--image-base=16777216");
-        try lld_args.append(context.my_allocator, "-m");
-        try lld_args.append(context.my_allocator, "elf_x86_64");
-        try lld_args.append(context.my_allocator, "-static");
-        try lld_args.append(context.my_allocator, "-o");
-        try lld_args.append(context.my_allocator, "nat/main");
-        try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crt1.o" }));
-        try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crti.o" }));
-        try lld_args.append(context.my_allocator, output_object_file);
-        try lld_args.append(context.my_allocator, "--as-needed");
-        try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "libc.a" }));
-        try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crtn.o" }));
-
-        var stdout_ptr: [*]const u8 = undefined;
-        var stdout_len: usize = 0;
-        var stderr_ptr: [*]const u8 = undefined;
-        var stderr_len: usize = 0;
-        const link_result = llvm.bindings.NativityLLDLinkELF(lld_args.pointer, lld_args.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len);
-        if (!link_result) {
-            unreachable;
-        }
-    }
+    // const link = false;
+    // if (link) {
+    //     var lld_args = UnpinnedArray([*:0]const u8){};
+    //     try lld_args.append(context.my_allocator, "ld.lld");
+    //     try lld_args.append(context.my_allocator, "--error-limit=0");
+    //     try lld_args.append(context.my_allocator, "--entry");
+    //     try lld_args.append(context.my_allocator, "_start");
+    //     try lld_args.append(context.my_allocator, "-z");
+    //     try lld_args.append(context.my_allocator, "stack-size=16777216");
+    //     try lld_args.append(context.my_allocator, "--image-base=16777216");
+    //     try lld_args.append(context.my_allocator, "-m");
+    //     try lld_args.append(context.my_allocator, "elf_x86_64");
+    //     try lld_args.append(context.my_allocator, "-static");
+    //     try lld_args.append(context.my_allocator, "-o");
+    //     try lld_args.append(context.my_allocator, "nat/main");
+    //     try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crt1.o" }));
+    //     try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crti.o" }));
+    //     try lld_args.append(context.my_allocator, output_object_file);
+    //     try lld_args.append(context.my_allocator, "--as-needed");
+    //     try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "libc.a" }));
+    //     try lld_args.append(context.my_allocator, try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crtn.o" }));
+    //
+    //     var stdout_ptr: [*]const u8 = undefined;
+    //     var stdout_len: usize = 0;
+    //     var stderr_ptr: [*]const u8 = undefined;
+    //     var stderr_len: usize = 0;
+    //     const link_result = llvm.bindings.NativityLLDLinkELF(lld_args.pointer, lld_args.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len);
+    //     if (!link_result) {
+    //         unreachable;
+    //     }
+    // }
     // const thread = try std.Thread.spawn(.{}, clang_job, .{args});
     // thread.join();
 }

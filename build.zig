@@ -26,7 +26,8 @@ pub fn build(b: *std.Build) !void {
     const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or os == .macos;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
-    const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse true;
+    const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
+    const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse use_debug;
     const compiler_options = b.addOptions();
     compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
 
@@ -384,7 +385,6 @@ pub fn build(b: *std.Build) !void {
 
                 break :blk llvm_directory.items;
             } else {
-                const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
                 break :blk switch (use_debug) {
                     true => "../llvm-17-static-debug",
                     false => "../llvm-17-static-release",
