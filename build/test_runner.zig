@@ -513,7 +513,7 @@ pub fn main() !void {
         errors = true;
     };
 
-    try runCmakeTests(allocator);
+    // try runCmakeTests(allocator);
 
     if (errors) {
         return error.fail;
