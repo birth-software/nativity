@@ -6,6 +6,8 @@ const data_structures = @import("library.zig");
 const assert = data_structures.assert;
 const byte_equal = data_structures.byte_equal;
 const byte_equal_terminated = data_structures.byte_equal_terminated;
+const first_slice = data_structures.first_slice;
+const starts_with_slice = data_structures.starts_with_slice;
 const UnpinnedArray = data_structures.UnpinnedArray;
 const BlockList = data_structures.BlockList;
 const MyAllocator = data_structures.MyAllocator;
@@ -17,6 +19,7 @@ const lexer = @import("frontend/lexer.zig");
 const parser = @import("frontend/parser.zig");
 const Node = parser.Node;
 const llvm = @import("backend/llvm.zig");
+const linker = @import("linker/linker.zig");
 const cache_dir_name = "cache";
 const installation_dir_name = "installation";
 
@@ -59,7 +62,7 @@ pub fn createContext(allocator: Allocator, my_allocator: *MyAllocator) !*const C
     return context;
 }
 
-pub fn compileBuildExecutable(context: *const Context, arguments: [][*:0]u8) !void {
+pub fn compileBuildExecutable(context: *const Context, arguments: []const []const u8) !void {
     _ = arguments; // autofix
     const unit = try context.my_allocator.allocate_one(Unit);
     unit.* = .{
@@ -83,7 +86,9 @@ pub fn compileBuildExecutable(context: *const Context, arguments: [][*:0]u8) !vo
             },
             .only_parse = false,
             .executable_path = "nat/build",
+            .object_path = "nat/build.o",
             .link_libc = @import("builtin").os.tag == .macos,
+            .link_libcpp = false,
             .generate_debug_information = true,
             .name = "build",
             .is_test = false,
@@ -263,126 +268,608 @@ fn compileMusl(context: *const Context) MuslContext{
     return musl;
 }
 
-pub fn compileCSourceFile(context: *const Context, arguments: [][*:0]u8, kind: CSourceKind) !void {
-    var clang_args = UnpinnedArray([]const u8){};
-    try clang_args.append(context.my_allocator, context.executable_absolute_path);
-    try clang_args.append(context.my_allocator, "clang");
-
+pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8, kind: CSourceKind) !void {
+    _ = kind; // autofix
+    var argument_index: usize = 0;
+    _ = &argument_index;
     const Mode = enum{
         object,
         link,
     };
-    const mode: Mode = for (arguments) |argz| {
-        const arg = span(argz);
-        if (byte_equal(arg, "-c")) break .object;
-    } else .link;
-    _ = mode; // autofix
+    var out_path: ?[]const u8 = null;
+    var out_mode: ?Mode = null;
+    const Extension = enum{
+        c,
+        cpp,
+        assembly,
+        object,
+        static_library,
+        shared_library,
+    };
+    const CSourceFile = struct{
+        path: []const u8,
+        extension: Extension,
+    };
+    const DebugInfo = enum{
+        yes,
+        no,
+    };
+    const LinkArch = enum{
+        arm64,
+    };
+    var debug_info: ?DebugInfo = null;
+    var stack_protector: ?bool = null;
+    var link_arch: ?LinkArch = null;
 
-    if (kind == .cpp) {
-        try clang_args.append(context.my_allocator, "-nostdinc++");
+    var cc_argv = UnpinnedArray([]const u8){};
+    var ld_argv = UnpinnedArray([]const u8){};
+    var c_source_files = UnpinnedArray(CSourceFile){};
+    var link_objects = UnpinnedArray(linker.Object){};
+    var link_libraries = UnpinnedArray(linker.Library){};
 
-        switch (@import("builtin").os.tag) {
-            .linux => {
-                switch (@import("builtin").abi) {
-                    .gnu => {
-                        try clang_args.append_slice(context.my_allocator, &.{
-                            "-isystem", "/usr/include/c++/13.2.1",
-                            "-isystem", "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
+    while (argument_index < arguments.len) {
+        const argument = arguments[argument_index];
+
+        if (argument[0] != '-') {
+            if (data_structures.last_byte(argument, '.')) |dot_index| {
+                const extension_string = argument[dot_index..];
+                const extension: Extension =
+                    if (byte_equal(extension_string, ".c")) .c
+                    else if (byte_equal(extension_string, ".cpp") or byte_equal(extension_string, ".cxx") or byte_equal(extension_string, ".cc")) .cpp
+                    else if (byte_equal(extension_string, ".S")) .assembly
+                    else if (byte_equal(extension_string, ".o")) .object
+                    else if (byte_equal(extension_string, ".a")) .static_library
+                    else if (byte_equal(extension_string, ".so") or
+                        byte_equal(extension_string, ".dll") or
+                        byte_equal(extension_string, ".dylib") or
+                        byte_equal(extension_string, ".tbd")
+                        ) .shared_library
+                    else {
+                        try write(.panic, argument);
+                        try write(.panic, "\n");
+                        @panic("Unable to recognize extension for the file above");
+                    };
+                switch (extension) {
+                    .c, .cpp, .assembly => {
+                        try c_source_files.append(context.my_allocator, .{
+                            .path = argument,
+                            .extension = extension,
                         });
                     },
-                    .musl => {
-                        try clang_args.append_slice(context.my_allocator, &.{
-                            "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
-                            "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
-                            "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
-                            "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
-                            "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
-                            "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
-                            "-D_LIBCPP_ABI_VERSION=1",
-                            "-D_LIBCPP_ABI_NAMESPACE=__1",
+                    .object, .static_library, .shared_library => {
+                        try link_objects.append(context.my_allocator, .{
+                            .path = argument,
                         });
                     },
-                    else => unreachable,
                 }
-            },
-            .macos => {
-                try clang_args.append_slice(context.my_allocator, &.{
-                    "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
-                    "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
-                    "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
-                    "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
-                    "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
-                    "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
-                    "-D_LIBCPP_ABI_VERSION=1",
-                    "-D_LIBCPP_ABI_NAMESPACE=__1",
-                });
-            },
-            else => @compileError("Operating system not supported"),
+            } else {
+                try write(.panic, argument);
+                try write(.panic, "\n");
+                @panic("Positional argument without extension");
+            }
+        } else if (byte_equal(argument, "-c")) {
+            out_mode = .object;
+        } else if (byte_equal(argument, "-o")) {
+            argument_index += 1;
+            out_path = arguments[argument_index];
+        } else if (byte_equal(argument, "-g")) {
+            debug_info = .yes;
+        } else if (byte_equal(argument, "-fno-stack-protector")) {
+            stack_protector = false;
+        } else if (byte_equal(argument, "-arch")) {
+            argument_index += 1;
+            const arch_argument = arguments[argument_index];
+            if (byte_equal(arch_argument, "arm64")) {
+                link_arch = .arm64;
+                try cc_argv.append(context.my_allocator, "-arch");
+                try cc_argv.append(context.my_allocator, "arm64");
+            } else {
+                unreachable;
+            }
+        } else if (byte_equal(argument, "-bundle")) {
+            try ld_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-pthread")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-fPIC")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-MD")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-MT")) {
+            try cc_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try cc_argv.append(context.my_allocator, arg);
+        } else if (byte_equal(argument, "-MF")) {
+            try cc_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try cc_argv.append(context.my_allocator, arg);
+        } else if (byte_equal(argument, "-isysroot")) {
+            try cc_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try cc_argv.append(context.my_allocator, arg);
+        } else if (byte_equal(argument, "-isystem")) {
+            try cc_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try cc_argv.append(context.my_allocator, arg);
+        } else if (byte_equal(argument, "-h")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-framework")) {
+            try ld_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const framework = arguments[argument_index];
+            try ld_argv.append(context.my_allocator, framework);
+        } else if (byte_equal(argument, "--coverage")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-pedantic")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-pedantic-errors")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-?")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-v")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-V")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "--version")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-version")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-qversion")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-print-resource-dir")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-shared")) {
+            try ld_argv.append(context.my_allocator, argument);
+        } else if (byte_equal(argument, "-compatibility_version")) {
+            try ld_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try ld_argv.append(context.my_allocator, arg);
+        } else if (byte_equal(argument, "-current_version")) {
+            try ld_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try ld_argv.append(context.my_allocator, arg);
+        } else if (byte_equal(argument, "-install_name")) {
+            try ld_argv.append(context.my_allocator, argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            try ld_argv.append(context.my_allocator, arg);
+        } else if (starts_with_slice(argument, "-f")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-wd")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-D")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-I")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-W")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-l")) {
+            try link_libraries.append(context.my_allocator, .{
+                .path = argument[2..],
+            });
+        } else if (starts_with_slice(argument, "-O")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-std=")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else if (starts_with_slice(argument, "-rdynamic")) {
+            try ld_argv.append(context.my_allocator, "-export_dynamic");
+        } else if (starts_with_slice(argument, "-dynamiclib")) {
+            try ld_argv.append(context.my_allocator, "-dylib");
+        } else if (starts_with_slice(argument, "-Wl,")) {
+            const wl_arg = argument["-Wl,".len..];
+            if (data_structures.first_byte(wl_arg, ',')) |comma_index| {
+                const key = wl_arg[0..comma_index];
+                const value = wl_arg[comma_index + 1..];
+                try ld_argv.append(context.my_allocator, key);
+                try ld_argv.append(context.my_allocator, value);
+            } else {
+                try ld_argv.append(context.my_allocator, wl_arg);
+            }
+        } else if (starts_with_slice(argument, "-m")) {
+            try cc_argv.append(context.my_allocator, argument);
+        } else {
+            const debug_args = true;
+            if (debug_args) {
+                const home_dir = std.posix.getenv("HOME") orelse unreachable;
+                var list = UnpinnedArray(u8){};
+                for (arguments) |arg| {
+                    try list.append_slice(context.my_allocator, arg);
+                    try list.append(context.my_allocator, ' ');
+                }
+                try list.append(context.my_allocator, '\n');
+                try list.append_slice(context.my_allocator, "Unhandled argument: ");
+                try list.append_slice(context.my_allocator, argument);
+                try list.append(context.my_allocator, '\n');
+
+                try std.fs.cwd().writeFile(try std.fmt.allocPrint(context.allocator, "{s}/dev/nativity/nat/unhandled_arg_{}", .{home_dir, std.time.milliTimestamp()}), list.slice());
+            }
+            try write(.panic, "unhandled argument: '");
+            try write(.panic, argument);
+            try write(.panic, "'\n");
+            @panic("Unhandled argument");
         }
+
+        argument_index += 1;
     }
 
-    if (kind == .c or kind == .cpp) {
-        try clang_args.append(context.my_allocator, "-nostdinc");
+    const link_libcpp = true;
+    const mode = out_mode orelse .link;
 
-        switch (@import("builtin").os.tag) {
-            .linux => {
-                switch (@import("builtin").abi) {
-                    .gnu => {
-                        try clang_args.append_slice(context.my_allocator, &.{
-                            "-isystem", "/usr/lib/clang/17/include",
-                            "-isystem", "/usr/include",
-                            "-isystem", "/usr/include/linux",
-                        });
+    if (c_source_files.length > 0) {
+        for (c_source_files.slice()) |c_source_file| {
+            var argv = UnpinnedArray([]const u8){};
+            try argv.append(context.my_allocator, context.executable_absolute_path);
+            try argv.append(context.my_allocator, "clang");
+            try argv.append(context.my_allocator, "--no-default-config");
+
+            try argv.append(context.my_allocator, c_source_file.path);
+
+            if (c_source_file.extension == .cpp) {
+                try argv.append(context.my_allocator, "-nostdinc++");
+            }
+
+            const caret = true;
+            if (!caret) {
+                try argv.append(context.my_allocator, "-fno-caret-diagnostics");
+            }
+
+            const function_sections = false;
+            if (function_sections) {
+                try argv.append(context.my_allocator, "-ffunction-sections");
+            }
+
+            const data_sections = false;
+            if (data_sections) {
+                try argv.append(context.my_allocator, "-fdata-sections");
+            }
+
+            const builtin = true;
+            if (!builtin) {
+                try argv.append(context.my_allocator, "-fno-builtin");
+            }
+
+
+            if (link_libcpp) {
+                // include paths
+
+            }
+
+            const link_libc = c_source_file.extension == .c;
+            if (link_libc) {
+            }
+
+            const link_libunwind = false;
+            if (link_libunwind) {
+                unreachable;
+            }
+
+            const target_triple = blk: {
+                // Emit target
+                var target_triple_buffer = UnpinnedArray(u8){};
+                switch (@import("builtin").target.cpu.arch) {
+                    .x86_64 => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "x86_64-");
                     },
-                    .musl => {
-                        try clang_args.append_slice(context.my_allocator, &.{
-                            "-isystem", try context.pathFromCompiler("lib/include"),
-                            "-isystem", try context.pathFromCompiler("lib/libc/include/x86_64-linux-gnu"),
-                            "-isystem", try context.pathFromCompiler("lib/libc/include/generic-glibc"),
-                            "-isystem", try context.pathFromCompiler("lib/libc/include/x86-linux-any"),
-                            "-isystem", try context.pathFromCompiler("lib/libc/include/any-linux-any"),
-                        });
+                    .aarch64 => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "aarch64-");
                     },
-                    else => @compileError("Abi not supported"),
+                    else => @compileError("Architecture not supported"),
                 }
-            },
-            .macos => {
-                try clang_args.append_slice(context.my_allocator, &.{
-                    "-iframework", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
-                    "-isystem",    try context.pathFromCompiler("lib/include"),
-                    "-isystem",    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
-                });
-            },
-            else => @compileError("Operating system not supported"),
-        }
-    }
 
-    if (kind == .cpp) {
-        switch (@import("builtin").os.tag) {
-            .linux => {
-                switch (@import("builtin").abi) {
-                    .gnu => {
-                        try clang_args.append(context.my_allocator, "-lstdc++");
+                if (@import("builtin").target.cpu.arch == .aarch64 and @import("builtin").target.os.tag == .macos) {
+                    try target_triple_buffer.append_slice(context.my_allocator, "apple-");
+                } else {
+                    try target_triple_buffer.append_slice(context.my_allocator, "pc-");
+                }
+
+                switch (@import("builtin").target.os.tag) {
+                    .linux => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "linux-");
                     },
+                    .macos => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "macos-");
+                    },
+                    else => @compileError("OS not supported"),
+                }
+
+                switch (@import("builtin").target.abi) {
                     .musl => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "musl");
+                    },
+                    .gnu => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "gnu");
+                    },
+                    .none => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "unknown");
+                    },
+                    else => @compileError("OS not supported"),
+                }
+
+                break :blk target_triple_buffer.slice();
+            };
+            try argv.append_slice(context.my_allocator, &.{"-target", target_triple});
+
+            const object_path = switch (mode) {
+                .object => out_path.?,
+                .link => try std.mem.concat(context.allocator, u8, &.{if (out_path) |op| op else "a.o", ".o"}),
+            };
+
+            try link_objects.append(context.my_allocator, .{
+                .path = object_path,
+            });
+
+            switch (c_source_file.extension) {
+                .c, .cpp => {
+                    try argv.append(context.my_allocator, "-nostdinc");
+                    try argv.append(context.my_allocator, "-fno-spell-checking");
+
+                    const lto = false;
+                    if (lto) {
+                        try argv.append(context.my_allocator, "-flto");
+                    }
+
+                    const mm = false;
+                    if (mm) {
+                        try argv.append(context.my_allocator, "-ObjC++");
+                    }
+
+                    const libc_framework_dirs: []const []const u8 = switch (@import("builtin").os.tag) {
+                        .macos => &.{"/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks"},
+                        else => &.{},
+                    };
+                    for (libc_framework_dirs) |framework_dir| {
+                        try argv.append_slice(context.my_allocator, &.{"-iframework", framework_dir});
+                    }
+
+                    const framework_dirs = &[_][]const u8{};
+                    for (framework_dirs) |framework_dir| {
+                        try argv.append_slice(context.my_allocator, &.{"-F", framework_dir});
+                    }
+
+                    // TODO: c headers dir
+
+                    const libc_include_dirs: []const []const u8 = switch (@import("builtin").os.tag) {
+                        .macos => &.{
+                            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1",
+                            try context.pathFromCompiler("lib/include"),
+                            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
+                        },
+                        .linux => switch (@import("builtin").abi) {
+                            .gnu => &.{
+                                "/usr/include/c++/13.2.1",
+                                "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
+                                "/usr/lib/clang/17/include",
+                                "/usr/include",
+                                "/usr/include/linux",
+                            },
+                            else => unreachable, //@compileError("ABI not supported"),
+                        },
+                        else => @compileError("OS not supported"),
+                    };
+
+                    for (libc_include_dirs) |include_dir| {
+                        try argv.append_slice(context.my_allocator, &.{"-isystem", include_dir});
+                    }
+
+                    // TODO: cpu model
+                    // TODO: cpu features
+                    // TODO: code model
+                    // TODO: OS-specific flags
+                    // TODO: sanitize flags
+                    // const red_zone = true;
+                    // if (red_zone) {
+                    //     try argv.append(context.my_allocator, "-mred-zone");
+                    // } else {
+                    //     unreachable;
+                    // }
+
+                    const omit_frame_pointer = false;
+                    if (omit_frame_pointer) {
+                        try argv.append(context.my_allocator, "-fomit-frame-pointer");
+                    } else {
+                        try argv.append(context.my_allocator, "-fno-omit-frame-pointer");
+                    }
+
+                    if (stack_protector orelse false) {
+                        try argv.append(context.my_allocator, "-fstack-protector-strong");
+                    } else {
+                        try argv.append(context.my_allocator, "-fno-stack-protector");
+                    }
+
+                    const is_debug = true;
+                    if (is_debug) {
+                        try argv.append(context.my_allocator, "-D_DEBUG");
+                        try argv.append(context.my_allocator, "-O0");
+                    } else {
                         unreachable;
-                    },
-                    else => @compileError("Abi not supported"),
-                }
-            },
-            .macos => unreachable,
-            else => @compileError("OS not supported"),
+                    }
+
+                    const pic = false;
+                    if (pic) {
+                        try argv.append(context.my_allocator, "-fPIC");
+                    }
+
+                    const unwind_tables = false;
+                    if (unwind_tables) {
+                        try argv.append(context.my_allocator, "-funwind-tables");
+                    } else {
+                        try argv.append(context.my_allocator, "-fno-unwind-tables");
+                    }
+                },
+                .assembly => {
+                    // TODO:
+                },
+                .object, .static_library, .shared_library => unreachable,
+            }
+
+            const has_debug_info = true;
+            if (has_debug_info) {
+                try argv.append(context.my_allocator, "-g");
+            } else {
+                unreachable;
+            }
+
+            // TODO: machine ABI
+            const freestanding = false;
+            if (freestanding) {
+                try argv.append(context.my_allocator, "-ffrestanding");
+            }
+
+            // TODO: native system include paths
+            // TODO: global cc argv
+
+            try argv.append_slice(context.my_allocator, cc_argv.slice());
+
+            // TODO: extra flags
+            // TODO: cache exempt flags
+            try argv.append_slice(context.my_allocator, &.{"-c", "-o", object_path});
+            // TODO: emit ASM/LLVM IR
+
+            const debug_clang_args = false;
+            if (debug_clang_args) {
+                std.debug.print("Argv: {s}\n", .{argv.slice()});
+            }
+            const result = try clangMain(context.allocator, argv.slice());
+            if (result != 0) {
+                unreachable;
+            }
         }
+    } else if (link_objects.length == 0) {
+        var argv = UnpinnedArray([]const u8){};
+        try argv.append(context.my_allocator, context.executable_absolute_path);
+        try argv.append(context.my_allocator, "clang");
+        try argv.append(context.my_allocator, "--no-default-config");
+        try argv.append_slice(context.my_allocator, cc_argv.slice());
+        const result = try clangMain(context.allocator, argv.slice());
+        if (result != 0) {
+            unreachable;
+        }
+        return;
     }
 
-    for (arguments) |arg| {
-        try clang_args.append(context.my_allocator, span(arg));
+    if (mode == .link) {
+        assert(link_objects.length > 0);
+        try linker.link(context, .{
+            .backend = .lld,
+            .output_file_path = out_path orelse "a.out",
+            .objects = link_objects.slice(),
+            .libraries = link_libraries.slice(),
+            .extra_arguments = ld_argv.slice(),
+            .link_libc = true,
+            .link_libcpp = link_libcpp,
+        });
     }
 
-    const result = try clangMain(context.allocator, clang_args.slice());
-    if (result != 0) {
-        unreachable;
-    }
+    // if (kind == .cpp) {
+    //     try clang_args.append(context.my_allocator, "-nostdinc++");
+    //
+    //     switch (@import("builtin").os.tag) {
+    //         .linux => {
+    //             switch (@import("builtin").abi) {
+    //                 .gnu => {
+    //                     try clang_args.append_slice(context.my_allocator, &.{
+    //                         "-isystem", "/usr/include/c++/13.2.1",
+    //                         "-isystem", "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
+    //                     });
+    //                 },
+    //                 .musl => {
+    //                     try clang_args.append_slice(context.my_allocator, &.{
+    //                         "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
+    //                         "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
+    //                         "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+    //                         "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
+    //                         "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
+    //                         "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
+    //                         "-D_LIBCPP_ABI_VERSION=1",
+    //                         "-D_LIBCPP_ABI_NAMESPACE=__1",
+    //                     });
+    //                 },
+    //                 else => unreachable,
+    //             }
+    //         },
+    //         .macos => {
+    //             try clang_args.append_slice(context.my_allocator, &.{
+    //                 "-isystem", try context.pathFromCompiler("lib/libcxx/include"),
+    //                 "-isystem", try context.pathFromCompiler("lib/libcxxabi/include"),
+    //                 "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+    //                 "-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS",
+    //                 "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS",
+    //                 "-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL",
+    //                 "-D_LIBCPP_ABI_VERSION=1",
+    //                 "-D_LIBCPP_ABI_NAMESPACE=__1",
+    //             });
+    //         },
+    //         else => @compileError("Operating system not supported"),
+    //     }
+    // }
+    //
+    // if (kind == .c or kind == .cpp) {
+    //     try clang_args.append(context.my_allocator, "-nostdinc");
+    //
+    //     switch (@import("builtin").os.tag) {
+    //         .linux => {
+    //             switch (@import("builtin").abi) {
+    //                 .gnu => {
+    //                     try clang_args.append_slice(context.my_allocator, &.{
+    //                         "-isystem", "/usr/lib/clang/17/include",
+    //                         "-isystem", "/usr/include",
+    //                         "-isystem", "/usr/include/linux",
+    //                     });
+    //                 },
+    //                 .musl => {
+    //                     try clang_args.append_slice(context.my_allocator, &.{
+    //                         "-isystem", try context.pathFromCompiler("lib/include"),
+    //                         "-isystem", try context.pathFromCompiler("lib/libc/include/x86_64-linux-gnu"),
+    //                         "-isystem", try context.pathFromCompiler("lib/libc/include/generic-glibc"),
+    //                         "-isystem", try context.pathFromCompiler("lib/libc/include/x86-linux-any"),
+    //                         "-isystem", try context.pathFromCompiler("lib/libc/include/any-linux-any"),
+    //                     });
+    //                 },
+    //                 else => @compileError("Abi not supported"),
+    //             }
+    //         },
+    //         .macos => {
+    //             try clang_args.append_slice(context.my_allocator, &.{
+    //                 "-iframework", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
+    //                 "-isystem",    try context.pathFromCompiler("lib/include"),
+    //                 "-isystem",    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
+    //             });
+    //         },
+    //         else => @compileError("Operating system not supported"),
+    //     }
+    // }
+    //
+    // if (kind == .cpp) {
+    //     switch (@import("builtin").os.tag) {
+    //         .linux => {
+    //             switch (@import("builtin").abi) {
+    //                 .gnu => {
+    //                     try clang_args.append(context.my_allocator, "-lstdc++");
+    //                 },
+    //                 .musl => {
+    //                     unreachable;
+    //                 },
+    //                 else => @compileError("Abi not supported"),
+    //             }
+    //         },
+    //         .macos => unreachable,
+    //         else => @compileError("OS not supported"),
+    //     }
+    // }
+    //
+    // for (arguments) |arg| {
+    //     try clang_args.append(context.my_allocator, span(arg));
+    // }
+    //
+    // const result = try clangMain(context.allocator, clang_args.slice());
+    // if (result != 0) {
+    //     unreachable;
+    // }
 
     // const output_object_file = "nat/main.o";
     // const exit_code = try clangMain(context.allocator, &.{ context.executable_absolute_path, "--no-default-config", "-target", "x86_64-unknown-linux-musl", "-nostdinc", "-fno-spell-checking", "-isystem", "lib/include", "-isystem", "lib/libc/include/x86_64-linux-musl", "-isystem", "lib/libc/include/generic-musl", "-isystem", "lib/libc/include/x86-linux-any", "-isystem", "lib/libc/include/any-linux-any", "-c", argument, "-o", output_object_file });
@@ -2230,7 +2717,7 @@ const musl_arch_files = [_][]const u8{
     musl_lib_dir_relative_path ++ "src/unistd/x32/lseek.c",
 };
 
-fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
+pub fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
     var argv = try alloc.allocSentinel(?[*:0]u8, args.len, null);
     for (args, 0..) |arg, i| {
         argv[i] = try alloc.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
@@ -2246,7 +2733,7 @@ fn arMain(allocator: Allocator, arguments: []const []const u8) !u8 {
 }
 
 extern "c" fn NativityClangMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-fn clangMain(allocator: Allocator, arguments: []const []const u8) !u8 {
+pub fn clangMain(allocator: Allocator, arguments: []const []const u8) !u8 {
     const argv = try argsCopyZ(allocator, arguments);
     const exit_code = NativityClangMain(@as(c_int, @intCast(arguments.len)), argv.ptr);
     return @as(u8, @bitCast(@as(i8, @truncate(exit_code))));
@@ -2272,7 +2759,7 @@ const Abi = enum {
     musl,
 };
 
-pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: ExecutableOptions) !void {
+pub fn buildExecutable(context: *const Context, arguments: []const []const u8, options: ExecutableOptions) !void {
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
     var arch: Arch = undefined;
@@ -2296,17 +2783,17 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
     var maybe_only_parse: ?bool = null;
     var link_libc = false;
     var maybe_executable_name: ?[]const u8 = null;
-    var c_source_files = UnpinnedArray([*:0]u8){};
+    var c_source_files = UnpinnedArray([]const u8){};
     const generate_debug_information = true;
 
     if (arguments.len == 0) return error.InvalidInput;
 
     var i: usize = 0;
     while (i < arguments.len) : (i += 1) {
-        const current_argument = span(arguments[i]);
+        const current_argument = arguments[i];
         if (byte_equal(current_argument, "-o")) {
             if (i + 1 != arguments.len) {
-                maybe_executable_path = span(arguments[i + 1]);
+                maybe_executable_path = arguments[i + 1];
                 assert(maybe_executable_path.?.len != 0);
                 i += 1;
             } else {
@@ -2364,7 +2851,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
             if (i + 1 != arguments.len) {
                 i += 1;
 
-                const arg = span(arguments[i]);
+                const arg = arguments[i];
                 maybe_main_package_path = arg;
                 maybe_only_parse = true;
             } else {
@@ -2374,7 +2861,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
             if (i + 1 != arguments.len) {
                 i += 1;
 
-                const arg = span(arguments[i]);
+                const arg = arguments[i];
                 if (byte_equal(arg, "true")) {
                     link_libc = true;
                 } else if (byte_equal(arg, "false")) {
@@ -2389,7 +2876,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
             if (i + 1 != arguments.len) {
                 i += 1;
 
-                const arg = span(arguments[i]);
+                const arg = arguments[i];
                 maybe_main_package_path = arg;
             } else {
                 reportUnterminatedArgumentError(current_argument);
@@ -2398,7 +2885,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
             if (i + 1 != arguments.len) {
                 i += 1;
 
-                const arg = span(arguments[i]);
+                const arg = arguments[i];
                 maybe_executable_name = arg;
             } else {
                 reportUnterminatedArgumentError(current_argument);
@@ -2437,11 +2924,20 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
         break :blk result;
     };
 
+    const object_file_path = blk: {
+        const slice = try context.allocator.alloc(u8, executable_path.len + 2);
+        @memcpy(slice[0..executable_path.len], executable_path);
+        slice[executable_path.len] = '.';
+        slice[executable_path.len + 1] = 'o';
+        break :blk slice;
+    };
+
     const unit = try context.allocator.create(Unit);
     unit.* = .{
         .descriptor = .{
             .main_package_path = main_package_path,
             .executable_path = executable_path,
+            .object_path = object_file_path,
             .only_parse = only_parse,
             .arch = arch,
             .os = os,
@@ -2452,6 +2948,7 @@ pub fn buildExecutable(context: *const Context, arguments: [][*:0]u8, options: E
                 // .windows => link_libc,
                 // else => unreachable,
             },
+            .link_libcpp = false,
             .generate_debug_information = generate_debug_information,
             .name = executable_name,
             .is_test = options.is_test,
@@ -14427,7 +14924,7 @@ pub const Unit = struct {
     cc_type: Type.Index = .null,
     test_function_type: Type.Index = .null,
     descriptor: Descriptor,
-    object_files: UnpinnedArray([*:0]const u8) = .{},
+    // object_files: []const linker.Object,
     discard_identifiers: usize = 0,
     anon_i: usize = 0,
     anon_arr: usize = 0,
@@ -15157,30 +15654,40 @@ pub const Unit = struct {
         }
 
         if (!unit.descriptor.only_parse) {
-            try unit.object_files.ensure_capacity(context.my_allocator, @intCast(unit.descriptor.c_source_files.len));
+            var object_files = try UnpinnedArray(linker.Object).initialize_with_capacity(context.my_allocator, @intCast(unit.descriptor.c_source_files.len + 1));
+            object_files.append_with_capacity(.{
+                .path = unit.descriptor.object_path,
+            });
+
             for (unit.descriptor.c_source_files) |c_source_file| {
-                const c_src = span(c_source_file);
-                const dot_index = data_structures.last(c_src, '.') orelse unreachable;
-                const path_without_extension = c_src[0..dot_index];
+                const dot_index = data_structures.last_byte(c_source_file, '.') orelse unreachable;
+                const path_without_extension = c_source_file[0..dot_index];
                 const basename = std.fs.path.basename(path_without_extension);
                 const o_file = try std.mem.concat(context.allocator, u8, &.{ basename, ".o" });
-                const basename_z = try std.mem.joinZ(context.allocator, "/", &.{
-                    "nat",
+                const object_path = try std.mem.concat(context.allocator, u8, &.{
+                    "nat/",
                     o_file,
                 });
-                var c_flag = "-c".*;
-                var o_flag = "-o".*;
-                var g_flag = "-g".*;
-                var stack_protector = "-fno-stack-protector".*;
 
-                var arguments = [_][*:0]u8{ &c_flag, c_source_file, &o_flag, basename_z, &g_flag, &stack_protector };
+                var arguments = [_][]const u8{ "-c", c_source_file, "-o", object_path, "-g", "-fno-stack-protector"};
                 try compileCSourceFile(context, &arguments, .c);
-                unit.object_files.append_with_capacity(basename_z);
+                object_files.append_with_capacity(.{
+                    .path = object_path,
+                });
             }
 
             try unit.analyze(context);
 
             try llvm.codegen(unit, context);
+
+            try linker.link(context, .{
+                .output_file_path = unit.descriptor.executable_path,
+                .objects = object_files.slice(),
+                .libraries = &.{},
+                .link_libc = unit.descriptor.link_libc,
+                .link_libcpp = false,
+                .extra_arguments = &.{},
+            });
         }
     }
 
@@ -15241,14 +15748,16 @@ pub const FixedKeyword = enum {
 pub const Descriptor = struct {
     main_package_path: []const u8,
     executable_path: []const u8,
+    object_path: []const u8,
     arch: Arch,
     os: Os,
     abi: Abi,
     only_parse: bool,
     link_libc: bool,
+    link_libcpp: bool,
     is_test: bool,
     generate_debug_information: bool,
-    c_source_files: []const [*:0]u8,
+    c_source_files: []const []const u8,
     name: []const u8,
 };
 

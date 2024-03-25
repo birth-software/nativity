@@ -1,3 +1,6 @@
 zig-cache/
 zig-out/
 nat/
+*.o
+*.out
+*.obj
