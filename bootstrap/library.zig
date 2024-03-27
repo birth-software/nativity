@@ -724,7 +724,53 @@ pub fn span(ptr: [*:0]const u8) [:0]const u8 {
     return ptr[0..len :0];
 }
 
-pub fn last(bytes: []const u8, byte: u8) ?usize {
+pub fn starts_with_slice(bytes: []const u8, slice: []const u8) bool {
+    if (slice.len <= bytes.len) {
+        if (byte_equal(bytes[0..slice.len], slice)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+pub fn ends_with_slice(bytes: []const u8, slice: []const u8) bool {
+    if (slice.len <= bytes.len) {
+        if (byte_equal(bytes[bytes.len - slice.len..], slice)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+pub fn first_byte(bytes: []const u8, byte: u8) ?usize {
+    for (bytes, 0..) |b, i| {
+        if (b == byte) {
+            return i;
+        }
+    } 
+
+    return null;
+}
+
+pub fn first_slice(bytes: []const u8, slice: []const u8) ?usize {
+    if (slice.len <= bytes.len) {
+        const top = bytes.len - slice.len;
+        var i: usize = 0;
+
+        while (i < top) : (i += 1) {
+            const chunk = bytes[i..][0..slice.len];
+            if (byte_equal(chunk, slice)) {
+                return i;
+            }
+        }
+    }
+
+    return null;
+}
+
+pub fn last_byte(bytes: []const u8, byte: u8) ?usize {
     var i = bytes.len;
     while (i > 0) {
         i -= 1;

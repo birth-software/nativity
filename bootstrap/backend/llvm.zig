@@ -3173,118 +3173,121 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         const object_file_path = slice[0 .. slice.len - 1 :0];
         break :blk object_file_path;
     };
-    const destination_file_path = blk: {
-        const slice = try context.allocator.alloc(u8, file_path.len + 1); // try std.mem.concatWithSentinel(context.allocator, &.{file_path});
-        @memcpy(slice[0..file_path.len], file_path);
-        slice[slice.len - 1] = 0;
-        const destination_file_path = slice[0..file_path.len :0];
-        break :blk destination_file_path;
-    };
+    // const destination_file_path = blk: {
+    //     const slice = try context.allocator.alloc(u8, file_path.len + 1); // try std.mem.concatWithSentinel(context.allocator, &.{file_path});
+    //     @memcpy(slice[0..file_path.len], file_path);
+    //     slice[slice.len - 1] = 0;
+    //     const destination_file_path = slice[0..file_path.len :0];
+    //     break :blk destination_file_path;
+    // };
+    // _ = destination_file_path; // autofix
     const disable_verify = false;
     const result = llvm.module.addPassesToEmitFile(target_machine, object_file_path.ptr, object_file_path.len, LLVM.CodeGenFileType.object, disable_verify);
     if (!result) {
         @panic("can't generate machine code");
     }
 
-    const format: Format = switch (unit.descriptor.os) {
-        // .windows => .coff,
-        .macos => .macho,
-        .linux => .elf,
-        // else => unreachable,
-    };
+    // const format: Format = switch (unit.descriptor.os) {
+    //     // .windows => .coff,
+    //     .macos => .macho,
+    //     .linux => .elf,
+    //     // else => unreachable,
+    // };
 
-    const driver_program = switch (format) {
-        .coff => "lld-link",
-        .elf => "ld.lld",
-        .macho => "ld64.lld",
-    };
-    var arguments = UnpinnedArray([*:0]const u8){};
-    try arguments.append(context.my_allocator, driver_program);
+    // const driver_program = switch (format) {
+    //     .coff => "lld-link",
+    //     .elf => "ld.lld",
+    //     .macho => "ld64.lld",
+    // };
+    // _ = driver_program; // autofix
 
-    try arguments.append(context.my_allocator, "--error-limit=0");
-
-    try arguments.append(context.my_allocator, "-o");
-    try arguments.append(context.my_allocator, destination_file_path.ptr);
-
-    try arguments.append(context.my_allocator, object_file_path.ptr);
-
-    try arguments.append_slice(context.my_allocator, unit.object_files.slice());
-    // for (unit.object_files.slice()) |object_file| {
-    //     _ = object_file; // autofix
+    // var arguments = UnpinnedArray([]const u8){};
+    // try arguments.append(context.my_allocator, driver_program);
+    //
+    // try arguments.append(context.my_allocator, "--error-limit=0");
+    //
+    // try arguments.append(context.my_allocator, "-o");
+    // try arguments.append(context.my_allocator, destination_file_path.ptr);
+    //
+    // try arguments.append(context.my_allocator, object_file_path.ptr);
+    //
+    // try arguments.append_slice(context.my_allocator, unit.object_files.slice());
+    // // for (unit.object_files.slice()) |object_file| {
+    // //     _ = object_file; // autofix
+    // // }
+    //
+    // switch (unit.descriptor.os) {
+    //     .macos => {
+    //         try arguments.append(context.my_allocator, "-dynamic");
+    //         try arguments.append_slice(context.my_allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
+    //         try arguments.append(context.my_allocator, "-arch");
+    //         try arguments.append(context.my_allocator, switch (unit.descriptor.arch) {
+    //             .aarch64 => "arm64",
+    //             else => |t| @panic(@tagName(t)),
+    //         });
+    //         try arguments.append_slice(context.my_allocator, &.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
+    //         try arguments.append_slice(context.my_allocator, &.{ "-e", "_main" });
+    //         try arguments.append(context.my_allocator, "-lSystem");
+    //     },
+    //     .linux => {
+    //         try arguments.append_slice(context.my_allocator, &.{ "--entry", "_start" });
+    //         try arguments.append(context.my_allocator, "-m");
+    //         try arguments.append(context.my_allocator, switch (unit.descriptor.arch) {
+    //             .x86_64 => "elf_x86_64",
+    //             else => |t| @panic(@tagName(t)),
+    //         });
+    //
+    //         if (unit.descriptor.link_libc) {
+    //             try arguments.append(context.my_allocator, "/usr/lib/crt1.o");
+    //             try arguments.append(context.my_allocator, "/usr/lib/crti.o");
+    //             try arguments.append_slice(context.my_allocator, &.{ "-L", "/usr/lib" });
+    //             try arguments.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+    //             try arguments.append(context.my_allocator, "--as-needed");
+    //             try arguments.append(context.my_allocator, "-lm");
+    //             try arguments.append(context.my_allocator, "-lpthread");
+    //             try arguments.append(context.my_allocator, "-lc");
+    //             try arguments.append(context.my_allocator, "-ldl");
+    //             try arguments.append(context.my_allocator, "-lrt");
+    //             try arguments.append(context.my_allocator, "-lutil");
+    //             try arguments.append(context.my_allocator, "/usr/lib/crtn.o");
+    //         }
+    //
+    //         // if (unit.descriptor.link_libc) {
+    //         //     try arguments.append_slice(context.allocator, &.{ "-lc" });
+    //         // }
+    //     },
+    //     // .windows => {},
+    //     // else => |t| @panic(@tagName(t)),
     // }
-
-    switch (unit.descriptor.os) {
-        .macos => {
-            try arguments.append(context.my_allocator, "-dynamic");
-            try arguments.append_slice(context.my_allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
-            try arguments.append(context.my_allocator, "-arch");
-            try arguments.append(context.my_allocator, switch (unit.descriptor.arch) {
-                .aarch64 => "arm64",
-                else => |t| @panic(@tagName(t)),
-            });
-            try arguments.append_slice(context.my_allocator, &.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
-            try arguments.append_slice(context.my_allocator, &.{ "-e", "_main" });
-            try arguments.append(context.my_allocator, "-lSystem");
-        },
-        .linux => {
-            try arguments.append_slice(context.my_allocator, &.{ "--entry", "_start" });
-            try arguments.append(context.my_allocator, "-m");
-            try arguments.append(context.my_allocator, switch (unit.descriptor.arch) {
-                .x86_64 => "elf_x86_64",
-                else => |t| @panic(@tagName(t)),
-            });
-
-            if (unit.descriptor.link_libc) {
-                try arguments.append(context.my_allocator, "/usr/lib/crt1.o");
-                try arguments.append(context.my_allocator, "/usr/lib/crti.o");
-                try arguments.append_slice(context.my_allocator, &.{ "-L", "/usr/lib" });
-                try arguments.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
-                try arguments.append(context.my_allocator, "--as-needed");
-                try arguments.append(context.my_allocator, "-lm");
-                try arguments.append(context.my_allocator, "-lpthread");
-                try arguments.append(context.my_allocator, "-lc");
-                try arguments.append(context.my_allocator, "-ldl");
-                try arguments.append(context.my_allocator, "-lrt");
-                try arguments.append(context.my_allocator, "-lutil");
-                try arguments.append(context.my_allocator, "/usr/lib/crtn.o");
-            }
-
-            // if (unit.descriptor.link_libc) {
-            //     try arguments.append_slice(context.allocator, &.{ "-lc" });
-            // }
-        },
-        // .windows => {},
-        // else => |t| @panic(@tagName(t)),
-    }
-
-    var stdout_ptr: [*]const u8 = undefined;
-    var stdout_len: usize = 0;
-    var stderr_ptr: [*]const u8 = undefined;
-    var stderr_len: usize = 0;
-
-    const linking_result = switch (format) {
-        .elf => bindings.NativityLLDLinkELF(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
-        .coff => bindings.NativityLLDLinkCOFF(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
-        .macho => bindings.NativityLLDLinkMachO(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
-    };
-
-    if (stdout_len > 0) {
-        // std.debug.print("{s}\n", .{stdout_ptr[0..stdout_len]});
-    }
-
-    if (stderr_len > 0) {
-        // std.debug.print("{s}\n", .{stderr_ptr[0..stderr_len]});
-    }
-
-    if (!linking_result) {
-        try write(.panic, "\n");
-        for (arguments.slice()) |argument| {
-            const arg = data_structures.span(argument);
-            try write(.panic, arg);
-            try write(.panic, " ");
-        }
-        try write(.panic, "\n");
-
-        @panic(stderr_ptr[0..stderr_len]);
-    }
+    //
+    // var stdout_ptr: [*]const u8 = undefined;
+    // var stdout_len: usize = 0;
+    // var stderr_ptr: [*]const u8 = undefined;
+    // var stderr_len: usize = 0;
+    //
+    // const linking_result = switch (format) {
+    //     .elf => bindings.NativityLLDLinkELF(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+    //     .coff => bindings.NativityLLDLinkCOFF(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+    //     .macho => bindings.NativityLLDLinkMachO(arguments.pointer, arguments.length, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+    // };
+    //
+    // if (stdout_len > 0) {
+    //     // std.debug.print("{s}\n", .{stdout_ptr[0..stdout_len]});
+    // }
+    //
+    // if (stderr_len > 0) {
+    //     // std.debug.print("{s}\n", .{stderr_ptr[0..stderr_len]});
+    // }
+    //
+    // if (!linking_result) {
+    //     try write(.panic, "\n");
+    //     for (arguments.slice()) |argument| {
+    //         const arg = data_structures.span(argument);
+    //         try write(.panic, arg);
+    //         try write(.panic, " ");
+    //     }
+    //     try write(.panic, "\n");
+    //
+    //     @panic(stderr_ptr[0..stderr_len]);
+    // }
 }

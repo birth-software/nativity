@@ -353,10 +353,10 @@ fn runStdTests(allocator: Allocator) !void {
     if (errors) return error.fail;
 }
 
-fn runCmakeTests(allocator: Allocator) !void {
+fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
     var errors = false;
     const original_dir = try std.fs.cwd().realpathAlloc(allocator, ".");
-    const cc_dir = try std.fs.cwd().openDir("test/cc", .{
+    const cc_dir = try std.fs.cwd().openDir(dir_path, .{
         .iterate = true,
     });
 
@@ -379,8 +379,10 @@ fn runCmakeTests(allocator: Allocator) !void {
                     .argv = &.{
                         "cmake",
                         "..",
-                        "-G", "Unix Makefiles",
-                        "-DCMAKE_VERBOSE_MAKEFILE=On",
+                        // "--debug-trycompile",
+                        // "--debug-output",
+                        // "-G", "Unix Makefiles",
+                        // "-DCMAKE_VERBOSE_MAKEFILE=On",
                         try std.mem.concat(allocator, u8, &.{ "-DCMAKE_C_COMPILER=", "nat;cc" }),
                         try std.mem.concat(allocator, u8, &.{ "-DCMAKE_CXX_COMPILER=", "nat;c++" }),
                         try std.mem.concat(allocator, u8, &.{ "-DCMAKE_ASM_COMPILER=", "nat;cc" }),
@@ -399,13 +401,11 @@ fn runCmakeTests(allocator: Allocator) !void {
                     break :b false;
                 };
 
-                if (!cmake_success) {
-                    if (cmake.stdout.len > 0) {
-                        std.debug.print("STDOUT:\n\n{s}\n\n", .{cmake.stdout});
-                    }
-                    if (cmake.stderr.len > 0) {
-                        std.debug.print("STDERR:\n\n{s}\n\n", .{cmake.stderr});
-                    }
+                if (cmake.stdout.len > 0) {
+                    std.debug.print("STDOUT:\n\n{s}\n\n", .{cmake.stdout});
+                }
+                if (cmake.stderr.len > 0) {
+                    std.debug.print("STDERR:\n\n{s}\n\n", .{cmake.stderr});
                 }
 
                 var success = cmake_success;
@@ -414,10 +414,10 @@ fn runCmakeTests(allocator: Allocator) !void {
                         .allocator = allocator,
                         // TODO: delete -main_source_file?
                         .argv = &.{
-                            "make"
+                            "ninja"
                         },
                         .max_output_bytes = std.math.maxInt(u64),
-                        });
+                    });
                     const ninja_result: TestError!bool = switch (ninja.term) {
                         .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
                         .Signal => error.signaled,
@@ -429,6 +429,7 @@ fn runCmakeTests(allocator: Allocator) !void {
                         errors = true;
                         break :b false;
                     };
+
                     if (!ninja_success) {
                         if (ninja.stdout.len > 0) {
                             std.debug.print("STDOUT:\n\n{s}\n\n", .{ninja.stdout});
@@ -508,15 +509,25 @@ pub fn main() !void {
     }) catch {
         errors = true;
     };
-
+    //
     runStdTests(allocator) catch {
+        errors = true;
+    };
+
+    runCmakeTests(allocator, "test/cc") catch {
+        errors = true;
+    };
+    runCmakeTests(allocator, "test/c++") catch {
         errors = true;
     };
 
     switch (@import("builtin").os.tag) {
         .macos => {},
+        // .macos => {},
         .linux => switch (@import("builtin").abi) {
-            .gnu => try runCmakeTests(allocator),
+            .gnu => runCmakeTests(allocator, "test/cc_linux") catch {
+                errors = true;
+            },
             .musl => {},
             else => @compileError("ABI not supported"),
         },

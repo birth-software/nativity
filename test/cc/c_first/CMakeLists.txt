@@ -1,3 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 project(c_first C)
+include(CMakePrintHelpers)
+cmake_print_variables(CMAKE_C_IMPLICIT_LINK_LIBRARIES)
+cmake_print_variables(CMAKE_C_IMPLICIT_LINK_DIRECTORIES)
 add_executable(c_first main.c)

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const Compilation = @import("Compilation.zig");
 pub const panic = Compilation.panic;
@@ -21,35 +22,53 @@ fn todo() noreturn {
 }
 
 var my_allocator = PageAllocator{};
-pub export fn main(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) callconv(.C) c_int {
-    _ = c_envp; // autofix
-    const argument_count: usize = @intCast(c_argc);
-    const argument_values: [*][*:0]u8 = @ptrCast(c_argv);
-    const arguments = argument_values[0..argument_count];
-    if (entry_point(arguments)) |_| {
-        return 0;
-    } else |err| {
-        const print_stack_trace = @import("configuration").print_stack_trace;
-        switch (print_stack_trace) {
-            true => if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace.*);
-            },
-            false => {
-                const error_name: []const u8 = @errorName(err);
-                Compilation.write(.panic, "Error: ") catch {};
-                Compilation.write(.panic, error_name) catch {};
-                Compilation.write(.panic, "\n") catch {};
-            },
-        }
+// pub export fn main(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) callconv(.C) c_int {
+//     _ = c_envp; // autofix
+//     // const argument_count: usize = @intCast(c_argc);
+//     // const argument_values: [*][*:0]u8 = @ptrCast(c_argv);
+//     if (entry_point(arguments)) |_| {
+//         return 0;
+//     } else |err| {
+//         const print_stack_trace = @import("configuration").print_stack_trace;
+//         switch (print_stack_trace) {
+//             true => if (@errorReturnTrace()) |trace| {
+//                 std.debug.dumpStackTrace(trace.*);
+//             },
+//             false => {
+//                 const error_name: []const u8 = @errorName(err);
+//                 Compilation.write(.panic, "Error: ") catch {};
+//                 Compilation.write(.panic, error_name) catch {};
+//                 Compilation.write(.panic, "\n") catch {};
+//             },
+//         }
+//
+//         return 1;
+//     }
+// }
 
-        return 1;
-    }
-}
-
-pub fn entry_point(arguments: [][*:0]u8) !void {
+pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena_allocator.allocator();
-    // const arguments = try std.process.argsAlloc(allocator);
+    var arg_it = std.process.ArgIterator.init();
+    var args = library.UnpinnedArray([]const u8){};
+    const context = try Compilation.createContext(allocator, &my_allocator.allocator);
+    while (arg_it.next()) |arg| {
+        try args.append(context.my_allocator, arg);
+    }
+    const arguments = args.slice();
+    const debug_args = true;
+    if (debug_args) {
+        assert(arguments.len > 0);
+        const home_dir = std.posix.getenv("HOME") orelse unreachable;
+        const timestamp = std.time.milliTimestamp();
+        var argument_list = std.ArrayList(u8).init(std.heap.page_allocator);
+        for (arguments) |arg| {
+            argument_list.appendSlice(arg) catch {};
+            argument_list.append(' ') catch {};
+        }
+        argument_list.append('\n') catch  {};
+        std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{home_dir, timestamp}) catch unreachable, argument_list.items) catch {};
+    }
 
     if (arguments.len <= 1) {
         return error.InvalidInput;
@@ -59,15 +78,14 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
         todo();
     }
 
-    const command = library.span(arguments[1]);
+    const command = arguments[1];
     const command_arguments = arguments[2..];
 
-    const context = try Compilation.createContext(allocator, &my_allocator.allocator);
     if (byte_equal(command, "build")) {
         try Compilation.compileBuildExecutable(context, command_arguments);
     } else if (byte_equal(command, "clang") or byte_equal(command, "-cc1") or byte_equal(command, "-cc1as")) {
-        // const exit_code = try clangMain(allocator, arguments);
-        // std.process.exit(exit_code);
+        const exit_code = try Compilation.clangMain(allocator, arguments);
+        std.process.exit(exit_code);
     } else if (byte_equal(command, "cc")) {
         try Compilation.compileCSourceFile(context, command_arguments, .c);
     } else if (byte_equal(command, "c++")) {
@@ -88,3 +106,7 @@ pub fn entry_point(arguments: [][*:0]u8) !void {
         todo();
     }
 }
+
+pub const std_options = std.Options{
+    .enable_segfault_handler = false,
+};

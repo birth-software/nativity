@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(cpp_first CXX)
+include(CMakePrintHelpers)
+cmake_print_variables(CMAKE_CXX_IMPLICIT_LINK_LIBRARIES)
+cmake_print_variables(CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES)
+add_executable(cpp_first main.cpp)
