@@ -1,0 +1,17 @@
+const std = #import("std");
+
+const PinnedArray = #slice(struct{
+    pointer: [&]$T,
+    length: u32,
+    capacity: u32,
+    
+    const append_assume_capacity_raw = fn cc(.poly) (array: &PinnedArray as raw, element_pointer: &any) {
+        array.length += 1;
+    }
+
+    const append_assume_capacity = fn inline (array: &PinnedArray, element: $T) void {
+        assert(array.length < array.capacity);
+        // This is supposed to be type-erased
+        #assign(array[i], element);
+    }
+});

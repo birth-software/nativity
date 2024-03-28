@@ -6,13 +6,16 @@ test {
     _ = build;
     _ = builtin;
     _ = os;
+    _ = c;
     _ = start;
+    _ = data_structures;
 }
 
 const build = #import("build.nat");
 const builtin = #import("builtin.nat");
+const data_structures = #import("data_structures.nat");
 const os = #import("os.nat");
-const c = #import("c.nat");
+const libc = #import("c.nat");
 const start = #import("start.nat");
 const testing = #import("testing.nat");
 
