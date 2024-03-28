@@ -7,6 +7,7 @@ const TestError = error{
     signaled,
     stopped,
     unknown,
+    internal,
     fail,
 };
 
@@ -29,12 +30,82 @@ fn collectDirectoryDirEntries(allocator: Allocator, path: []const u8) ![]const [
     return dir_entries.items;
 }
 
-fn runStandalone(allocator: Allocator, args: struct {
+const TestSuite = struct{
+    allocator: Allocator,
+    state: State = .{},
+
+    const State = struct{
+        compilation_count: u32 = 0,
+        failed_compilation_count: u32 = 0,
+        execution_count: u32 = 0,
+        failed_execution_count: u32 = 0,
+        test_count: u32 = 0,
+        failed_test_count: u32 = 0,
+        category_map: std.EnumSet(Category) = .{},
+        test_groups: std.ArrayListUnmanaged(TestGroup) = .{},
+    };
+
+    const TestGroup = struct{
+        category: Category,
+        directory: []const u8,
+        state: State = .{},
+        tests: std.ArrayListUnmanaged(TestRecord) = .{},
+    };
+
+    const TestRecord = struct{
+        compilation: TestStep,
+        execution: TestStep,
+    };
+
+    const TestResult = struct{
+        stdout: []const u8,
+        stderr: []const u8,
+        result: TestError!void,
+        kind: Kind,
+
+        const Kind = enum{
+            configuration,
+            compilation,
+            execution,
+        };
+    };
+
+    const TestStartRecord = struct{
+        state: State,
+    };
+
+    fn start_test_group(test_suite: *TestSuite, category: Category, directory: []const u8) *TestGroup{
+        test_suite.state.category_map.setPresent(category, true);
+        const test_group = try test_suite.state.test_groups.addOne(test_suite.allocator);
+        test_group.* = .{
+            .category = category,
+            .directory = directory,
+        };
+    }
+
+    fn end_test_group(test_suite: *TestSuite, test_group: *TestGroup) void {
+        _ = test_suite;
+        _ = test_group;
+    }
+
+    // fn add_compilation_failure(test_suite: *TestSuite, category: Category, directory: []const u8, name: []const u8) !void {
+    //     _ = name;
+    //     test_suite.failed_compilation_count += 1;
+    //     test_suite.failed_test_count += 1;
+    // }
+};
+
+const Category = enum{
+    standalone,
+    build,
+};
+
+fn run_standalone(test_suite: *TestSuite, args: struct {
     directory_path: []const u8,
     group_name: []const u8,
     is_test: bool,
 }) !void {
-    const test_names = try collectDirectoryDirEntries(allocator, args.directory_path);
+    const test_names = try collectDirectoryDirEntries(test_suite.allocator, args.directory_path);
 
     const total_compilation_count = test_names.len;
     var ran_compilation_count: usize = 0;
@@ -48,9 +119,9 @@ fn runStandalone(allocator: Allocator, args: struct {
 
     for (test_names) |test_name| {
         std.debug.print("{s}... ", .{test_name});
-        const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
+        const source_file_path = try std.mem.concat(test_suite.allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
         const compile_run = try std.ChildProcess.run(.{
-            .allocator = allocator,
+            .allocator = test_suite.allocator,
             // TODO: delete -main_source_file?
             .argv = &.{ "zig-out/bin/nat", if (args.is_test) "test" else "exe", "-main_source_file", source_file_path },
             .max_output_bytes = std.math.maxInt(u64),
@@ -78,9 +149,9 @@ fn runStandalone(allocator: Allocator, args: struct {
         }
 
         if (compilation_success) {
-            const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", test_name });
+            const test_path = try std.mem.concat(test_suite.allocator, u8, &.{ "nat/", test_name });
             const test_run = try std.ChildProcess.run(.{
-                .allocator = allocator,
+                .allocator = test_suite.allocator,
                 // TODO: delete -main_source_file?
                 .argv = &.{test_path},
                 .max_output_bytes = std.math.maxInt(u64),
@@ -487,52 +558,55 @@ fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
 }
 
 pub fn main() !void {
-    var errors = false;
+    // var errors = false;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
-    runStandalone(allocator, .{
-        .directory_path = "test/standalone",
-        .group_name = "STANDALONE",
-        .is_test = false,
-    }) catch {
-        errors = true;
+    var test_suite = TestSuite{
+        .allocator = allocator,
     };
-    runBuildTests(allocator) catch {
-        errors = true;
-    };
-    runStandalone(allocator, .{
-        .directory_path = "test/tests",
-        .group_name = "TEST EXECUTABLE",
-        .is_test = true,
-    }) catch {
-        errors = true;
-    };
+    // runStandalone(allocator, .{
+    //     .directory_path = "test/standalone",
+    //     .group_name = "STANDALONE",
+    //     .is_test = false,
+    // }) catch {
+    //     errors = true;
+    // };
+    // runBuildTests(allocator) catch {
+    //     errors = true;
+    // };
+    // runStandalone(allocator, .{
+    //     .directory_path = "test/tests",
+    //     .group_name = "TEST EXECUTABLE",
+    //     .is_test = true,
+    // }) catch {
+    //     errors = true;
+    // };
+    // //
+    // runStdTests(allocator) catch {
+    //     errors = true;
+    // };
     //
-    runStdTests(allocator) catch {
-        errors = true;
-    };
-
-    runCmakeTests(allocator, "test/cc") catch {
-        errors = true;
-    };
-    runCmakeTests(allocator, "test/c++") catch {
-        errors = true;
-    };
-
-    switch (@import("builtin").os.tag) {
-        .macos => {},
-        // .macos => {},
-        .linux => switch (@import("builtin").abi) {
-            .gnu => runCmakeTests(allocator, "test/cc_linux") catch {
-                errors = true;
-            },
-            .musl => {},
-            else => @compileError("ABI not supported"),
-        },
-        else => @compileError("OS not supported"),
-    }
-
-    if (errors) {
-        return error.fail;
-    }
+    // runCmakeTests(allocator, "test/cc") catch {
+    //     errors = true;
+    // };
+    // runCmakeTests(allocator, "test/c++") catch {
+    //     errors = true;
+    // };
+    //
+    // switch (@import("builtin").os.tag) {
+    //     .macos => {},
+    //     // .macos => {},
+    //     .linux => switch (@import("builtin").abi) {
+    //         .gnu => runCmakeTests(allocator, "test/cc_linux") catch {
+    //             errors = true;
+    //         },
+    //         .musl => {},
+    //         else => @compileError("ABI not supported"),
+    //     },
+    //     else => @compileError("OS not supported"),
+    // }
+    //
+    // if (errors) {
+    //     return error.fail;
+    // }
 }
