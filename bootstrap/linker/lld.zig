@@ -59,7 +59,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
         .linux => {
             if (options.link_libcpp) {
                 assert(options.link_libc);
-                try argv.append(context.my_allocator, "/usr/lib/libstdc++.so" );
+                try argv.append(context.my_allocator, "/usr/lib/libstdc++.so");
             }
 
             if (options.link_libc) {
@@ -80,9 +80,8 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
         else => @compileError("OS not supported"),
     }
 
-
     for (options.libraries) |lib| {
-        try argv.append(context.my_allocator, try std.mem.concat(context.allocator, u8, &.{"-l", lib.path}));
+        try argv.append(context.my_allocator, try std.mem.concat(context.allocator, u8, &.{ "-l", lib.path }));
     }
 
     const argv_zero_terminated = try Compilation.argsCopyZ(context.allocator, argv.slice());
@@ -92,8 +91,8 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     var stderr_ptr: [*]const u8 = undefined;
     var stderr_len: usize = 0;
     const result = switch (@import("builtin").os.tag) {
-        .linux => NativityLLDLinkELF   (argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
-        .macos => NativityLLDLinkMachO (argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        .linux => NativityLLDLinkELF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        .macos => NativityLLDLinkMachO(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
         .windows => NativityLLDLinkCOFF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
         else => @compileError("OS not supported"),
     };

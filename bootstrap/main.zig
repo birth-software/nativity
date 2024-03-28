@@ -66,8 +66,8 @@ pub fn main() !void {
             argument_list.appendSlice(arg) catch {};
             argument_list.append(' ') catch {};
         }
-        argument_list.append('\n') catch  {};
-        std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{home_dir, timestamp}) catch unreachable, argument_list.items) catch {};
+        argument_list.append('\n') catch {};
+        std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{ home_dir, timestamp }) catch unreachable, argument_list.items) catch {};
     }
 
     if (arguments.len <= 1) {

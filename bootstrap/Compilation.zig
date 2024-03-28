@@ -176,7 +176,7 @@ const CSourceKind = enum {
     cpp,
 };
 
-fn compileMusl(context: *const Context) MuslContext{
+fn compileMusl(context: *const Context) MuslContext {
     const musl = try MuslContext.init(context);
     var exists = true;
     var dir = std.fs.cwd().openDir(musl.global_cache_dir, .{}) catch b: {
@@ -272,13 +272,13 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
     _ = kind; // autofix
     var argument_index: usize = 0;
     _ = &argument_index;
-    const Mode = enum{
+    const Mode = enum {
         object,
         link,
     };
     var out_path: ?[]const u8 = null;
     var out_mode: ?Mode = null;
-    const Extension = enum{
+    const Extension = enum {
         c,
         cpp,
         assembly,
@@ -286,15 +286,15 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
         static_library,
         shared_library,
     };
-    const CSourceFile = struct{
+    const CSourceFile = struct {
         path: []const u8,
         extension: Extension,
     };
-    const DebugInfo = enum{
+    const DebugInfo = enum {
         yes,
         no,
     };
-    const LinkArch = enum{
+    const LinkArch = enum {
         arm64,
     };
     var debug_info: ?DebugInfo = null;
@@ -314,21 +314,14 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
             if (data_structures.last_byte(argument, '.')) |dot_index| {
                 const extension_string = argument[dot_index..];
                 const extension: Extension =
-                    if (byte_equal(extension_string, ".c")) .c
-                    else if (byte_equal(extension_string, ".cpp") or byte_equal(extension_string, ".cxx") or byte_equal(extension_string, ".cc")) .cpp
-                    else if (byte_equal(extension_string, ".S")) .assembly
-                    else if (byte_equal(extension_string, ".o")) .object
-                    else if (byte_equal(extension_string, ".a")) .static_library
-                    else if (byte_equal(extension_string, ".so") or
-                        byte_equal(extension_string, ".dll") or
-                        byte_equal(extension_string, ".dylib") or
-                        byte_equal(extension_string, ".tbd")
-                        ) .shared_library
-                    else {
-                        try write(.panic, argument);
-                        try write(.panic, "\n");
-                        @panic("Unable to recognize extension for the file above");
-                    };
+                    if (byte_equal(extension_string, ".c")) .c else if (byte_equal(extension_string, ".cpp") or byte_equal(extension_string, ".cxx") or byte_equal(extension_string, ".cc")) .cpp else if (byte_equal(extension_string, ".S")) .assembly else if (byte_equal(extension_string, ".o")) .object else if (byte_equal(extension_string, ".a")) .static_library else if (byte_equal(extension_string, ".so") or
+                    byte_equal(extension_string, ".dll") or
+                    byte_equal(extension_string, ".dylib") or
+                    byte_equal(extension_string, ".tbd")) .shared_library else {
+                    try write(.panic, argument);
+                    try write(.panic, "\n");
+                    @panic("Unable to recognize extension for the file above");
+                };
                 switch (extension) {
                     .c, .cpp, .assembly => {
                         try c_source_files.append(context.my_allocator, .{
@@ -464,7 +457,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
             const wl_arg = argument["-Wl,".len..];
             if (data_structures.first_byte(wl_arg, ',')) |comma_index| {
                 const key = wl_arg[0..comma_index];
-                const value = wl_arg[comma_index + 1..];
+                const value = wl_arg[comma_index + 1 ..];
                 try ld_argv.append(context.my_allocator, key);
                 try ld_argv.append(context.my_allocator, value);
             } else {
@@ -486,7 +479,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                 try list.append_slice(context.my_allocator, argument);
                 try list.append(context.my_allocator, '\n');
 
-                try std.fs.cwd().writeFile(try std.fmt.allocPrint(context.allocator, "{s}/dev/nativity/nat/unhandled_arg_{}", .{home_dir, std.time.milliTimestamp()}), list.slice());
+                try std.fs.cwd().writeFile(try std.fmt.allocPrint(context.allocator, "{s}/dev/nativity/nat/unhandled_arg_{}", .{ home_dir, std.time.milliTimestamp() }), list.slice());
             }
             try write(.panic, "unhandled argument: '");
             try write(.panic, argument);
@@ -533,15 +526,13 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                 try argv.append(context.my_allocator, "-fno-builtin");
             }
 
-
             if (link_libcpp) {
                 // include paths
 
             }
 
             const link_libc = c_source_file.extension == .c;
-            if (link_libc) {
-            }
+            if (link_libc) {}
 
             const link_libunwind = false;
             if (link_libunwind) {
@@ -592,11 +583,11 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
 
                 break :blk target_triple_buffer.slice();
             };
-            try argv.append_slice(context.my_allocator, &.{"-target", target_triple});
+            try argv.append_slice(context.my_allocator, &.{ "-target", target_triple });
 
             const object_path = switch (mode) {
                 .object => out_path.?,
-                .link => try std.mem.concat(context.allocator, u8, &.{if (out_path) |op| op else "a.o", ".o"}),
+                .link => try std.mem.concat(context.allocator, u8, &.{ if (out_path) |op| op else "a.o", ".o" }),
             };
 
             try link_objects.append(context.my_allocator, .{
@@ -623,12 +614,12 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                         else => &.{},
                     };
                     for (libc_framework_dirs) |framework_dir| {
-                        try argv.append_slice(context.my_allocator, &.{"-iframework", framework_dir});
+                        try argv.append_slice(context.my_allocator, &.{ "-iframework", framework_dir });
                     }
 
                     const framework_dirs = &[_][]const u8{};
                     for (framework_dirs) |framework_dir| {
-                        try argv.append_slice(context.my_allocator, &.{"-F", framework_dir});
+                        try argv.append_slice(context.my_allocator, &.{ "-F", framework_dir });
                     }
 
                     // TODO: c headers dir
@@ -653,7 +644,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                     };
 
                     for (libc_include_dirs) |include_dir| {
-                        try argv.append_slice(context.my_allocator, &.{"-isystem", include_dir});
+                        try argv.append_slice(context.my_allocator, &.{ "-isystem", include_dir });
                     }
 
                     // TODO: cpu model
@@ -727,7 +718,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
 
             // TODO: extra flags
             // TODO: cache exempt flags
-            try argv.append_slice(context.my_allocator, &.{"-c", "-o", object_path});
+            try argv.append_slice(context.my_allocator, &.{ "-c", "-o", object_path });
             // TODO: emit ASM/LLVM IR
 
             const debug_clang_args = false;
@@ -15669,7 +15660,7 @@ pub const Unit = struct {
                     o_file,
                 });
 
-                var arguments = [_][]const u8{ "-c", c_source_file, "-o", object_path, "-g", "-fno-stack-protector"};
+                var arguments = [_][]const u8{ "-c", c_source_file, "-o", object_path, "-g", "-fno-stack-protector" };
                 try compileCSourceFile(context, &arguments, .c);
                 object_files.append_with_capacity(.{
                     .path = object_path,

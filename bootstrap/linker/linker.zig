@@ -1,7 +1,7 @@
 const Compilation = @import("../Compilation.zig");
 const Context = Compilation.Context;
 const lld = @import("lld.zig");
-pub const Options = struct{
+pub const Options = struct {
     backend: Backend = .lld,
     output_file_path: []const u8,
     objects: []const Object,
@@ -11,15 +11,15 @@ pub const Options = struct{
     link_libcpp: bool,
 };
 
-const Backend = enum{
+const Backend = enum {
     lld,
 };
 
-pub const Object = struct{
+pub const Object = struct {
     path: []const u8,
 };
 
-pub const Library = struct{
+pub const Library = struct {
     path: []const u8,
 };
 

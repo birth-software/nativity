@@ -136,7 +136,7 @@ fn runStandaloneTests(allocator: Allocator) !void {
             .allocator = allocator,
             // TODO: delete -main_source_file?
             .argv = &.{ "zig-out/bin/nat", "exe", "-main_source_file", source_file_path },
-                .max_output_bytes = std.math.maxInt(u64),
+            .max_output_bytes = std.math.maxInt(u64),
         });
         ran_compilation_count += 1;
 
@@ -225,7 +225,7 @@ fn runBuildTests(allocator: Allocator) !void {
             .allocator = allocator,
             // TODO: delete -main_source_file?
             .argv = &.{ compiler_realpath, "build" },
-                .max_output_bytes = std.math.maxInt(u64),
+            .max_output_bytes = std.math.maxInt(u64),
         });
 
         ran_compilation_count += 1;
@@ -413,9 +413,7 @@ fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
                     const ninja = try std.ChildProcess.run(.{
                         .allocator = allocator,
                         // TODO: delete -main_source_file?
-                        .argv = &.{
-                            "ninja"
-                        },
+                        .argv = &.{"ninja"},
                         .max_output_bytes = std.math.maxInt(u64),
                     });
                     const ninja_result: TestError!bool = switch (ninja.term) {
@@ -446,7 +444,7 @@ fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
                             .allocator = allocator,
                             // TODO: delete -main_source_file?
                             .argv = &.{
-                                try std.mem.concat(allocator, u8, &.{ "./", cc_entry.name}),
+                                try std.mem.concat(allocator, u8, &.{ "./", cc_entry.name }),
                             },
                             .max_output_bytes = std.math.maxInt(u64),
                         });
@@ -475,7 +473,7 @@ fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
 
                 std.debug.print("[TEST {s}]\n", .{if (success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
             },
-            else => std.debug.panic("Entry {s} is a {s}", .{cc_entry.name, @tagName(cc_entry.kind)}),
+            else => std.debug.panic("Entry {s} is a {s}", .{ cc_entry.name, @tagName(cc_entry.kind) }),
         }
 
         try std.posix.chdir(cc_dir_path);

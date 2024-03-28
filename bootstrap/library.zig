@@ -736,7 +736,7 @@ pub fn starts_with_slice(bytes: []const u8, slice: []const u8) bool {
 
 pub fn ends_with_slice(bytes: []const u8, slice: []const u8) bool {
     if (slice.len <= bytes.len) {
-        if (byte_equal(bytes[bytes.len - slice.len..], slice)) {
+        if (byte_equal(bytes[bytes.len - slice.len ..], slice)) {
             return true;
         }
     }
@@ -749,7 +749,7 @@ pub fn first_byte(bytes: []const u8, byte: u8) ?usize {
         if (b == byte) {
             return i;
         }
-    } 
+    }
 
     return null;
 }
