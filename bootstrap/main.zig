@@ -56,7 +56,7 @@ pub fn main() !void {
         try args.append(context.my_allocator, arg);
     }
     const arguments = args.slice();
-    const debug_args = true;
+    const debug_args = false;
     if (debug_args) {
         assert(arguments.len > 0);
         const home_dir = std.posix.getenv("HOME") orelse unreachable;
