@@ -498,8 +498,6 @@ pub fn build(b: *std.Build) !void {
     b.default_step.dependOn(&test_runner.step);
 
     const test_command = b.addRunArtifact(test_runner);
-    const install_runner = b.addInstallArtifact(test_runner, .{});
-    b.getInstallStep().dependOn(&install_runner.step);
     test_command.step.dependOn(&compiler.step);
     test_command.step.dependOn(b.getInstallStep());
 
