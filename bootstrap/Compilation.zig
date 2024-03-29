@@ -2907,11 +2907,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
         break :blk path;
     } else unreachable;
 
-    const executable_name = if (maybe_executable_name) |name| name else b: {
-        const slash_index = data_structures.last_byte(main_package_path, '/') orelse unreachable;
-        const p = std.fs.path.basename(main_package_path[0 .. slash_index]);
-        break :b p;
-    };
+    const executable_name = if (maybe_executable_name) |name| name else std.fs.path.basename(main_package_path[0 .. main_package_path.len - "/main.nat".len]);
 
     const executable_path = maybe_executable_path orelse blk: {
         assert(executable_name.len > 0);
