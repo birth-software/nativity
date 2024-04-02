@@ -4090,7 +4090,7 @@ pub const Debug = struct {
             var scope_it: ?*Scope = scope;
             while (scope_it) |s| : (scope_it = s.parent) {
                 if (s.kind == .file) {
-                    const file = @fieldParentPtr(File, "scope", s);
+                    const file: *File = @fieldParentPtr("scope", s);
                     const file_index = unit.files.indexOf(file);
                     return file_index;
                 }
@@ -5022,7 +5022,7 @@ pub const Builder = struct {
             .basic_block = .null,
         });
 
-        const global_declaration = @fieldParentPtr(Debug.Declaration.Global, "declaration", declaration);
+        const global_declaration: *Debug.Declaration.Global = @fieldParentPtr("declaration", declaration);
         switch (global_declaration.initial_value) {
             .unresolved => |declaration_node_index| {
                 assert(declaration.type == .null);
@@ -5188,8 +5188,8 @@ pub const Builder = struct {
         assert(declaration.kind == .argument);
         assert(scope.kind == .function);
 
-        const argument_declaration = @fieldParentPtr(Debug.Declaration.Argument, "declaration", declaration);
-        const function_scope = @fieldParentPtr(Debug.Scope.Function, "scope", scope);
+        const argument_declaration: *Debug.Declaration.Argument =@fieldParentPtr("declaration", declaration);
+        const function_scope: *Debug.Scope.Function = @fieldParentPtr("scope", scope);
         const instruction_index = function_scope.argument_map.get(argument_declaration).?;
 
         return .{
@@ -5211,8 +5211,8 @@ pub const Builder = struct {
         assert(declaration.kind == .local);
         assert(scope.kind == .block);
 
-        const local_declaration = @fieldParentPtr(Debug.Declaration.Local, "declaration", declaration);
-        const local_scope = @fieldParentPtr(Debug.Scope.Local, "scope", scope);
+        const local_declaration: *Debug.Declaration.Local = @fieldParentPtr("declaration", declaration);
+        const local_scope: *Debug.Scope.Local = @fieldParentPtr("scope", scope);
         if (local_scope.local_declaration_map.get(local_declaration)) |instruction_index| {
             return .{
                 .value = .{
@@ -7530,8 +7530,8 @@ pub const Builder = struct {
                 // Save file type
                 switch (builder.current_scope.kind) {
                     .file => {
-                        const global_scope = @fieldParentPtr(Debug.Scope.Global, "scope", builder.current_scope);
-                        const file = @fieldParentPtr(Debug.File, "scope", global_scope);
+                        const global_scope: *Debug.Scope.Global= @fieldParentPtr("scope", builder.current_scope);
+                        const file: *Debug.File = @fieldParentPtr("scope", global_scope);
                         file.type = type_index;
                         try unit.scope_container_map.put_no_clobber(context.my_allocator, &struct_type.kind.@"struct".scope.scope, type_index);
                     },
@@ -12534,7 +12534,7 @@ pub const Builder = struct {
             const stack = try builder.createStackVariable(unit, context, declaration_type, null);
 
             assert(builder.current_scope.kind == .block);
-            const local_scope = @fieldParentPtr(Debug.Scope.Local, "scope", builder.current_scope);
+            const local_scope: *Debug.Scope.Local = @fieldParentPtr("scope", builder.current_scope);
             try local_scope.local_declaration_map.put_no_clobber(context.my_allocator, local_declaration, stack);
 
             const debug_declare_local = try unit.instructions.append(context.my_allocator, .{
@@ -14755,7 +14755,7 @@ pub const Builder = struct {
         const test_slice_type = test_functions.type;
         const test_type = unit.types.get(test_slice_type).slice.child_type;
         assert(test_functions.kind == .global);
-        const test_functions_global = @fieldParentPtr(Debug.Declaration.Global, "declaration", test_functions);
+        const test_functions_global: *Debug.Declaration.Global = @fieldParentPtr("declaration", test_functions);
         assert(test_functions_global.declaration.mutability == .@"var");
         const array_type = try unit.getArrayType(context, .{
             .type = test_type,
