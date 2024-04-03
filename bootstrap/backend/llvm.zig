@@ -1782,7 +1782,8 @@ pub const LLVM = struct {
         const base_type = try llvm.getType(unit, context, gep.base_type);
         const in_bounds = true;
         if (gep.is_struct and gep.index.type != .u32) unreachable;
-        const get_element_pointer = llvm.builder.createGEP(base_type, pointer, indices.ptr, indices.len, "gep", "gep".len, in_bounds) orelse unreachable;
+        const gep_name = unit.getIdentifier(gep.name);
+        const get_element_pointer = llvm.builder.createGEP(base_type, pointer, indices.ptr, indices.len, gep_name.ptr, gep_name.len, in_bounds) orelse unreachable;
         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, get_element_pointer);
         return get_element_pointer;
     }

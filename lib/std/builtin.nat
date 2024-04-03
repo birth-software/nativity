@@ -33,3 +33,7 @@ const TestFunction = struct{
     name: []const u8,
     function: &const fn () *!void,
 };
+
+const StructOptions = struct{
+    sliceable: bool = false,
+};

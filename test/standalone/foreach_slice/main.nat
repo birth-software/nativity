@@ -5,7 +5,7 @@ const count_slice_byte_count = fn(slices: []const []const u8) usize {
     var byte_count: usize = 0;
     
     for (slices) |slice| {
-        byte_count += slice.len;
+        byte_count += slice.length;
     }
 
     return byte_count;
@@ -27,7 +27,7 @@ const Error = error{
 const main = fn () Error!void {
     const a = [_]u8{1, 1, 4, 5, 6};
     const b = [_]u8{1, 4, 6};
-    const expected_result: usize = a.len + b.len;
+    const expected_result: usize = a.length + b.length;
     const result = count_slice_byte_count(slices = .{a.&, b.&}.&);
     print_values(slice = a.&);
     if (expected_result - result != 0) {
