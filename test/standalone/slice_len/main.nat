@@ -8,8 +8,8 @@ const Error = error{
 const main = fn() Error!void {
     var buffer: [65]u8 = undefined;
     const slice = foo(5, buffer.&);
-    assert(slice.len + 5 == buffer.len);
-    const result: u32 = #cast(slice.len + 5 - buffer.len);
+    assert(slice.length + 5 == buffer.length);
+    const result: u32 = #cast(slice.length + 5 - buffer.length);
     if (result != 0) {
         return Error.unexpected_result;
     }

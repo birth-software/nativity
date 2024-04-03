@@ -31,7 +31,7 @@ const print = fn(bytes: []const u8) void {
 }
 
 const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
-    var index: usize = buffer.len;
+    var index: usize = buffer.length;
     var absolute = n;
 
     while (true) {
@@ -53,7 +53,7 @@ const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
 const print_usize = fn(n: usize) void {
     var buffer: [65]u8 = undefined;
     const bytes = format_usize(n, buffer = buffer.&);
-    assert(bytes.len < buffer.len);
+    assert(bytes.length < buffer.length);
     const file_descriptor = os.StdFileDescriptor.get(descriptor = .stdout);
     const file_writer = FileWriter{
         .descriptor = file_descriptor,
@@ -79,11 +79,11 @@ const Allocator = struct {
     }
 
     const free = fn (allocator: &Allocator, bytes: []const u8) Allocator.Error!void {
-        _ = try allocator.handler(allocator, old_ptr = bytes.ptr, old_size = bytes.len, new_size = 0, alignment = 0);
+        _ = try allocator.handler(allocator, old_ptr = bytes.pointer, old_size = bytes.length, new_size = 0, alignment = 0);
     }
 
     const duplicate_bytes = fn (allocator: &Allocator, bytes: []const u8) Allocator.Error![]u8 {
-        const result = try allocator.allocate(size = bytes.len, alignment = 0);
+        const result = try allocator.allocate(size = bytes.length, alignment = 0);
         copy_bytes(destination = result, source = bytes);
         return result;
     }
@@ -154,18 +154,18 @@ const FileWriter = struct{
     const write_all = fn(file_writer: FileWriter, bytes: []const u8) Writer.Error!void {
         var bytes_written: usize = 0;
 
-        while (bytes_written < bytes.len) {
+        while (bytes_written < bytes.length) {
             const iteration_written_byte_count = try file_writer.write(bytes = bytes[bytes_written..]);
             bytes_written += iteration_written_byte_count;
         }
 
-        assert(bytes_written == bytes.len);
+        assert(bytes_written == bytes.length);
     }
 };
 
 const copy_bytes = fn(destination: []u8, source: []const u8) void {
-    assert(ok = destination.len == source.len);
-    for (0..destination.len) |i| {
+    assert(ok = destination.length == source.length);
+    for (0..destination.length) |i| {
         destination[i] = source[i];
     }
 }
@@ -173,14 +173,14 @@ const copy_bytes = fn(destination: []u8, source: []const u8) void {
 const concatenate_bytes = fn(allocator: &Allocator, slices: []const []const u8) Allocator.Error![]u8 {
     var total_byte_count: usize = 0;
     for (slices) |slice| {
-        total_byte_count += slice.len;
+        total_byte_count += slice.length;
     }
 
     const bytes = try allocator.allocate(total_byte_count, 1);
     var offset: usize = 0;
     for (slice) |slice| {
-        copy_bytes(bytes[offset..][0..slice.len], slice);
-        offset += slice.len;
+        copy_bytes(bytes[offset..][0..slice.length], slice);
+        offset += slice.length;
     }
 
     return bytes;

@@ -42,6 +42,13 @@ const Error = struct {
     node: Node.Index,
 };
 
+const SliceField = enum {
+    pointer,
+    length,
+};
+
+const length_field_name = @tagName(SliceField.length);
+
 pub fn createContext(allocator: Allocator, my_allocator: *MyAllocator) !*const Context {
     const context: *Context = try allocator.create(Context);
 
@@ -3576,10 +3583,11 @@ pub const Instruction = union(enum) {
     };
 
     pub const GEP = struct {
+        index: V,
         pointer: Instruction.Index,
         base_type: Type.Index,
+        name: u32,
         is_struct: bool,
-        index: V,
     };
 
     const ExtractValue = struct {
@@ -3815,27 +3823,6 @@ pub const Function = struct {
         expand,
     };
 
-    // const AbiType = union(enum) {
-    //     type: Type.Index,
-    //     integer_bit_count: u32,
-    //     invalid,
-    //
-    //     fn is_promotable_integer_or_bool(abi_type: AbiType, unit: *Unit) bool {
-    //         switch (abi_type) {
-    //             .type => |type_index| if (get_integer_or_bool(type_index, unit)) |integer| {
-    //                 return integer.bit_count < 32;
-    //             },
-    //         }
-    //     }
-    //
-    //     fn get_integer_or_bool(type_index: Type.Index, unit: *Unit) ?Type.Integer {
-    //         return switch (unit.types.get(type_index).*) {
-    //             .integer => true,
-    //             else => false,
-    //         };
-    //     }
-    // };
-
     const AbiAttributes = struct {
         by_reg: bool = false,
         zero_extend: bool = false,
@@ -3873,6 +3860,18 @@ pub const Struct = struct {
     pub const Descriptor = struct {
         scope: Debug.Scope.Global,
         fields: UnpinnedArray(Struct.Field.Index) = .{},
+        options: Options,
+    };
+    pub const Options = struct {
+        sliceable: ?Sliceable = null,
+        pub const Id = enum {
+            sliceable,
+        };
+    };
+
+    pub const Sliceable = struct {
+        pointer: u32,
+        length: u32,
     };
 
     pub const Field = struct {
@@ -4861,7 +4860,7 @@ pub const Builder = struct {
         _ = try builder.analyzeFile(unit, context, file_index);
     }
 
-    fn analyzeFile(builder: *Builder, unit: *Unit, context: *const Context, file_index: Debug.File.Index) !void {
+    fn analyzeFile(builder: *Builder, unit: *Unit, context: *const Context, file_index: Debug.File.Index) anyerror!void {
         const old_function = builder.current_function;
         builder.current_function = .null;
         defer builder.current_function = old_function;
@@ -5188,7 +5187,7 @@ pub const Builder = struct {
         assert(declaration.kind == .argument);
         assert(scope.kind == .function);
 
-        const argument_declaration: *Debug.Declaration.Argument =@fieldParentPtr("declaration", declaration);
+        const argument_declaration: *Debug.Declaration.Argument = @fieldParentPtr("declaration", declaration);
         const function_scope: *Debug.Scope.Function = @fieldParentPtr("scope", scope);
         const instruction_index = function_scope.argument_map.get(argument_declaration).?;
 
@@ -6163,12 +6162,7 @@ pub const Builder = struct {
                 } else {
                     const left = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
                     const expected_right_type = switch (left.value) {
-                        .runtime => |instr_index| switch (unit.instructions.get(instr_index).*) {
-                            // .global => |global| global.declaration.type,
-                            .stack_slot => |stack_slot| stack_slot.type,
-                            .get_element_pointer => |gep| gep.base_type,
-                            else => |t| @panic(@tagName(t)),
-                        },
+                        .runtime => unit.types.get(left.type).pointer.type,
                         .@"comptime" => |ct| switch (ct) {
                             .global => |global| global.declaration.type,
                             else => |t| @panic(@tagName(t)),
@@ -6524,6 +6518,35 @@ pub const Builder = struct {
         return result;
     }
 
+    fn get_builtin_declaration(builder: *Builder, unit: *Unit, context: *const Context, name: []const u8) !*Debug.Declaration.Global {
+        const std_file_index = try builder.resolveImportStringLiteral(unit, context, Type.Expect{ .type = .type }, "std");
+        const std_file = unit.files.get(std_file_index);
+        const std_file_struct_index = unit.types.get(std_file.type).@"struct";
+        const std_file_struct = unit.structs.get(std_file_struct_index);
+        const builtin_hash = try unit.processIdentifier(context, "builtin");
+
+        const look_in_parent_scopes = false;
+        if (std_file_struct.kind.@"struct".scope.scope.lookupDeclaration(builtin_hash, look_in_parent_scopes)) |lookup| {
+            const builtin_declaration = try builder.referenceGlobalDeclaration(unit, context, &std_file_struct.kind.@"struct".scope.scope, lookup.declaration, .{});
+            switch (builtin_declaration.initial_value) {
+                .type => |builtin_type_index| {
+                    const builtin_type_struct_index = unit.types.get(builtin_type_index).@"struct";
+                    const builtin_type_struct = &unit.structs.get(builtin_type_struct_index).kind.@"struct";
+                    const hash = try unit.processIdentifier(context, name);
+                    if (builtin_type_struct.scope.scope.lookupDeclaration(hash, look_in_parent_scopes)) |declaration_lookup| {
+                        const declaration_global = try builder.referenceGlobalDeclaration(unit, context, declaration_lookup.scope, declaration_lookup.declaration, .{});
+                        return declaration_global;
+                    } else {
+                        unreachable;
+                    }
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+        } else {
+            @panic("Internal compiler error");
+        }
+    }
+
     fn resolveFunctionPrototype(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index, global_attributes: Debug.Declaration.Global.Attributes) !Type.Index {
         const node = unit.getNode(node_index);
         assert(node.id == .function_prototype);
@@ -6544,32 +6567,8 @@ pub const Builder = struct {
                 .function_attribute_naked => is_naked = true,
                 .function_attribute_cc => {
                     if (unit.cc_type == .null) {
-                        const std_file_index = try builder.resolveImportStringLiteral(unit, context, Type.Expect{ .type = .type }, "std");
-                        const std_file = unit.files.get(std_file_index);
-                        const std_file_struct_index = unit.types.get(std_file.type).@"struct";
-                        const std_file_struct = unit.structs.get(std_file_struct_index);
-                        const builtin_hash = try unit.processIdentifier(context, "builtin");
-
-                        const look_in_parent_scopes = false;
-                        if (std_file_struct.kind.@"struct".scope.scope.lookupDeclaration(builtin_hash, look_in_parent_scopes)) |lookup| {
-                            const builtin_declaration = try builder.referenceGlobalDeclaration(unit, context, &std_file_struct.kind.@"struct".scope.scope, lookup.declaration, .{});
-                            switch (builtin_declaration.initial_value) {
-                                .type => |builtin_type_index| {
-                                    const builtin_type_struct_index = unit.types.get(builtin_type_index).@"struct";
-                                    const builtin_type_struct = &unit.structs.get(builtin_type_struct_index).kind.@"struct";
-                                    const cc_hash = try unit.processIdentifier(context, "CallingConvention");
-                                    if (builtin_type_struct.scope.scope.lookupDeclaration(cc_hash, look_in_parent_scopes)) |cc_lookup| {
-                                        const cc_global = try builder.referenceGlobalDeclaration(unit, context, cc_lookup.scope, cc_lookup.declaration, .{});
-                                        unit.cc_type = cc_global.initial_value.type;
-                                    } else {
-                                        unreachable;
-                                    }
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            }
-                        } else {
-                            @panic("Internal compiler error");
-                        }
+                        const calling_convention_declaration = try builder.get_builtin_declaration(unit, context, "CallingConvention");
+                        unit.cc_type = calling_convention_declaration.initial_value.type;
                     }
 
                     assert(unit.cc_type != .null);
@@ -7502,6 +7501,48 @@ pub const Builder = struct {
         const data: Data = switch (container_type) {
             .@"struct" => b: {
                 assert(container_node.id == .struct_type);
+
+                var struct_options = Struct.Options{};
+
+                if (container_node.right != .null) {
+                    const struct_option_nodes = unit.getNodeList(container_node.right);
+                    var struct_options_value = false;
+                    for (struct_option_nodes) |struct_option_node_index| {
+                        const struct_option_node = unit.getNode(struct_option_node_index);
+                        switch (struct_option_node.id) {
+                            .anonymous_container_literal => {
+                                if (struct_options_value) unreachable;
+                                struct_options_value = true;
+                                assert(struct_option_node.left == .null);
+                                const nodes = unit.getNodeList(struct_option_node.right);
+                                const struct_options_declaration = try builder.get_builtin_declaration(unit, context, "StructOptions");
+                                const struct_options_declaration_type_index = struct_options_declaration.initial_value.type;
+                                const struct_options_literal = try builder.resolveContainerLiteral(unit, context, nodes, struct_options_declaration_type_index);
+                                const constant_struct_index = struct_options_literal.value.@"comptime".constant_struct;
+                                const constant_struct = unit.constant_structs.get(constant_struct_index);
+                                const struct_options_struct_index = unit.types.get(struct_options_declaration_type_index).@"struct";
+                                const struct_options_struct = unit.structs.get(struct_options_struct_index);
+
+                                for (struct_options_struct.kind.@"struct".fields.slice(), constant_struct.fields) |field_index, field_value| {
+                                    const field = unit.struct_fields.get(field_index);
+                                    const name = unit.getIdentifier(field.name);
+                                    const option_id = data_structures.enumFromString(Struct.Options.Id, name) orelse unreachable;
+                                    switch (option_id) {
+                                        .sliceable => switch (field_value.bool) {
+                                            true => struct_options.sliceable = .{
+                                                .pointer = 0,
+                                                .length = 1,
+                                            },
+                                            false => unreachable,
+                                        },
+                                    }
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    }
+                }
+
                 const struct_index = try unit.structs.append(context.my_allocator, .{
                     .kind = .{
                         .@"struct" = .{
@@ -7518,6 +7559,7 @@ pub const Builder = struct {
                                     .file = builder.current_file,
                                 },
                             },
+                            .options = struct_options,
                         },
                     },
                 });
@@ -7530,7 +7572,7 @@ pub const Builder = struct {
                 // Save file type
                 switch (builder.current_scope.kind) {
                     .file => {
-                        const global_scope: *Debug.Scope.Global= @fieldParentPtr("scope", builder.current_scope);
+                        const global_scope: *Debug.Scope.Global = @fieldParentPtr("scope", builder.current_scope);
                         const file: *Debug.File = @fieldParentPtr("scope", global_scope);
                         file.type = type_index;
                         try unit.scope_container_map.put_no_clobber(context.my_allocator, &struct_type.kind.@"struct".scope.scope, type_index);
@@ -7555,7 +7597,9 @@ pub const Builder = struct {
                         .kind = .comptime_int,
                     },
                     else => e: {
-                        const backing_type_index = try builder.resolveType(unit, context, container_node.right);
+                        const node_list = unit.getNodeList(container_node.right);
+                        assert(node_list.len == 1);
+                        const backing_type_index = try builder.resolveType(unit, context, node_list[0]);
                         const backing_type = unit.types.get(backing_type_index);
                         break :e switch (backing_type.*) {
                             .integer => |integer| switch (integer.kind) {
@@ -7598,7 +7642,9 @@ pub const Builder = struct {
                 const integer = switch (container_node.right) {
                     .null => unreachable,
                     else => e: {
-                        const backing_type_index = try builder.resolveType(unit, context, container_node.right);
+                        const argument_nodes = unit.getNodeList(container_node.right);
+                        assert(argument_nodes.len == 1);
+                        const backing_type_index = try builder.resolveType(unit, context, argument_nodes[0]);
                         const backing_type = unit.types.get(backing_type_index);
                         break :e switch (backing_type.*) {
                             .integer => |integer| switch (integer.kind) {
@@ -7811,6 +7857,9 @@ pub const Builder = struct {
                 },
             }
 
+            var sliceable_pointer_index: ?u32 = null;
+            var sliceable_length_index: ?u32 = null;
+
             for (field_nodes.slice(), 0..) |field_node_index, index| {
                 const field_node = unit.getNode(field_node_index);
                 const identifier = unit.getExpectedTokenBytes(field_node.token, .identifier);
@@ -7847,8 +7896,23 @@ pub const Builder = struct {
                     .@"struct" => {
                         assert(field_node.id == .container_field);
                         const struct_type = unit.structs.get(ty.@"struct");
-                        const field_name = unit.getExpectedTokenBytes(field_node.token, .identifier);
-                        const field_name_hash = try unit.processIdentifier(context, field_name);
+                        if (struct_type.kind.@"struct".options.sliceable != null) {
+                            inline for (@typeInfo(SliceField).Enum.fields) |field| {
+                                if (byte_equal(field.name, identifier)) {
+                                    const v = @field(SliceField, field.name);
+                                    switch (v) {
+                                        .pointer => {
+                                            assert(sliceable_pointer_index == null);
+                                            sliceable_pointer_index = @intCast(index);
+                                        },
+                                        .length => {
+                                            assert(sliceable_length_index == null);
+                                            sliceable_length_index = @intCast(index);
+                                        },
+                                    }
+                                }
+                            }
+                        }
                         const field_type = try builder.resolveType(unit, context, field_node.left);
                         const field_default_value: ?V.Comptime = switch (field_node.right) {
                             .null => null,
@@ -7856,7 +7920,7 @@ pub const Builder = struct {
                         };
 
                         const struct_field = try unit.struct_fields.append(context.my_allocator, .{
-                            .name = field_name_hash,
+                            .name = hash,
                             .type = field_type,
                             .default_value = field_default_value,
                         });
@@ -7881,6 +7945,17 @@ pub const Builder = struct {
                         bitfield.fields.append_with_capacity(struct_field);
                     },
                 }
+            }
+
+            switch (container_type) {
+                .@"struct" => {
+                    const struct_type = unit.structs.get(ty.@"struct");
+                    if (struct_type.kind.@"struct".options.sliceable) |*sliceable| {
+                        sliceable.pointer = sliceable_pointer_index orelse unreachable;
+                        sliceable.length = sliceable_length_index orelse unreachable;
+                    }
+                },
+                else => {},
             }
         }
 
@@ -8278,10 +8353,6 @@ pub const Builder = struct {
                         });
                         try builder.appendInstruction(unit, context, first_store);
 
-                        // TODO: should we use this?
-                        // const offset = @divExact(high_offset, high_aligned_size);
-                        // _ = offset; // autofix
-
                         const gep = try unit.instructions.append(context.my_allocator, .{
                             .get_element_pointer = .{
                                 .pointer = stack,
@@ -8297,6 +8368,7 @@ pub const Builder = struct {
                                     },
                                     .type = .usize,
                                 },
+                                .name = try unit.processIdentifier(context, "direct_pair"),
                             },
                         });
                         try builder.appendInstruction(unit, context, gep);
@@ -9498,6 +9570,7 @@ pub const Builder = struct {
                                                 },
                                                 .type = .u32,
                                             },
+                                            .name = try unit.processIdentifier(context, "slice_end_gep"),
                                         },
                                     });
                                     try builder.appendInstruction(unit, context, gep);
@@ -9614,6 +9687,7 @@ pub const Builder = struct {
                                 .is_struct = false,
                                 .base_type = slice.child_type,
                                 .index = range_start,
+                                .name = try unit.processIdentifier(context, "slice_pointer_gep"),
                             },
                         });
                         try builder.appendInstruction(unit, context, pointer_gep);
@@ -9667,6 +9741,7 @@ pub const Builder = struct {
                                     .is_struct = false,
                                     .base_type = pointer.type,
                                     .index = range_start,
+                                    .name = try unit.processIdentifier(context, "pointer_many_slice"),
                                 },
                             });
                             try builder.appendInstruction(unit, context, pointer_gep);
@@ -9736,6 +9811,7 @@ pub const Builder = struct {
                                         .base_type = array.type,
                                         .is_struct = false,
                                         .index = range_start,
+                                        .name = try unit.processIdentifier(context, "array_slice"),
                                     },
                                 });
                                 try builder.appendInstruction(unit, context, pointer_gep);
@@ -9813,6 +9889,7 @@ pub const Builder = struct {
                                             .base_type = child_pointer.type,
                                             .is_struct = false,
                                             .index = range_start,
+                                            .name = try unit.processIdentifier(context, "double_many_pointer_slice"),
                                         },
                                     });
                                     try builder.appendInstruction(unit, context, pointer_gep);
@@ -9889,6 +9966,7 @@ pub const Builder = struct {
                                                 .base_type = array.type,
                                                 .is_struct = false,
                                                 .index = range_start,
+                                                .name = try unit.processIdentifier(context, "double_array_slice"),
                                             },
                                         });
                                         try builder.appendInstruction(unit, context, pointer_gep);
@@ -9980,6 +10058,7 @@ pub const Builder = struct {
                                         .base_type = slice.child_type,
                                         .is_struct = false,
                                         .index = range_start,
+                                        .name = try unit.processIdentifier(context, "slice_ptr_gep"),
                                     },
                                 });
                                 try builder.appendInstruction(unit, context, pointer_gep);
@@ -10495,76 +10574,26 @@ pub const Builder = struct {
                 assert(node.right != .null);
 
                 const array_like_expression = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
-                const index = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .usize }, node.right, .right);
+                const original_index_value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.right, .right);
+                const index = switch (original_index_value.type) {
+                    .comptime_int => V{
+                        .value = .{
+                            .@"comptime" = .{
+                                .constant_int = .{
+                                    .value = original_index_value.value.@"comptime".comptime_int.value,
+                                },
+                            },
+                        },
+                        .type = .usize,
+                    },
+                    else => original_index_value,
+                };
 
                 const gep: V = switch (unit.types.get(array_like_expression.type).*) {
                     .pointer => |pointer| switch (pointer.many) {
                         true => unreachable,
                         false => switch (unit.types.get(pointer.type).*) {
-                            .slice => |slice| b: {
-                                const gep = try unit.instructions.append(context.my_allocator, .{
-                                    .get_element_pointer = .{
-                                        .pointer = array_like_expression.value.runtime,
-                                        .base_type = pointer.type,
-                                        .is_struct = true,
-                                        .index = .{
-                                            .value = .{
-                                                .@"comptime" = .{
-                                                    .constant_int = .{
-                                                        .value = 0,
-                                                    },
-                                                },
-                                            },
-                                            .type = .u32,
-                                        },
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, gep);
-
-                                const pointer_to_slice_pointer = try unit.getPointerType(context, .{
-                                    .type = slice.child_pointer_type,
-                                    .mutability = pointer.mutability,
-                                    .termination = .none,
-                                    .many = false,
-                                    .nullable = false,
-                                });
-
-                                const pointer_load = try unit.instructions.append(context.my_allocator, .{
-                                    .load = .{
-                                        .value = .{
-                                            .value = .{
-                                                .runtime = gep,
-                                            },
-                                            .type = pointer_to_slice_pointer,
-                                        },
-                                        .type = slice.child_pointer_type,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, pointer_load);
-
-                                const slice_pointer_gep = try unit.instructions.append(context.my_allocator, .{
-                                    .get_element_pointer = .{
-                                        .pointer = pointer_load,
-                                        .base_type = slice.child_type,
-                                        .is_struct = false,
-                                        .index = index,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, slice_pointer_gep);
-
-                                break :b .{
-                                    .value = .{
-                                        .runtime = slice_pointer_gep,
-                                    },
-                                    .type = try unit.getPointerType(context, .{
-                                        .type = slice.child_type,
-                                        .mutability = slice.mutability,
-                                        .many = false,
-                                        .nullable = false,
-                                        .termination = .none,
-                                    }),
-                                };
-                            },
+                            .slice => |slice| try builder.build_slice_indexed_access(unit, context, array_like_expression, pointer.type, slice.child_pointer_type, slice.child_type, slice.mutability, .{ .pointer = 0, .length = 1 }, index),
                             .array => |array| b: {
                                 const gep = try unit.instructions.append(context.my_allocator, .{
                                     .get_element_pointer = .{
@@ -10572,6 +10601,7 @@ pub const Builder = struct {
                                         .base_type = array.type,
                                         .is_struct = false,
                                         .index = index,
+                                        .name = try unit.processIdentifier(context, "indexed_array_gep"),
                                     },
                                 });
                                 try builder.appendInstruction(unit, context, gep);
@@ -10606,6 +10636,7 @@ pub const Builder = struct {
                                             .base_type = child_pointer.type,
                                             .is_struct = false,
                                             .index = index,
+                                            .name = try unit.processIdentifier(context, "indexed_many_pointer"),
                                         },
                                     });
                                     try builder.appendInstruction(unit, context, gep);
@@ -10641,6 +10672,7 @@ pub const Builder = struct {
                                                 .base_type = array.type,
                                                 .is_struct = false,
                                                 .index = index,
+                                                .name = try unit.processIdentifier(context, "indexed_pointer_array"),
                                             },
                                         });
                                         try builder.appendInstruction(unit, context, gep);
@@ -10678,6 +10710,7 @@ pub const Builder = struct {
                                                     .base_type = child_pointer.type,
                                                     .is_struct = false,
                                                     .index = index,
+                                                    .name = try unit.processIdentifier(context, "many_pointer_integer"),
                                                 },
                                             });
                                             try builder.appendInstruction(unit, context, gep);
@@ -10696,6 +10729,36 @@ pub const Builder = struct {
                                                 },
                                                 .type = gep_type,
                                             };
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    },
+                                    .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
+                                        .@"struct" => |*struct_type| b: {
+                                            if (struct_type.options.sliceable) |sliceable| {
+                                                const load = try unit.instructions.append(context.my_allocator, .{
+                                                    .load = .{
+                                                        .value = array_like_expression,
+                                                        .type = pointer.type,
+                                                    },
+                                                });
+                                                try builder.appendInstruction(unit, context, load);
+
+                                                const pointer_field_index = struct_type.fields.slice()[sliceable.pointer];
+                                                const pointer_field = unit.struct_fields.get(pointer_field_index);
+                                                const pointer_type = unit.types.get(pointer_field.type).pointer;
+                                                const child_type_index = pointer_type.type;
+
+                                                const load_value = V{
+                                                    .value = .{
+                                                        .runtime = load,
+                                                    },
+                                                    .type = pointer.type,
+                                                };
+                                                const v = try builder.build_slice_indexed_access(unit, context, load_value, child_pointer.type, pointer_field.type, child_type_index, pointer_type.mutability, sliceable, index);
+                                                break :b v;
+                                            } else {
+                                                unreachable;
+                                            }
                                         },
                                         else => |t| @panic(@tagName(t)),
                                     },
@@ -11017,6 +11080,7 @@ pub const Builder = struct {
                                                             },
                                                             .type = .u32,
                                                         },
+                                                        .name = try unit.processIdentifier(context, "union_for_error_gep"),
                                                     },
                                                 });
                                                 try builder.appendInstruction(unit, context, union_for_error_gep);
@@ -11234,6 +11298,7 @@ pub const Builder = struct {
                                                             },
                                                             .type = .u32,
                                                         },
+                                                        .name = try unit.processIdentifier(context, "union_for_error_gep"),
                                                     },
                                                 });
                                                 try builder.appendInstruction(unit, context, union_for_error_gep);
@@ -11788,6 +11853,7 @@ pub const Builder = struct {
                                                                         },
                                                                         .type = .u32,
                                                                     },
+                                                                    .name = field.name,
                                                                 },
                                                             });
                                                             try builder.appendInstruction(unit, context, gep);
@@ -11927,6 +11993,7 @@ pub const Builder = struct {
                                                                             },
                                                                             .type = .u32,
                                                                         },
+                                                                        .name = field.name,
                                                                     },
                                                                 });
                                                                 try builder.appendInstruction(unit, context, gep);
@@ -12337,6 +12404,7 @@ pub const Builder = struct {
                                     },
                                     .type = .u32,
                                 },
+                                .name = try unit.processIdentifier(context, "direct_pair_gep0"),
                             },
                         });
                         try builder.appendInstruction(unit, context, gep0);
@@ -12375,6 +12443,7 @@ pub const Builder = struct {
                                     },
                                     .type = .u32,
                                 },
+                                .name = try unit.processIdentifier(context, "direct_pair_gep1"),
                             },
                         });
                         try builder.appendInstruction(unit, context, gep1);
@@ -12942,6 +13011,7 @@ pub const Builder = struct {
                                         },
                                         .type = .u32,
                                     },
+                                    .name = try unit.processIdentifier(context, "slice_for_payload"),
                                 },
                             });
                             try builder.appendInstruction(unit, context, gep);
@@ -13133,14 +13203,6 @@ pub const Builder = struct {
                         },
                         else => |t| @panic(@tagName(t)),
                     }
-
-                    // const catch_alloca = try builder.c
-                    // // const catch_alloca = try builder.createStackVariable(unit, context, catch_alloca);
-                    // //     .stack_slot = .{
-                    // //         .type = expression.type,
-                    // //     },;
-                    // // });
-                    // try builder.appendInstruction(unit, context, catch_alloca);
 
                     const catch_type_expect = Type.Expect{ .type = error_union.type };
                     const is_error = try unit.instructions.append(context.my_allocator, .{
@@ -13791,7 +13853,7 @@ pub const Builder = struct {
                     .pointer => |pointer| switch (unit.types.get(pointer.type).*) {
                         .array => |array| {
                             assert(side == .right);
-                            assert(byte_equal(identifier, "len"));
+                            assert(byte_equal(identifier, length_field_name));
                             break :b switch (type_expect) {
                                 .type => |type_index| V{
                                     .value = .{
@@ -13818,13 +13880,12 @@ pub const Builder = struct {
                             };
                         },
                         .slice => |slice| {
-                            const slice_field: enum {
-                                ptr,
-                                len,
-                            } = if (byte_equal("ptr", identifier)) .ptr else if (byte_equal("len", identifier)) .len else unreachable;
+                            const slice_field: SliceField = inline for (@typeInfo(SliceField).Enum.fields) |field| {
+                                if (byte_equal(field.name, identifier)) break @enumFromInt(field.value);
+                            } else unreachable;
                             const field_type = switch (slice_field) {
-                                .ptr => slice.child_pointer_type,
-                                .len => Type.Index.usize,
+                                .pointer => slice.child_pointer_type,
+                                .length => Type.Index.usize,
                             };
                             const field_index = @intFromEnum(slice_field);
 
@@ -13843,6 +13904,10 @@ pub const Builder = struct {
                                         },
                                         .type = .u32,
                                     },
+                                    .name = try unit.processIdentifier(context, switch (slice_field) {
+                                        .pointer => "slice_pointer",
+                                        .length => "slice_length",
+                                    }),
                                 },
                             });
                             try builder.appendInstruction(unit, context, gep);
@@ -13882,7 +13947,7 @@ pub const Builder = struct {
                         },
                         .pointer => |child_pointer| switch (unit.types.get(child_pointer.type).*) {
                             .array => |array| {
-                                assert(byte_equal(identifier, "len"));
+                                assert(byte_equal(identifier, length_field_name));
 
                                 break :b switch (type_expect) {
                                     .type => |type_index| V{
@@ -13929,6 +13994,7 @@ pub const Builder = struct {
                                                         },
                                                         .type = .u32,
                                                     },
+                                                    .name = field.name,
                                                 },
                                             });
                                             try builder.appendInstruction(unit, context, gep);
@@ -14000,6 +14066,7 @@ pub const Builder = struct {
                                                     },
                                                     .type = .u32,
                                                 },
+                                                .name = field.name,
                                             },
                                         });
                                         try builder.appendInstruction(unit, context, gep);
@@ -14830,6 +14897,73 @@ pub const Builder = struct {
 
         test_functions_global.initial_value = .{
             .constant_slice = constant_slice,
+        };
+    }
+
+    fn build_slice_indexed_access(builder: *Builder, unit: *Unit, context: *const Context, array_like_expression: V, sliceable_type_index: Type.Index, sliceable_pointer_type_index: Type.Index, sliceable_child_type_index: Type.Index, mutability: Mutability, sliceable: Struct.Sliceable, index: V) !V {
+        const gep = try unit.instructions.append(context.my_allocator, .{
+            .get_element_pointer = .{
+                .pointer = array_like_expression.value.runtime,
+                .base_type = sliceable_type_index,
+                .is_struct = true,
+                .index = .{
+                    .value = .{
+                        .@"comptime" = .{
+                            .constant_int = .{
+                                .value = sliceable.pointer,
+                            },
+                        },
+                    },
+                    .type = .u32,
+                },
+                .name = try unit.processIdentifier(context, "slice_pointer_access"),
+            },
+        });
+        try builder.appendInstruction(unit, context, gep);
+
+        const pointer_to_slice_pointer = try unit.getPointerType(context, .{
+            .type = sliceable_pointer_type_index,
+            .mutability = mutability,
+            .termination = .none,
+            .many = false,
+            .nullable = false,
+        });
+
+        const pointer_load = try unit.instructions.append(context.my_allocator, .{
+            .load = .{
+                .value = .{
+                    .value = .{
+                        .runtime = gep,
+                    },
+                    .type = pointer_to_slice_pointer,
+                },
+                .type = sliceable_pointer_type_index,
+            },
+        });
+        try builder.appendInstruction(unit, context, pointer_load);
+
+        const slice_pointer_gep = try unit.instructions.append(context.my_allocator, .{
+            .get_element_pointer = .{
+                .pointer = pointer_load,
+                .base_type = sliceable_child_type_index,
+                .is_struct = false,
+                .index = index,
+                .name = try unit.processIdentifier(context, "indexed_slice_gep"),
+            },
+        });
+        try builder.appendInstruction(unit, context, slice_pointer_gep);
+
+        return .{
+            .value = .{
+                .runtime = slice_pointer_gep,
+            },
+            .type = try unit.getPointerType(context, .{
+                .type = sliceable_child_type_index,
+                .mutability = mutability,
+                .many = false,
+                .nullable = false,
+                .termination = .none,
+            }),
         };
     }
 };

@@ -1,0 +1,30 @@
+const std = #import("std");
+const expect = std.testing.expect;
+const assert = std.assert;
+
+const Foo = struct(.{ .sliceable = true }) {
+    pointer: [&]u8, 
+    length: u32,
+    capacity: u32,
+
+    const add = fn (foo: &Foo, item: u8) void {
+        const index = foo.length;
+        assert(index < foo.capacity);
+        foo.length += 1;
+        foo[index] = item;
+    }
+};
+
+const main = fn () *!void {
+    var foo = [1]u8{0}; 
+    var s = Foo{
+        .pointer = foo.&,
+        .length = 0,
+        .capacity = 1,
+    };
+
+    s.add(5);
+
+    try expect(s.length == 1);
+    try expect(foo[0] == 5);
+}

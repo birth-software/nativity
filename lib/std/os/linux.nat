@@ -873,12 +873,12 @@ const mmap = fn(address: ?[&]u8, length: usize, protection_flags: ProtectionFlag
 }
 
 const munmap = fn(bytes: []const u8) usize {
-    const result = #syscall(#cast(Syscall.munmap), #cast(bytes.ptr), bytes.len);
+    const result = #syscall(#cast(Syscall.munmap), #cast(bytes.pointer), bytes.length);
     return result;
 }
 
 const readlink = fn(file_path: [&:0]const u8, bytes: []u8) usize {
-    const result = #syscall(#cast(Syscall.readlink), #cast(file_path), #cast(bytes.ptr), bytes.len);
+    const result = #syscall(#cast(Syscall.readlink), #cast(file_path), #cast(bytes.pointer), bytes.length);
     return result;
 }
 
@@ -913,12 +913,12 @@ const openat = fn(directory_file_descriptor: FileDescriptor, path: [&:0]const u8
 }
 
 const read = fn(file_descriptor: FileDescriptor, bytes: []u8) usize {
-    const result = #syscall(#cast(Syscall.read), #cast(file_descriptor), #cast(bytes.ptr), bytes.len);
+    const result = #syscall(#cast(Syscall.read), #cast(file_descriptor), #cast(bytes.pointer), bytes.length);
     return result;
 }
 
 const write = fn(file_descriptor: FileDescriptor, bytes: []const u8) usize {
-    const result = #syscall(#cast(Syscall.write), #cast(file_descriptor), #cast(bytes.ptr), bytes.len);
+    const result = #syscall(#cast(Syscall.write), #cast(file_descriptor), #cast(bytes.pointer), bytes.length);
     return result;
 }
 

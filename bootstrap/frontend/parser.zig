@@ -1606,7 +1606,10 @@ const Analyzer = struct {
                             });
 
                             try list.append(analyzer.my_allocator, field_initialization);
-                            _ = try analyzer.expectToken(.operator_comma);
+                            switch (analyzer.peekToken()) {
+                                .operator_comma => analyzer.consumeToken(),
+                                else => {},
+                            }
 
                             break :blk .container_field_names;
                         },
@@ -1708,11 +1711,21 @@ const Analyzer = struct {
             else => unreachable,
         };
 
-        const type_node = if (analyzer.hasTokens() and analyzer.peekToken() == .operator_left_parenthesis) b: {
+        const parameters_node = if (analyzer.hasTokens() and analyzer.peekToken() == .operator_left_parenthesis) b: {
             analyzer.consumeToken();
-            const result = try analyzer.typeExpression();
-            _ = try analyzer.expectToken(.operator_right_parenthesis);
-            break :b result;
+            var list = UnpinnedArray(Node.Index){};
+            while (analyzer.peekToken() != .operator_right_parenthesis) {
+                const parameter_node = try analyzer.expression();
+                try list.append(analyzer.my_allocator, parameter_node);
+                switch (analyzer.peekToken()) {
+                    .operator_comma => analyzer.consumeToken(),
+                    else => {},
+                }
+            }
+
+            analyzer.consumeToken();
+
+            break :b try analyzer.nodeList(list);
         } else Node.Index.null;
 
         if (maybe_token_id) |_| _ = try analyzer.expectToken(.operator_left_brace);
@@ -1819,7 +1832,7 @@ const Analyzer = struct {
             .id = node_id,
             .token = token_i,
             .left = try analyzer.nodeList(node_list),
-            .right = type_node,
+            .right = parameters_node,
         });
     }
 

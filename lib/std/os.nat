@@ -44,10 +44,10 @@ const FileDescriptor = struct{
     };
 
     const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ReadError!usize {
-        if (bytes.len > 0) {
+        if (bytes.length > 0) {
             switch (current) {
                 .linux => {
-                    const len: usize = #min(max_file_operation_byte_count, bytes.len);
+                    const len: usize = #min(max_file_operation_byte_count, bytes.length);
                     const syscall_result = system.read(file_descriptor, bytes);
                     const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
                         else => unreachable,
@@ -55,7 +55,7 @@ const FileDescriptor = struct{
                     return byte_count;
                 },
                 .macos => {
-                    const len: usize = #min(max_file_operation_byte_count, bytes.len);
+                    const len: usize = #min(max_file_operation_byte_count, bytes.length);
                     const syscall_result = system.read(file_descriptor, bytes);
                     const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
                         else => unreachable,
@@ -76,16 +76,16 @@ const FileDescriptor = struct{
     const write = fn (file_descriptor: FileDescriptor, bytes: []const u8) WriteError!usize {
         switch (current) {
             .linux => {
-                const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                const syscall_result = system.write(file_descriptor.handle, bytes[0..len]);
+                const length: usize = #min(max_file_operation_byte_count, bytes.length);
+                const syscall_result = system.write(file_descriptor.handle, bytes[0..length]);
                 const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
                     else => return WriteError.write_failed,
                 };
                 return byte_count;
             },
             .macos => {
-                const len: usize = #min(max_file_operation_byte_count, bytes.len);
-                const syscall_result = system.write(file_descriptor.handle, bytes.ptr, bytes.len);
+                const length: usize = #min(max_file_operation_byte_count, bytes.length);
+                const syscall_result = system.write(file_descriptor.handle, bytes.pointer, length);
                 const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
                     else => return WriteError.write_failed,
                 };
@@ -170,7 +170,7 @@ const free_virtual_memory = fn(bytes: []const u8) FreeError!void {
             };
         },
         .macos => {
-            const syscall_result = system.munmap(bytes.ptr, bytes.len);
+            const syscall_result = system.munmap(bytes.pointer, bytes.length);
             _ = unwrap_syscall(syscall_result) catch |err| switch (err) {
                 else => unreachable,
             };
@@ -218,19 +218,19 @@ const current_executable_path = fn(buffer: [:0]u8) CurrentExecutablePath![]u8 {
         },
         .macos => {
             var symlink_path_buffer: [max_path_byte_count:0]u8 = undefined;
-            var symlink_path_len: u32 = symlink_path_buffer.len + 1;
+            var symlink_path_len: u32 = symlink_path_buffer.length + 1;
             const ns_result = c._NSGetExecutablePath(symlink_path_buffer.&, symlink_path_len.&);
             if (ns_result == 0) {
                 const symlink_path = symlink_path_buffer[0..symlink_path_len];
-                if (c.realpath(symlink_path.ptr, buffer.ptr)) |result| {
+                if (c.realpath(symlink_path.pointer, buffer.pointer)) |result| {
                     var i: usize = 0;
-                    while (i < buffer.len) {
+                    while (i < buffer.length) {
                         if (result[i] == 0) {
                             break;
                         }
                         i += 1;
                     }
-                    assert(i < buffer.len);
+                    assert(i < buffer.length);
 
                     const r: []u8 = result[0..i];
                     return r;
@@ -373,7 +373,7 @@ const PollFileDescriptor = system.PollFileDescriptor;
 const poll = fn(file_descriptors: []PollFileDescriptor, timeout: s32) ?usize {
     switch (current) {
         .linux => {
-            if (linux.unwrap_syscall(syscall_result = linux.poll(file_descriptors = file_descriptors.ptr, file_descriptor_count = file_descriptors.len, timeout = timeout))) |result| {
+            if (linux.unwrap_syscall(syscall_result = linux.poll(file_descriptors = file_descriptors.pointer, file_descriptor_count = file_descriptors.length, timeout = timeout))) |result| {
                 return result;
             } else {
                 return null;
