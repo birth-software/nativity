@@ -196,6 +196,7 @@ pub const Node = struct {
         payload,
         catch_payload,
         bitfield_type,
+        comptime_expression,
     };
 };
 
@@ -1210,6 +1211,7 @@ const Analyzer = struct {
     }
 
     fn primaryExpression(analyzer: *Analyzer) !Node.Index {
+        const token = analyzer.token_i;
         const result = switch (analyzer.peekToken()) {
             .identifier => switch (analyzer.peekTokenAhead(1)) {
                 // TODO: tags
@@ -1244,7 +1246,6 @@ const Analyzer = struct {
             .fixed_keyword_return => try analyzer.addNode(.{
                 .id = .@"return",
                 .token = blk: {
-                    const token = analyzer.token_i;
                     analyzer.consumeToken();
                     break :blk token;
                 },
@@ -1256,6 +1257,16 @@ const Analyzer = struct {
             .operator_left_brace => try analyzer.block(),
             .fixed_keyword_if => try analyzer.ifExpression(),
             .fixed_keyword_bitfield => try analyzer.processContainerType(.fixed_keyword_bitfield),
+            .operator_dollar => blk: {
+                analyzer.consumeToken();
+                const t = try analyzer.typeExpression();
+                break :blk try analyzer.addNode(.{
+                    .id = .comptime_expression,
+                    .token = token,
+                    .left = t,
+                    .right = .null,
+                });
+            },
             else => |id| @panic(@tagName(id)),
         };
 
@@ -1653,7 +1664,7 @@ const Analyzer = struct {
         const initialization: InitializationType = current_initialization orelse switch (type_node) {
             .null => .empty_literal,
             else => switch (analyzer.nodes.get(type_node).id) {
-                .identifier => .empty_container_literal_guess,
+                .identifier, .call => .empty_container_literal_guess,
                 .array_type => .empty_array_literal,
                 else => |t| @panic(@tagName(t)),
             },

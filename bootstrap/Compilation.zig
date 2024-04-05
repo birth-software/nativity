@@ -3222,6 +3222,7 @@ pub const Type = union(enum) {
     void,
     noreturn,
     type,
+    polymorphic: *Debug.Declaration.Global,
     @"struct": Struct.Index,
     function: Function.Prototype.Index,
     integer: Type.Integer,
@@ -3837,10 +3838,6 @@ pub const Struct = struct {
 
     pub const Kind = union(enum) {
         @"struct": Struct.Descriptor,
-        @"union": struct {
-            scope: Debug.Scope.Global,
-            fields: UnpinnedArray(Struct.Field.Index) = .{},
-        },
         error_union: struct {
             @"error": Type.Index,
             type: Type.Index,
@@ -3864,9 +3861,19 @@ pub const Struct = struct {
     };
     pub const Options = struct {
         sliceable: ?Sliceable = null,
+        polymorphism_kind: PolymorphismKind = .none,
         pub const Id = enum {
             sliceable,
         };
+    };
+
+    pub const PolymorphismKind = union(enum) {
+        none,
+        declaration: []const Type.Index,
+        implementation: struct {
+            types: []const Type.Index,
+            original: Type.Index,
+        },
     };
 
     pub const Sliceable = struct {
@@ -4509,7 +4516,7 @@ pub const Builder = struct {
                 // TODO: depends? .right is not always the right choice
                 const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_index, .right);
 
-                const cast_id: Instruction.Cast.Id = switch (type_expect) {
+                switch (type_expect) {
                     .type => |type_index| {
                         const cast_id = try builder.resolveCast(unit, context, type_index, v);
                         switch (cast_id) {
@@ -4534,9 +4541,7 @@ pub const Builder = struct {
                         }
                     },
                     else => |t| @panic(@tagName(t)),
-                };
-                _ = cast_id; // autofix
-
+                }
             },
             .size => {
                 assert(argument_node_list.len == 1);
@@ -6512,10 +6517,125 @@ pub const Builder = struct {
                     break :blk unit.all_errors;
                 }
             },
+            // This is a data structures with parameters
+            .call => b: {
+                const parameterized_type_index = try builder.resolveType(unit, context, node.left);
+                const parameter_nodes = unit.getNodeList(node.right);
+                var parameter_types = UnpinnedArray(Type.Index){};
+
+                for (parameter_nodes) |parameter_node_index| {
+                    const parameter_node = unit.getNode(parameter_node_index);
+                    switch (parameter_node.id) {
+                        .unsigned_integer_type => try parameter_types.append(context.my_allocator, try builder.resolveType(unit, context, parameter_node_index)),
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
+
+                const instantiated_type_index = try builder.instantiate_polymorphic_type(unit, context, parameterized_type_index, parameter_types.slice(), parameterized_type_index);
+                break :b instantiated_type_index;
+            },
             else => |t| @panic(@tagName(t)),
         };
 
         return result;
+    }
+
+    fn instantiate_polymorphic_type(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index, parameter_types: []const Type.Index, original_type_index: Type.Index) !Type.Index {
+        const parameterized_type = unit.types.get(type_index);
+        const original_type = unit.types.get(original_type_index);
+
+        switch (parameterized_type.*) {
+            .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
+                .@"struct" => |*struct_type| {
+                    switch (struct_type.options.polymorphism_kind) {
+                        .declaration => |declaration_types| {
+                            if (declaration_types.len != parameter_types.len) @panic("Argument count mismatch");
+
+                            // var s = struct_type.*;
+                            var fields = try UnpinnedArray(Struct.Field.Index).initialize_with_capacity(context.my_allocator, struct_type.fields.length);
+                            var is_polymorphic = false;
+                            for (struct_type.fields.slice()) |field_index| {
+                                const field = unit.struct_fields.get(field_index);
+                                const new_type_index = try builder.instantiate_polymorphic_type(unit, context, field.type, parameter_types, original_type_index);
+                                is_polymorphic = is_polymorphic or new_type_index == field.type;
+
+                                if (field.type != new_type_index) {
+                                    var f = field.*;
+                                    f.type = new_type_index;
+                                    const new_field_index = try unit.struct_fields.append(context.my_allocator, f);
+                                    fields.append_with_capacity(new_field_index);
+                                } else {
+                                    fields.append_with_capacity(field_index);
+                                }
+                            }
+
+                            if (is_polymorphic) {
+                                var s = struct_type.*;
+                                s.fields = fields;
+                                s.options.polymorphism_kind = .{
+                                    .implementation = .{
+                                        .types = parameter_types,
+                                        .original = type_index,
+                                    },
+                                };
+                                const si = try unit.structs.append(context.my_allocator, .{
+                                    .kind = .{
+                                        .@"struct" = s,
+                                    },
+                                });
+                                const sti = try unit.types.append(context.my_allocator, .{
+                                    .@"struct" = si,
+                                });
+                                return sti;
+                            } else {
+                                unreachable;
+                            }
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            .pointer => |pointer| {
+                const new_type_index = try builder.instantiate_polymorphic_type(unit, context, pointer.type, parameter_types, original_type_index);
+                if (new_type_index != pointer.type) {
+                    var p = pointer;
+                    p.type = new_type_index;
+                    return try unit.getPointerType(context, p);
+                } else {
+                    unreachable;
+                }
+            },
+            .polymorphic => |polymorphic_declaration| {
+                assert(polymorphic_declaration.initial_value.type == type_index);
+                const name_hash = polymorphic_declaration.declaration.name;
+                switch (original_type.*) {
+                    .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
+                        .@"struct" => |*struct_type| {
+                            switch (struct_type.options.polymorphism_kind) {
+                                .declaration => |declaration_types| {
+                                    for (declaration_types, parameter_types) |declaration_type_index, parameter_type_index| {
+                                        if (declaration_type_index == type_index) {
+                                            return parameter_type_index;
+                                        }
+                                    }
+
+                                    unreachable;
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                            unreachable;
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+                _ = name_hash; // autofix
+                unreachable;
+            },
+            .integer => return type_index,
+            else => |t| @panic(@tagName(t)),
+        }
     }
 
     fn get_builtin_declaration(builder: *Builder, unit: *Unit, context: *const Context, name: []const u8) !*Debug.Declaration.Global {
@@ -7502,11 +7622,39 @@ pub const Builder = struct {
             .@"struct" => b: {
                 assert(container_node.id == .struct_type);
 
-                var struct_options = Struct.Options{};
+                const struct_index = try unit.structs.append(context.my_allocator, .{
+                    .kind = .{
+                        .@"struct" = .{
+                            .scope = .{
+                                .scope = .{
+                                    .kind = switch (builder.current_scope.kind) {
+                                        .file => .file_container,
+                                        else => .container,
+                                    },
+                                    .line = token_debug_info.line,
+                                    .column = token_debug_info.column,
+                                    .level = builder.current_scope.level + 1,
+                                    .local = false,
+                                    .file = builder.current_file,
+                                },
+                            },
+                            .options = .{},
+                        },
+                    },
+                });
+
+                const type_index = try unit.types.append(context.my_allocator, .{
+                    .@"struct" = struct_index,
+                });
+
+                const struct_type = unit.structs.get(struct_index);
+                const struct_options = & struct_type.kind.@"struct".options;
 
                 if (container_node.right != .null) {
                     const struct_option_nodes = unit.getNodeList(container_node.right);
                     var struct_options_value = false;
+                    var parameter_types = UnpinnedArray(Type.Index){};
+
                     for (struct_option_nodes) |struct_option_node_index| {
                         const struct_option_node = unit.getNode(struct_option_node_index);
                         switch (struct_option_node.id) {
@@ -7538,36 +7686,47 @@ pub const Builder = struct {
                                     }
                                 }
                             },
+                            .comptime_expression => {
+                                assert(struct_option_node.left != .null);
+                                assert(struct_option_node.right == .null);
+                                const declaration_token_debug_info = builder.getTokenDebugInfo(unit, struct_option_node.token);
+                                const left = unit.getNode(struct_option_node.left);
+                                assert(left.id == .identifier);
+                                const identifier = unit.getExpectedTokenBytes(left.token, .identifier);
+                                const hash = try unit.processIdentifier(context, identifier);
+                                const polymorphic_type_index = try unit.types.append(context.my_allocator, .{
+                                    .polymorphic = undefined,
+                                });
+                                const global_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
+                                    .declaration = .{
+                                        .scope = &struct_type.kind.@"struct".scope.scope,
+                                        .name = hash,
+                                        .type = .type,
+                                        .line = declaration_token_debug_info.line,
+                                        .column = declaration_token_debug_info.column,
+                                        .mutability = .@"const",
+                                        .kind = .global,
+                                    },
+                                    .initial_value = .{
+                                        .type = polymorphic_type_index,
+                                    },
+                                    .type_node_index = .null,
+                                    .attributes = .{},
+                                });
+                                const global_declaration = unit.global_declarations.get(global_declaration_index);
+                                try struct_type.kind.@"struct".scope.scope.declarations.put_no_clobber(context.my_allocator, hash, &global_declaration.declaration);
+                                const polymorphic_type = unit.types.get(polymorphic_type_index);
+                                polymorphic_type.polymorphic = global_declaration;
+                                try parameter_types.append(context.my_allocator, polymorphic_type_index);
+                            },
                             else => |t| @panic(@tagName(t)),
                         }
                     }
+
+                    struct_type.kind.@"struct".options.polymorphism_kind = .{
+                        .declaration = parameter_types.slice(),
+                    };
                 }
-
-                const struct_index = try unit.structs.append(context.my_allocator, .{
-                    .kind = .{
-                        .@"struct" = .{
-                            .scope = .{
-                                .scope = .{
-                                    .kind = switch (builder.current_scope.kind) {
-                                        .file => .file_container,
-                                        else => .container,
-                                    },
-                                    .line = token_debug_info.line,
-                                    .column = token_debug_info.column,
-                                    .level = builder.current_scope.level + 1,
-                                    .local = false,
-                                    .file = builder.current_file,
-                                },
-                            },
-                            .options = struct_options,
-                        },
-                    },
-                });
-                const struct_type = unit.structs.get(struct_index);
-
-                const type_index = try unit.types.append(context.my_allocator, .{
-                    .@"struct" = struct_index,
-                });
 
                 // Save file type
                 switch (builder.current_scope.kind) {
@@ -8677,6 +8836,26 @@ pub const Builder = struct {
                                     .message = error_message,
                                     .node = node_index,
                                 });
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    },
+                    .cast => {
+                        assert(argument_node_list.len == 1);
+                        switch (type_expect) {
+                            .type => |type_index| {
+                                const value = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, argument_node_list[0], null, .right);
+                                const ty = unit.types.get(type_index);
+                                switch (ty.*) {
+                                    .pointer => |_| switch (value) {
+                                        .@"comptime_int" => |ct_int| switch (ct_int.value) {
+                                            0 => return .null_pointer,
+                                            else => unreachable,
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -10987,6 +11166,15 @@ pub const Builder = struct {
                     .bitfield_type => .bitfield,
                     else => unreachable,
                 }, unreachable),
+            },
+            .empty_container_literal_guess => {
+                assert(node.left != .null);
+                assert(node.right != .null);
+                const container_type = try builder.resolveType(unit, context, node.left);
+                const node_list = unit.getNodeList(node.right);
+                assert(node_list.len == 0);
+                const result = try builder.resolveContainerLiteral(unit, context, node_list, container_type);
+                return result;
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -15832,6 +16020,13 @@ pub const Unit = struct {
             return type_index;
         }
     }
+
+    fn getPolymorphicTypes(unit: *Unit, type_index: Type.Index) []const Type.Index {
+        const ty = unit.types.get(type_index);
+        return switch (ty.*) {
+            else => |t| @panic(@tagName(t)),
+        };
+    }
 };
 
 pub const FixedKeyword = enum {
@@ -15854,7 +16049,6 @@ pub const FixedKeyword = enum {
     @"else",
     @"struct",
     @"enum",
-    @"union",
     null,
     @"align",
     @"for",

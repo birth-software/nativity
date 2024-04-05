@@ -1,0 +1,6 @@
+const std = #import("std");
+const PinnedArray = std.data_structures.PinnedArray;
+
+const main = fn () *!void {
+    var pinned_array = PinnedArray(u32){};
+}
