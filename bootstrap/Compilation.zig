@@ -4069,6 +4069,7 @@ pub const Debug = struct {
 
         pub const Global = struct {
             scope: Scope,
+            type: Type.Index = .null,
         };
 
         pub const Function = struct {
@@ -4107,7 +4108,10 @@ pub const Debug = struct {
             compilation_unit,
             file,
             file_container,
-            container,
+            struct_type,
+            enum_type,
+            bitfield,
+            error_type,
             function, // Arguments
             block,
         };
@@ -4127,7 +4131,6 @@ pub const Debug = struct {
         lexer: lexer.Result = undefined,
         parser: parser.Result = undefined,
         // value: Value.Index = .null,
-        type: Type.Index = .null,
         scope: Scope.Global,
 
         pub const List = BlockList(@This(), enum {});
@@ -4428,7 +4431,7 @@ pub const Builder = struct {
                 return .{
                     .value = .{
                         .@"comptime" = .{
-                            .type = file.type,
+                            .type = file.scope.type,
                         },
                     },
                     .type = .type,
@@ -4910,7 +4913,7 @@ pub const Builder = struct {
         // File type already assigned
         _ = try builder.resolveContainerType(unit, context, main_node_index, .@"struct", null);
         file.status = .analyzed;
-        assert(file.type != .null);
+        assert(file.scope.type != .null);
     }
 
     const CastResult = enum {
@@ -5178,7 +5181,7 @@ pub const Builder = struct {
             try builder.analyzeFile(unit, context, file_index);
         }
 
-        assert(file.type != .null);
+        assert(file.scope.type != .null);
 
         return file_index;
     }
@@ -5503,7 +5506,7 @@ pub const Builder = struct {
             const v: V = switch (lookup.scope.kind) {
                 .file_container,
                 .file,
-                .container,
+                .struct_type,
                 => b: {
                     const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, global_attributes);
                     const pointer_to_global = try unit.getPointerType(context, .{
@@ -6356,6 +6359,7 @@ pub const Builder = struct {
                         .array_type,
                         .usize_type,
                         .pointer_type,
+                        .self,
                         => {
                             if (element_type_index != .null) {
                                 unreachable;
@@ -6503,7 +6507,7 @@ pub const Builder = struct {
                                             .file = builder.current_file,
                                             .line = token_debug_info.line,
                                             .column = token_debug_info.column,
-                                            .kind = .container,
+                                            .kind = .error_type,
                                             .local = false,
                                             .level = builder.current_scope.level + 1,
                                             .parent = &unit.scope.scope,
@@ -6533,6 +6537,19 @@ pub const Builder = struct {
 
                 const instantiated_type_index = try builder.instantiate_polymorphic_type(unit, context, parameterized_type_index, parameter_types.slice(), parameterized_type_index);
                 break :b instantiated_type_index;
+            },
+            .self => {
+                var scope = builder.current_scope;
+                while (true) {
+                    const global_scope: *Debug.Scope.Global = switch (scope.kind) {
+                        .struct_type => @fieldParentPtr("scope", scope),
+                        else => |t| @panic(@tagName(t)),
+                    };
+                    _ = &scope;
+                    const type_index = global_scope.type;
+                    assert(type_index != .null);
+                    return type_index;
+                }
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -6641,7 +6658,7 @@ pub const Builder = struct {
     fn get_builtin_declaration(builder: *Builder, unit: *Unit, context: *const Context, name: []const u8) !*Debug.Declaration.Global {
         const std_file_index = try builder.resolveImportStringLiteral(unit, context, Type.Expect{ .type = .type }, "std");
         const std_file = unit.files.get(std_file_index);
-        const std_file_struct_index = unit.types.get(std_file.type).@"struct";
+        const std_file_struct_index = unit.types.get(std_file.scope.type).@"struct";
         const std_file_struct = unit.structs.get(std_file_struct_index);
         const builtin_hash = try unit.processIdentifier(context, "builtin");
 
@@ -7629,7 +7646,7 @@ pub const Builder = struct {
                                 .scope = .{
                                     .kind = switch (builder.current_scope.kind) {
                                         .file => .file_container,
-                                        else => .container,
+                                        else => .struct_type,
                                     },
                                     .line = token_debug_info.line,
                                     .column = token_debug_info.column,
@@ -7728,19 +7745,16 @@ pub const Builder = struct {
                     };
                 }
 
-                // Save file type
+                // Assign the struct type to the upper file scope
                 switch (builder.current_scope.kind) {
                     .file => {
                         const global_scope: *Debug.Scope.Global = @fieldParentPtr("scope", builder.current_scope);
                         const file: *Debug.File = @fieldParentPtr("scope", global_scope);
-                        file.type = type_index;
-                        try unit.scope_container_map.put_no_clobber(context.my_allocator, &struct_type.kind.@"struct".scope.scope, type_index);
+                        file.scope.type = type_index;
                     },
                     .file_container => {},
                     else => |t| @panic(@tagName(t)),
                 }
-
-                try unit.struct_type_map.put_no_clobber(context.my_allocator, struct_index, type_index);
 
                 break :b .{
                     .scope = &struct_type.kind.@"struct".scope,
@@ -7778,7 +7792,7 @@ pub const Builder = struct {
                             .@"enum" = .{
                                 .scope = .{
                                     .scope = .{
-                                        .kind = .container,
+                                        .kind = .enum_type,
                                         .line = token_debug_info.line,
                                         .column = token_debug_info.column,
                                         .level = builder.current_scope.level + 1,
@@ -7814,6 +7828,7 @@ pub const Builder = struct {
                         };
                     },
                 };
+
                 const bitfield_type_index = try unit.types.append(context.my_allocator, .{
                     .integer = .{
                         .bit_count = integer.bit_count,
@@ -7822,10 +7837,7 @@ pub const Builder = struct {
                             .bitfield = .{
                                 .scope = .{
                                     .scope = .{
-                                        .kind = switch (builder.current_scope.kind) {
-                                            .file => .file_container,
-                                            else => .container,
-                                        },
+                                        .kind = .bitfield,
                                         .line = token_debug_info.line,
                                         .column = token_debug_info.column,
                                         .level = builder.current_scope.level + 1,
@@ -7847,6 +7859,8 @@ pub const Builder = struct {
 
         const scope = data.scope;
         const type_index = data.type;
+        scope.type = type_index;
+
         if (maybe_global) |global| {
             global.declaration.type = .type;
             global.initial_value = .{
@@ -8313,7 +8327,6 @@ pub const Builder = struct {
         const function = unit.function_definitions.get(builder.current_function);
 
         builder.last_check_point = .{};
-        assert(builder.current_scope.kind == .file_container or builder.current_scope.kind == .file or builder.current_scope.kind == .container);
         try builder.pushScope(unit, context, &function.scope.scope);
         defer builder.popScope(unit, context) catch unreachable;
 
@@ -8822,7 +8835,7 @@ pub const Builder = struct {
                         const file_index = try builder.resolveImport(unit, context, type_expect, argument_node_list);
                         const file = unit.files.get(file_index);
                         return .{
-                            .type = file.type,
+                            .type = file.scope.type,
                         };
                     },
                     .@"error" => {
@@ -9028,7 +9041,7 @@ pub const Builder = struct {
                                         .file = builder.current_file,
                                         .line = token_debug_info.line,
                                         .column = token_debug_info.column,
-                                        .kind = .container,
+                                        .kind = .error_type,
                                         .local = false,
                                         .level = builder.current_scope.level + 1,
                                         .parent = builder.current_scope,
@@ -15002,7 +15015,7 @@ pub const Builder = struct {
         const builtin_package = try unit.importPackage(context, unit.root_package.dependencies.get("builtin").?);
         const builtin_file_index = builtin_package.file.index;
         const builtin_file = unit.files.get(builtin_file_index);
-        const builtin_file_struct_index = unit.types.get(builtin_file.type).@"struct";
+        const builtin_file_struct_index = unit.types.get(builtin_file.scope.type).@"struct";
         const builtin_file_struct = unit.structs.get(builtin_file_struct_index);
         const test_functions_name = "test_functions";
         const test_functions_name_hash = try unit.processIdentifier(context, test_functions_name);
@@ -15218,7 +15231,6 @@ pub const Unit = struct {
     data_to_emit: UnpinnedArray(*Debug.Declaration.Global) = .{},
     external_functions: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
     type_declarations: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
-    struct_type_map: MyHashMap(Struct.Index, Type.Index) = .{},
     test_functions: MyHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global) = .{},
     scope: Debug.Scope.Global = .{
         .scope = .{
@@ -15230,7 +15242,6 @@ pub const Unit = struct {
             .local = false,
         },
     },
-    scope_container_map: MyHashMap(*Debug.Scope, Type.Index) = .{},
     root_package: *Package = undefined,
     main_package: ?*Package = null,
     all_errors: Type.Index = .null,
@@ -16062,6 +16073,7 @@ pub const FixedKeyword = enum {
     @"and",
     @"or",
     bitfield,
+    Self,
 };
 
 pub const Descriptor = struct {
@@ -16273,6 +16285,7 @@ pub const Token = struct {
         fixed_keyword_and,
         fixed_keyword_or,
         fixed_keyword_bitfield,
+        fixed_keyword_Self,
         unused1,
         unused2,
         unused3,

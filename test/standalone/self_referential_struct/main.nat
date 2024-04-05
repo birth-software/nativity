@@ -1,0 +1,11 @@
+const Struct = struct {
+    previous: ?&Struct,
+    next: ?&Self,
+};
+
+const main = fn () *!void {
+    var s = Struct{
+        .previous = null,
+        .next = null,
+    };
+}
