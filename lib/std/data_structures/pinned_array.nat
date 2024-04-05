@@ -1,0 +1,5 @@
+const PinnedArray = struct(.{ .sliceable = true }, $T) {
+    pointer: [&]T = #cast(0),
+    length: u32 = 0,
+    capacity: u32 = 0,
+};

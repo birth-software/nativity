@@ -5,16 +5,21 @@ comptime {
 test {
     _ = build;
     _ = builtin;
+    _ = data_structures;
     _ = os;
     _ = start;
 }
 
 const build = #import("build.nat");
 const builtin = #import("builtin.nat");
-const os = #import("os.nat");
-const c = #import("c.nat");
-const start = #import("start.nat");
 const testing = #import("testing.nat");
+
+const data_structures = #import("data_structures.nat");
+
+const c = #import("c.nat");
+const os = #import("os.nat");
+
+const start = #import("start.nat");
 
 const assert = fn(ok: bool) void {
     if (!ok) {
