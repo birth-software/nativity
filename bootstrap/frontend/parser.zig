@@ -197,6 +197,7 @@ pub const Node = struct {
         catch_payload,
         bitfield_type,
         comptime_expression,
+        self,
     };
 };
 
@@ -1873,6 +1874,15 @@ const Analyzer = struct {
         const token = analyzer.peekToken();
 
         return try switch (token) {
+            .fixed_keyword_Self => try analyzer.addNode(.{
+                .id = .self,
+                .token = b: {
+                    analyzer.consumeToken();
+                    break :b token_i;
+                },
+                .left = .null,
+                .right = .null,
+            }),
             .fixed_keyword_fn => blk: {
                 analyzer.consumeToken();
                 break :blk analyzer.functionPrototype();

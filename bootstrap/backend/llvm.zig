@@ -1952,8 +1952,8 @@ pub const LLVM = struct {
                     if (true) unreachable;
                     return scope;
                 } else {
-                    const sema_struct_type = unit.scope_container_map.get(sema_scope).?;
-                    const struct_type = try llvm.getDebugType(unit, context, sema_struct_type);
+                    const global_scope: *Compilation.Debug.Scope.Global = @fieldParentPtr("scope", sema_scope);
+                    const struct_type = try llvm.getDebugType(unit, context, global_scope.type);
                     return struct_type.toScope();
                 }
             },

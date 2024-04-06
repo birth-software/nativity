@@ -1,6 +1,16 @@
 const std = #import("std");
+const expect = std.testing.expect;
 const PinnedArray = std.data_structures.PinnedArray;
 
 const main = fn () *!void {
-    var pinned_array = PinnedArray(u32){};
+    var array = [1]u32{0};
+    var pinned_array = PinnedArray(u32){
+        .pointer = array.&,
+        .length = 0,
+        .capacity = 1,
+    };
+    //const n = 5;
+    //pinned_array.append_with_capacity(n);
+    //try expect(pinned_array.length == 1);
+    //try expect(pinned_array[0] == n);
 }
