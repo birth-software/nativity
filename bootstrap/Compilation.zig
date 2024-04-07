@@ -3222,13 +3222,94 @@ pub const Type = union(enum) {
     void,
     noreturn,
     type,
-    polymorphic: *Debug.Declaration.Global,
     @"struct": Struct.Index,
     function: Function.Prototype.Index,
     integer: Type.Integer,
     pointer: Type.Pointer,
     slice: Type.Slice,
     array: Type.Array,
+    polymorphic: Type.Polymorphic,
+
+    pub const Polymorphic = struct{
+        parameters: []const Token.Index,
+        instantiations: MyHashMap(u32, *Debug.Declaration.Global) = .{},
+        node: Node.Index,
+
+        pub fn get_instantiation(polymorphic: *Polymorphic, types: []const V.Comptime) ?*Debug.Declaration.Global {
+            const parameter_hash = hash(types);
+            const result = polymorphic.instantiations.get(parameter_hash);
+            return result;
+        }
+
+        pub fn add_instantiation(polymorphic: *Polymorphic, unit: *Unit, context: *const Context, types: []const V.Comptime, original_declaration: *Debug.Declaration.Global, type_index: Type.Index) !void {
+            var name = UnpinnedArray(u8){};
+            const original_name = unit.getIdentifier( original_declaration.declaration.name);
+            try name.append_slice(context.my_allocator, original_name);
+            try name.append(context.my_allocator, '(');
+
+            if (types.len > 0) {
+                for (types) |parameter| {
+                    switch (parameter) {
+                        .type => |parameter_type_index| if (unit.type_declarations.get(parameter_type_index)) |foo| {
+                            _ = foo; // autofix
+                            unreachable;
+                        } else switch (unit.types.get(parameter_type_index).*) {
+                            .integer => |integer| switch (integer.kind) {
+                                .materialized_int => {
+                                    const char: u8 = switch (integer.signedness) {
+                                        .signed => 's',
+                                        .unsigned => 'u',
+                                    };
+                                    try name.append(context.my_allocator, char);
+                                    var bit_buffer: [32]u8 = undefined;
+                                    const formatted_int = format_int(&bit_buffer, integer.bit_count, 10, false);
+                                    try name.append_slice(context.my_allocator, formatted_int);
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+
+                    try name.append(context.my_allocator, ',');
+                    try name.append(context.my_allocator, ' ');
+                }
+
+                name.length -= 2;
+                name.pointer[name.length] = ')';
+                name.length += 1;
+            }
+
+            const name_hash = try unit.processIdentifier(context, name.slice());
+
+            const new_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
+                .declaration = .{
+                    .scope = original_declaration.declaration.scope,
+                    .type = .type,
+                    .name = name_hash,
+                    .line = original_declaration.declaration.line,
+                    .column = original_declaration.declaration.column,
+                    .mutability = original_declaration.declaration.mutability,
+                    .kind = original_declaration.declaration.kind,
+                },
+                .initial_value = .{
+                    .type = type_index,
+                },
+                .type_node_index = original_declaration.type_node_index,
+                .attributes = original_declaration.attributes,
+            });
+            const new_declaration = unit.global_declarations.get(new_declaration_index);
+
+            const parameter_hash = hash(types);
+            try polymorphic.instantiations.put_no_clobber(context.my_allocator, parameter_hash, new_declaration);
+        }
+
+        fn hash(types: []const V.Comptime) u32 {
+            const result = data_structures.my_hash(std.mem.sliceAsBytes(types));
+            return result;
+        }
+    };
 
     pub fn getBitSize(ty: *Type, unit: *Unit) u32 {
         return getTypeBitSize(ty, unit);
@@ -3859,21 +3940,12 @@ pub const Struct = struct {
         fields: UnpinnedArray(Struct.Field.Index) = .{},
         options: Options,
     };
+
     pub const Options = struct {
         sliceable: ?Sliceable = null,
-        polymorphism_kind: PolymorphismKind = .none,
         pub const Id = enum {
             sliceable,
         };
-    };
-
-    pub const PolymorphismKind = union(enum) {
-        none,
-        declaration: []const Type.Index,
-        implementation: struct {
-            types: []const Type.Index,
-            original: Type.Index,
-        },
     };
 
     pub const Sliceable = struct {
@@ -4548,7 +4620,7 @@ pub const Builder = struct {
             },
             .size => {
                 assert(argument_node_list.len == 1);
-                const argument_type_index = try builder.resolveType(unit, context, argument_node_list[0]);
+                const argument_type_index = try builder.resolveType(unit, context, argument_node_list[0], &.{});
                 const argument_type = unit.types.get(argument_type_index);
                 const argument_size = argument_type.getByteSize(unit);
 
@@ -4667,7 +4739,7 @@ pub const Builder = struct {
             },
             .@"export" => {
                 assert(argument_node_list.len == 1);
-                const expression = try builder.resolveComptimeValue(unit, context, Type.Expect.none, Debug.Declaration.Global.Attributes.initMany(&.{.@"export"}), argument_node_list[0], null, .left);
+                const expression = try builder.resolveComptimeValue(unit, context, Type.Expect.none, Debug.Declaration.Global.Attributes.initMany(&.{.@"export"}), argument_node_list[0], null, .left, &.{});
                 switch (expression) {
                     .global => {},
                     else => |t| @panic(@tagName(t)),
@@ -4911,7 +4983,7 @@ pub const Builder = struct {
         const main_node_index = file.parser.main_node_index;
 
         // File type already assigned
-        _ = try builder.resolveContainerType(unit, context, main_node_index, .@"struct", null);
+        _ = try builder.resolveContainerType(unit, context, main_node_index, .@"struct", null, &.{});
         file.status = .analyzed;
         assert(file.scope.type != .null);
     }
@@ -5020,7 +5092,7 @@ pub const Builder = struct {
         };
     };
 
-    fn referenceGlobalDeclaration(builder: *Builder, unit: *Unit, context: *const Context, scope: *Debug.Scope, declaration: *Debug.Declaration, global_attribute_override: Debug.Declaration.Global.Attributes) !*Debug.Declaration.Global {
+    fn referenceGlobalDeclaration(builder: *Builder, unit: *Unit, context: *const Context, scope: *Debug.Scope, declaration: *Debug.Declaration, global_attribute_override: Debug.Declaration.Global.Attributes, new_parameters: []const V.Comptime) !*Debug.Declaration.Global {
         // TODO: implement this
         assert(declaration.kind == .global);
         const old_context = builder.startContextSwitch(.{
@@ -5028,6 +5100,7 @@ pub const Builder = struct {
             .file = scope.file,
             .basic_block = .null,
         });
+        defer builder.endContextSwitch(old_context);
 
         const global_declaration: *Debug.Declaration.Global = @fieldParentPtr("declaration", declaration);
         switch (global_declaration.initial_value) {
@@ -5036,7 +5109,7 @@ pub const Builder = struct {
                 switch (global_declaration.type_node_index) {
                     .null => {},
                     else => |type_node_index| {
-                        declaration.type = try builder.resolveType(unit, context, type_node_index);
+                        declaration.type = try builder.resolveType(unit, context, type_node_index, &.{});
                     },
                 }
 
@@ -5054,7 +5127,7 @@ pub const Builder = struct {
                     }
                 }
 
-                global_declaration.initial_value = try builder.resolveComptimeValue(unit, context, type_expect, global_declaration.attributes, declaration_node_index, global_declaration, .right);
+                global_declaration.initial_value = try builder.resolveComptimeValue(unit, context, type_expect, global_declaration.attributes, declaration_node_index, global_declaration, .right, new_parameters);
 
                 switch (declaration.type) {
                     .null => {
@@ -5094,9 +5167,15 @@ pub const Builder = struct {
                     },
                     .type => |type_index| {
                         assert(declaration.type == .type);
-                        unit.type_declarations.put(context.my_allocator, type_index, global_declaration) catch {
-                            assert(unit.type_declarations.get(type_index).? == global_declaration);
-                        };
+                        switch (unit.types.get(type_index).*) {
+                            .polymorphic => |*poly| if (new_parameters.len > 0) {
+                                const result = poly.get_instantiation(new_parameters) orelse unreachable;
+                                return result;
+                            },
+                            else => unit.type_declarations.put(context.my_allocator, type_index, global_declaration) catch {
+                                assert(unit.type_declarations.get(type_index).? == global_declaration);
+                            },
+                        }
                     },
                     else => {
                         if (global_declaration.attributes.contains(.@"export") or declaration.mutability == .@"var") {
@@ -5114,8 +5193,6 @@ pub const Builder = struct {
                 assert(global_declaration.attributes.contains(attribute));
             }
         }
-
-        builder.endContextSwitch(old_context);
 
         return global_declaration;
     }
@@ -5496,7 +5573,7 @@ pub const Builder = struct {
         right,
     };
 
-    fn resolveIdentifier(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, identifier: []const u8, global_attributes: Debug.Declaration.Global.Attributes, side: Side) !V {
+    fn resolveIdentifier(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, identifier: []const u8, global_attributes: Debug.Declaration.Global.Attributes, side: Side, new_parameters: []const V.Comptime) !V {
         const hash = try unit.processIdentifier(context, identifier);
 
         const look_in_parent_scopes = true;
@@ -5508,7 +5585,7 @@ pub const Builder = struct {
                 .file,
                 .struct_type,
                 => b: {
-                    const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, global_attributes);
+                    const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, global_attributes, new_parameters);
                     const pointer_to_global = try unit.getPointerType(context, .{
                         .type = global.declaration.type,
                         .termination = switch (type_expect) {
@@ -6291,7 +6368,7 @@ pub const Builder = struct {
         var termination = Type.Termination.none;
         const len_node = unit.getNode(attribute_node_list[0]);
         const len = switch (len_node.id) {
-            else => switch (try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .usize }, .{}, attribute_node_list[0], null, .right)) {
+            else => switch (try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .usize }, .{}, attribute_node_list[0], null, .right, &.{})) {
                 .comptime_int => |ct_int| ct_int.value,
                 .constant_int => |constant_int| constant_int.value,
                 else => |t| @panic(@tagName(t)),
@@ -6314,7 +6391,7 @@ pub const Builder = struct {
         }
 
         const element_type_index = @as(usize, 1) + @intFromBool(attribute_node_list.len == 3);
-        const element_type = try builder.resolveType(unit, context, attribute_node_list[element_type_index]);
+        const element_type = try builder.resolveType(unit, context, attribute_node_list[element_type_index], &.{});
         const array_type = try unit.getArrayType(context, .{
             .count = len,
             .type = element_type,
@@ -6323,7 +6400,7 @@ pub const Builder = struct {
         return array_type;
     }
 
-    fn resolveType(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) anyerror!Type.Index {
+    fn resolveType(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index, new_parameters: []const V.Comptime) anyerror!Type.Index {
         const node = unit.getNode(node_index);
 
         const result: Type.Index = switch (node.id) {
@@ -6331,7 +6408,7 @@ pub const Builder = struct {
             .usize_type => .usize,
             .void_type => .void,
             .identifier, .field_access => {
-                const resolved_type_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .type }, .{}, node_index, null, .right);
+                const resolved_type_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .type }, .{}, node_index, null, .right, new_parameters);
                 return resolved_type_value.type;
             },
             .bool_type => .bool,
@@ -6365,7 +6442,7 @@ pub const Builder = struct {
                                 unreachable;
                             }
 
-                            element_type_index = try builder.resolveType(unit, context, element_node_index);
+                            element_type_index = try builder.resolveType(unit, context, element_node_index, &.{});
                         },
                         .const_expression => mutability = .@"const",
                         .many_pointer_expression => many = true,
@@ -6418,7 +6495,7 @@ pub const Builder = struct {
                                 unreachable;
                             }
 
-                            element_type_index = try builder.resolveType(unit, context, element_node_index);
+                            element_type_index = try builder.resolveType(unit, context, element_node_index, &.{});
                         },
                         .const_expression => mutability = .@"const",
                         .zero_terminated => {
@@ -6454,7 +6531,7 @@ pub const Builder = struct {
             },
             .array_type => try builder.resolveArrayType(unit, context, node_index, null),
             .optional_type => blk: {
-                const element_type_index = try builder.resolveType(unit, context, node.left);
+                const element_type_index = try builder.resolveType(unit, context, node.left, &.{});
                 const element_type = unit.types.get(element_type_index);
                 const r = switch (element_type.*) {
                     .pointer => |pointer| b: {
@@ -6481,8 +6558,8 @@ pub const Builder = struct {
                 assert(node.left != .null);
                 assert(node.right != .null);
 
-                const err = try builder.resolveType(unit, context, node.left);
-                const ty = try builder.resolveType(unit, context, node.right);
+                const err = try builder.resolveType(unit, context, node.left, &.{});
+                const ty = try builder.resolveType(unit, context, node.right, &.{});
 
                 const error_union = try builder.getErrorUnionType(unit, context, .{
                     .@"error" = err,
@@ -6522,21 +6599,21 @@ pub const Builder = struct {
                 }
             },
             // This is a data structures with parameters
-            .call => b: {
-                const parameterized_type_index = try builder.resolveType(unit, context, node.left);
+            .call => {
+                // const parameterized_type_index = try builder.resolveType(unit, context, node.left);
                 const parameter_nodes = unit.getNodeList(node.right);
-                var parameter_types = UnpinnedArray(Type.Index){};
+                var parameters = UnpinnedArray(V.Comptime){};
 
                 for (parameter_nodes) |parameter_node_index| {
-                    const parameter_node = unit.getNode(parameter_node_index);
-                    switch (parameter_node.id) {
-                        .unsigned_integer_type => try parameter_types.append(context.my_allocator, try builder.resolveType(unit, context, parameter_node_index)),
-                        else => |t| @panic(@tagName(t)),
-                    }
+                    const parameter = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, parameter_node_index, null, .right, &.{});
+                    try parameters.append(context.my_allocator, parameter);
                 }
 
-                const instantiated_type_index = try builder.instantiate_polymorphic_type(unit, context, parameterized_type_index, parameter_types.slice(), parameterized_type_index);
-                break :b instantiated_type_index;
+                const instantiated_type = try builder.resolveType(unit, context, node.left, parameters.slice());
+                const instantiated_ty = unit.types.get(instantiated_type);
+                assert(instantiated_ty.* != .polymorphic);
+
+                return instantiated_type;
             },
             .self => {
                 var scope = builder.current_scope;
@@ -6557,104 +6634,6 @@ pub const Builder = struct {
         return result;
     }
 
-    fn instantiate_polymorphic_type(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index, parameter_types: []const Type.Index, original_type_index: Type.Index) !Type.Index {
-        const parameterized_type = unit.types.get(type_index);
-        const original_type = unit.types.get(original_type_index);
-
-        switch (parameterized_type.*) {
-            .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
-                .@"struct" => |*struct_type| {
-                    switch (struct_type.options.polymorphism_kind) {
-                        .declaration => |declaration_types| {
-                            if (declaration_types.len != parameter_types.len) @panic("Argument count mismatch");
-
-                            // var s = struct_type.*;
-                            var fields = try UnpinnedArray(Struct.Field.Index).initialize_with_capacity(context.my_allocator, struct_type.fields.length);
-                            var is_polymorphic = false;
-                            for (struct_type.fields.slice()) |field_index| {
-                                const field = unit.struct_fields.get(field_index);
-                                const new_type_index = try builder.instantiate_polymorphic_type(unit, context, field.type, parameter_types, original_type_index);
-                                is_polymorphic = is_polymorphic or new_type_index == field.type;
-
-                                if (field.type != new_type_index) {
-                                    var f = field.*;
-                                    f.type = new_type_index;
-                                    const new_field_index = try unit.struct_fields.append(context.my_allocator, f);
-                                    fields.append_with_capacity(new_field_index);
-                                } else {
-                                    fields.append_with_capacity(field_index);
-                                }
-                            }
-
-                            if (is_polymorphic) {
-                                var s = struct_type.*;
-                                s.fields = fields;
-                                s.options.polymorphism_kind = .{
-                                    .implementation = .{
-                                        .types = parameter_types,
-                                        .original = type_index,
-                                    },
-                                };
-                                const si = try unit.structs.append(context.my_allocator, .{
-                                    .kind = .{
-                                        .@"struct" = s,
-                                    },
-                                });
-                                const sti = try unit.types.append(context.my_allocator, .{
-                                    .@"struct" = si,
-                                });
-                                return sti;
-                            } else {
-                                unreachable;
-                            }
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
-                },
-                else => |t| @panic(@tagName(t)),
-            },
-            .pointer => |pointer| {
-                const new_type_index = try builder.instantiate_polymorphic_type(unit, context, pointer.type, parameter_types, original_type_index);
-                if (new_type_index != pointer.type) {
-                    var p = pointer;
-                    p.type = new_type_index;
-                    return try unit.getPointerType(context, p);
-                } else {
-                    unreachable;
-                }
-            },
-            .polymorphic => |polymorphic_declaration| {
-                assert(polymorphic_declaration.initial_value.type == type_index);
-                const name_hash = polymorphic_declaration.declaration.name;
-                switch (original_type.*) {
-                    .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
-                        .@"struct" => |*struct_type| {
-                            switch (struct_type.options.polymorphism_kind) {
-                                .declaration => |declaration_types| {
-                                    for (declaration_types, parameter_types) |declaration_type_index, parameter_type_index| {
-                                        if (declaration_type_index == type_index) {
-                                            return parameter_type_index;
-                                        }
-                                    }
-
-                                    unreachable;
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            }
-                            unreachable;
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
-                _ = name_hash; // autofix
-                unreachable;
-            },
-            .integer => return type_index,
-            else => |t| @panic(@tagName(t)),
-        }
-    }
-
     fn get_builtin_declaration(builder: *Builder, unit: *Unit, context: *const Context, name: []const u8) !*Debug.Declaration.Global {
         const std_file_index = try builder.resolveImportStringLiteral(unit, context, Type.Expect{ .type = .type }, "std");
         const std_file = unit.files.get(std_file_index);
@@ -6664,14 +6643,14 @@ pub const Builder = struct {
 
         const look_in_parent_scopes = false;
         if (std_file_struct.kind.@"struct".scope.scope.lookupDeclaration(builtin_hash, look_in_parent_scopes)) |lookup| {
-            const builtin_declaration = try builder.referenceGlobalDeclaration(unit, context, &std_file_struct.kind.@"struct".scope.scope, lookup.declaration, .{});
+            const builtin_declaration = try builder.referenceGlobalDeclaration(unit, context, &std_file_struct.kind.@"struct".scope.scope, lookup.declaration, .{}, &.{});
             switch (builtin_declaration.initial_value) {
                 .type => |builtin_type_index| {
                     const builtin_type_struct_index = unit.types.get(builtin_type_index).@"struct";
                     const builtin_type_struct = &unit.structs.get(builtin_type_struct_index).kind.@"struct";
                     const hash = try unit.processIdentifier(context, name);
                     if (builtin_type_struct.scope.scope.lookupDeclaration(hash, look_in_parent_scopes)) |declaration_lookup| {
-                        const declaration_global = try builder.referenceGlobalDeclaration(unit, context, declaration_lookup.scope, declaration_lookup.declaration, .{});
+                        const declaration_global = try builder.referenceGlobalDeclaration(unit, context, declaration_lookup.scope, declaration_lookup.declaration, .{}, &.{});
                         return declaration_global;
                     } else {
                         unreachable;
@@ -6709,7 +6688,7 @@ pub const Builder = struct {
                     }
 
                     assert(unit.cc_type != .null);
-                    const cc = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = unit.cc_type }, .{}, attribute_node.left, null, .right);
+                    const cc = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = unit.cc_type }, .{}, attribute_node.left, null, .right, &.{});
                     switch (cc) {
                         .enum_value => |enum_field_index| {
                             const enum_field = unit.enum_fields.get(enum_field_index);
@@ -6742,14 +6721,14 @@ pub const Builder = struct {
                 const argument_node = unit.getNode(argument_node_index);
                 assert(argument_node.id == .argument_declaration);
 
-                const argument_type_index = try builder.resolveType(unit, context, argument_node.left);
+                const argument_type_index = try builder.resolveType(unit, context, argument_node.left, &.{});
                 argument_types.append_with_capacity(argument_type_index);
             }
 
             function_prototype.argument_types = argument_types.slice();
         }
 
-        function_prototype.return_type = try builder.resolveType(unit, context, return_type_node_index);
+        function_prototype.return_type = try builder.resolveType(unit, context, return_type_node_index, &.{});
 
         try builder.resolveFunctionPrototypeAbi(unit, context, function_prototype);
 
@@ -7020,13 +6999,6 @@ pub const Builder = struct {
                     .direct_pair => |direct_pair| try unit.getTwoStruct(context, direct_pair),
                     .direct => function_prototype.return_type,
                     .indirect => |indirect| b: {
-                        // const pointer_type = try unit.getPointerType(context, .{
-                        //     .type = indirect.type,
-                        //     .termination = .none,
-                        //     .mutability = .@"var",
-                        //     .many = false,
-                        //     .nullable = false,
-                        // });
                         try abi_parameter_types.append(context.my_allocator, indirect.pointer);
                         break :b .void;
                     },
@@ -7039,19 +7011,10 @@ pub const Builder = struct {
                     switch (parameter_abi.kind) {
                         .direct => try abi_parameter_types.append(context.my_allocator, parameter_type_index),
                         .direct_coerce => |coerced_type| try abi_parameter_types.append(context.my_allocator, coerced_type),
+                        .indirect => |indirect| try abi_parameter_types.append(context.my_allocator, indirect.pointer),
                         .direct_pair => |direct_pair| {
                             try abi_parameter_types.append(context.my_allocator, direct_pair[0]);
                             try abi_parameter_types.append(context.my_allocator, direct_pair[1]);
-                        },
-                        .indirect => |indirect| {
-                            // const pointer_type = try unit.getPointerType(context, .{
-                            //     .type = indirect.type,
-                            //     .termination = .none,
-                            //     .mutability = .@"var",
-                            //     .many = false,
-                            //     .nullable = false,
-                            // });
-                            try abi_parameter_types.append(context.my_allocator, indirect.pointer);
                         },
                         else => |t| @panic(@tagName(t)),
                     }
@@ -7621,7 +7584,7 @@ pub const Builder = struct {
         }
     }
 
-    fn resolveContainerType(builder: *Builder, unit: *Unit, context: *const Context, container_node_index: Node.Index, container_type: ContainerType, maybe_global: ?*Debug.Declaration.Global) !Type.Index {
+    fn resolveContainerType(builder: *Builder, unit: *Unit, context: *const Context, container_node_index: Node.Index, container_type: ContainerType, maybe_global: ?*Debug.Declaration.Global, new_parameters: []const V.Comptime) !Type.Index {
         const current_basic_block = builder.current_basic_block;
         defer builder.current_basic_block = current_basic_block;
         builder.current_basic_block = .null;
@@ -7631,7 +7594,8 @@ pub const Builder = struct {
 
         const Data = struct {
             scope: *Debug.Scope.Global,
-            type: Type.Index,
+            plain: Type.Index,
+            polymorphic: Type.Index,
         };
 
         const token_debug_info = builder.getTokenDebugInfo(unit, container_node.token);
@@ -7660,17 +7624,15 @@ pub const Builder = struct {
                     },
                 });
 
-                const type_index = try unit.types.append(context.my_allocator, .{
-                    .@"struct" = struct_index,
-                });
-
                 const struct_type = unit.structs.get(struct_index);
                 const struct_options = & struct_type.kind.@"struct".options;
+
+                var parameter_types = UnpinnedArray(Token.Index){};
 
                 if (container_node.right != .null) {
                     const struct_option_nodes = unit.getNodeList(container_node.right);
                     var struct_options_value = false;
-                    var parameter_types = UnpinnedArray(Type.Index){};
+                    _ = &parameter_types;
 
                     for (struct_option_nodes) |struct_option_node_index| {
                         const struct_option_node = unit.getNode(struct_option_node_index);
@@ -7706,51 +7668,70 @@ pub const Builder = struct {
                             .comptime_expression => {
                                 assert(struct_option_node.left != .null);
                                 assert(struct_option_node.right == .null);
-                                const declaration_token_debug_info = builder.getTokenDebugInfo(unit, struct_option_node.token);
                                 const left = unit.getNode(struct_option_node.left);
                                 assert(left.id == .identifier);
-                                const identifier = unit.getExpectedTokenBytes(left.token, .identifier);
-                                const hash = try unit.processIdentifier(context, identifier);
-                                const polymorphic_type_index = try unit.types.append(context.my_allocator, .{
-                                    .polymorphic = undefined,
-                                });
-                                const global_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
-                                    .declaration = .{
-                                        .scope = &struct_type.kind.@"struct".scope.scope,
-                                        .name = hash,
-                                        .type = .type,
-                                        .line = declaration_token_debug_info.line,
-                                        .column = declaration_token_debug_info.column,
-                                        .mutability = .@"const",
-                                        .kind = .global,
-                                    },
-                                    .initial_value = .{
-                                        .type = polymorphic_type_index,
-                                    },
-                                    .type_node_index = .null,
-                                    .attributes = .{},
-                                });
-                                const global_declaration = unit.global_declarations.get(global_declaration_index);
-                                try struct_type.kind.@"struct".scope.scope.declarations.put_no_clobber(context.my_allocator, hash, &global_declaration.declaration);
-                                const polymorphic_type = unit.types.get(polymorphic_type_index);
-                                polymorphic_type.polymorphic = global_declaration;
-                                try parameter_types.append(context.my_allocator, polymorphic_type_index);
+                                try parameter_types.append(context.my_allocator, left.token);
                             },
                             else => |t| @panic(@tagName(t)),
                         }
                     }
-
-                    struct_type.kind.@"struct".options.polymorphism_kind = .{
-                        .declaration = parameter_types.slice(),
-                    };
                 }
+
+                const plain_type_index = try unit.types.append(context.my_allocator, .{
+                    .@"struct" = struct_index,
+                });
+
+                assert(new_parameters.len == parameter_types.length);
+
+                for (parameter_types.slice(), new_parameters) |parameter_type_token, parameter_value| {
+                    const parameter_type = switch (parameter_value) {
+                        .type => |type_index| type_index,
+                        else => |t| @panic(@tagName(t)),
+                    };
+                    const declaration_token_debug_info = builder.getTokenDebugInfo(unit, parameter_type_token);
+                    const identifier = unit.getExpectedTokenBytes(parameter_type_token, .identifier);
+                    const hash = try unit.processIdentifier(context, identifier);
+                    const global_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
+                        .declaration = .{
+                            .scope = &struct_type.kind.@"struct".scope.scope,
+                            .name = hash,
+                            .type = .type,
+                            .line = declaration_token_debug_info.line,
+                            .column = declaration_token_debug_info.column,
+                            .mutability = .@"const",
+                            .kind = .global,
+                        },
+                        .initial_value = .{
+                            .type = parameter_type,
+                        },
+                        .type_node_index = .null,
+                        .attributes = .{},
+                    });
+                    const global_declaration = unit.global_declarations.get(global_declaration_index);
+                    try struct_type.kind.@"struct".scope.scope.declarations.put_no_clobber(context.my_allocator, hash, &global_declaration.declaration);
+                }
+
+                const polymorphic_type_index = switch (parameter_types.length > 0) {
+                    true => blk: {
+                        const polymorphic_type_index = try unit.types.append(context.my_allocator, .{
+                            .polymorphic = .{
+                                .parameters = parameter_types.slice(),
+                                .node = container_node_index,
+                            },
+                        });
+                        const polymorphic_type = &unit.types.get(polymorphic_type_index).polymorphic;
+                        try polymorphic_type.add_instantiation(unit, context, new_parameters, maybe_global.?, plain_type_index);
+                        break :blk polymorphic_type_index;
+                    },
+                    false => .null,
+                };
 
                 // Assign the struct type to the upper file scope
                 switch (builder.current_scope.kind) {
                     .file => {
                         const global_scope: *Debug.Scope.Global = @fieldParentPtr("scope", builder.current_scope);
                         const file: *Debug.File = @fieldParentPtr("scope", global_scope);
-                        file.scope.type = type_index;
+                        file.scope.type = plain_type_index;
                     },
                     .file_container => {},
                     else => |t| @panic(@tagName(t)),
@@ -7758,7 +7739,8 @@ pub const Builder = struct {
 
                 break :b .{
                     .scope = &struct_type.kind.@"struct".scope,
-                    .type = type_index,
+                    .plain = plain_type_index,
+                    .polymorphic = polymorphic_type_index,
                 };
             },
             .@"enum" => b: {
@@ -7772,7 +7754,7 @@ pub const Builder = struct {
                     else => e: {
                         const node_list = unit.getNodeList(container_node.right);
                         assert(node_list.len == 1);
-                        const backing_type_index = try builder.resolveType(unit, context, node_list[0]);
+                        const backing_type_index = try builder.resolveType(unit, context, node_list[0], &.{});
                         const backing_type = unit.types.get(backing_type_index);
                         break :e switch (backing_type.*) {
                             .integer => |integer| switch (integer.kind) {
@@ -7807,7 +7789,8 @@ pub const Builder = struct {
                 const e_type = unit.types.get(type_index);
                 break :b .{
                     .scope = &e_type.integer.kind.@"enum".scope,
-                    .type = type_index,
+                    .plain = type_index,
+                    .polymorphic = .null,
                 };
             },
             .bitfield => b: {
@@ -7817,7 +7800,7 @@ pub const Builder = struct {
                     else => e: {
                         const argument_nodes = unit.getNodeList(container_node.right);
                         assert(argument_nodes.len == 1);
-                        const backing_type_index = try builder.resolveType(unit, context, argument_nodes[0]);
+                        const backing_type_index = try builder.resolveType(unit, context, argument_nodes[0], &.{});
                         const backing_type = unit.types.get(backing_type_index);
                         break :e switch (backing_type.*) {
                             .integer => |integer| switch (integer.kind) {
@@ -7851,22 +7834,23 @@ pub const Builder = struct {
                 });
 
                 break :b .{
-                    .type = bitfield_type_index,
+                    .plain = bitfield_type_index,
+                    .polymorphic = .null,
                     .scope = &unit.types.get(bitfield_type_index).integer.kind.bitfield.scope,
                 };
             },
         };
 
         const scope = data.scope;
-        const type_index = data.type;
-        scope.type = type_index;
+        scope.type = data.plain;
 
         if (maybe_global) |global| {
             global.declaration.type = .type;
             global.initial_value = .{
-                .type = type_index,
+                .type = if (data.polymorphic != .null) data.polymorphic else data.plain,
             };
         }
+
         try builder.pushScope(unit, context, &scope.scope);
         defer builder.popScope(unit, context) catch unreachable;
 
@@ -8008,7 +7992,7 @@ pub const Builder = struct {
         }
 
         if (count.fields > 0) {
-            const ty = unit.types.get(type_index);
+            const ty = unit.types.get(data.plain);
             const field_count = field_nodes.length;
             switch (container_type) {
                 .@"enum" => {
@@ -8053,7 +8037,7 @@ pub const Builder = struct {
                             else => b: {
                                 const enum_value = try builder.resolveComptimeValue(unit, context, Type.Expect{
                                     .type = integer_type,
-                                }, .{}, field_node.left, null, .right);
+                                }, .{}, field_node.left, null, .right, &.{});
                                 assert(enum_value.comptime_int.signedness == .unsigned);
                                 break :b enum_value.comptime_int.value;
                             },
@@ -8062,7 +8046,7 @@ pub const Builder = struct {
                         const enum_field_index = try unit.enum_fields.append(context.my_allocator, .{
                             .name = hash,
                             .value = enum_value,
-                            .parent = type_index,
+                            .parent = data.plain,
                         });
                         ty.integer.kind.@"enum".fields.append_with_capacity(enum_field_index);
                     },
@@ -8086,10 +8070,10 @@ pub const Builder = struct {
                                 }
                             }
                         }
-                        const field_type = try builder.resolveType(unit, context, field_node.left);
+                        const field_type = try builder.resolveType(unit, context, field_node.left, &.{});
                         const field_default_value: ?V.Comptime = switch (field_node.right) {
                             .null => null,
-                            else => |default_value_node_index| try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = field_type }, .{}, default_value_node_index, null, .right),
+                            else => |default_value_node_index| try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = field_type }, .{}, default_value_node_index, null, .right, &.{}),
                         };
 
                         const struct_field = try unit.struct_fields.append(context.my_allocator, .{
@@ -8104,10 +8088,10 @@ pub const Builder = struct {
                         const bitfield = &ty.integer.kind.bitfield;
                         const field_name = unit.getExpectedTokenBytes(field_node.token, .identifier);
                         const field_name_hash = try unit.processIdentifier(context, field_name);
-                        const field_type = try builder.resolveType(unit, context, field_node.left);
+                        const field_type = try builder.resolveType(unit, context, field_node.left, &.{});
                         const field_default_value: ?V.Comptime = switch (field_node.right) {
                             .null => null,
-                            else => |default_value_node_index| try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = field_type }, .{}, default_value_node_index, null, .right),
+                            else => |default_value_node_index| try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = field_type }, .{}, default_value_node_index, null, .right, &.{}),
                         };
 
                         const struct_field = try unit.struct_fields.append(context.my_allocator, .{
@@ -8233,12 +8217,12 @@ pub const Builder = struct {
                 const name = unit.getIdentifier(export_declaration.declaration.name);
                 _ = name;
                 //if (byte_equal(name, "nat_big_struct_both")) @breakpoint();
-                const result = try builder.referenceGlobalDeclaration(unit, context, &scope.scope, &export_declaration.declaration, .{});
+                const result = try builder.referenceGlobalDeclaration(unit, context, &scope.scope, &export_declaration.declaration, .{}, &.{});
                 assert(result == export_declaration);
             }
         }
 
-        return type_index;
+        return if (data.polymorphic != .null) data.polymorphic else data.plain;
     }
 
     fn emitMemcpy(builder: *Builder, unit: *Unit, context: *const Context, arguments: Instruction.Memcpy) !void {
@@ -8477,15 +8461,6 @@ pub const Builder = struct {
                         const high_offset: u32 = @intCast(data_structures.align_forward(sizes[0], alignments[1]));
                         assert(high_offset + sizes[1] <= argument_type.getAbiSize(unit));
                         const stack = try builder.createStackVariable(unit, context, argument_type_index, null);
-
-                        // const pointer_type = try unit.getPointerType(context, .{
-                        //     .type = argument_type_index,
-                        //     .termination = .none,
-                        //     .mutability = .@"var",
-                        //     .many = false,
-                        //     .nullable = false,
-                        // });
-                        // _ = pointer_type; // autofix
 
                         const pointer_types = [2]Type.Index{
                             try unit.getPointerType(context, .{
@@ -8823,7 +8798,7 @@ pub const Builder = struct {
     }
 
     /// Last value is used to cache types being analyzed so we dont hit stack overflow
-    fn resolveComptimeValue(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, global_attributes: Debug.Declaration.Global.Attributes, node_index: Node.Index, maybe_global: ?*Debug.Declaration.Global, side: Side) anyerror!V.Comptime {
+    fn resolveComptimeValue(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, global_attributes: Debug.Declaration.Global.Attributes, node_index: Node.Index, maybe_global: ?*Debug.Declaration.Global, side: Side, new_parameters: []const V.Comptime) anyerror!V.Comptime {
         const node = unit.getNode(node_index);
         switch (node.id) {
             .intrinsic => {
@@ -8857,7 +8832,7 @@ pub const Builder = struct {
                         assert(argument_node_list.len == 1);
                         switch (type_expect) {
                             .type => |type_index| {
-                                const value = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, argument_node_list[0], null, .right);
+                                const value = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, argument_node_list[0], null, .right, &.{});
                                 const ty = unit.types.get(type_index);
                                 switch (ty.*) {
                                     .pointer => |_| switch (value) {
@@ -8877,7 +8852,7 @@ pub const Builder = struct {
                 }
             },
             .field_access => {
-                const result = try builder.resolveFieldAccess(unit, context, type_expect, node_index, .right);
+                const result = try builder.resolveFieldAccess(unit, context, type_expect, node_index, .right, new_parameters);
                 return switch (result.value) {
                     .@"comptime" => |ct| ct,
                     else => @panic("Expected comptime value, found runtime value"),
@@ -8923,23 +8898,18 @@ pub const Builder = struct {
                     .struct_type => .@"struct",
                     .bitfield_type => .bitfield,
                     else => unreachable,
-                }, maybe_global);
+                }, maybe_global, new_parameters);
                 return .{
                     .type = type_index,
                 };
             },
+            .unsigned_integer_type => return .{
+                .type = try builder.resolveType(unit, context, node_index, new_parameters),
+            },
             .@"switch" => return try builder.resolveComptimeSwitch(unit, context, type_expect, global_attributes, node_index, maybe_global),
             .identifier => {
                 const identifier = unit.getExpectedTokenBytes(node.token, .identifier);
-                // const side: Side = switch (type_expect) {
-                //     .none => .left,
-                //     .type => |type_index| switch (unit.types.get(type_index).*) {
-                //         .type => .right,
-                //         else => |t| @panic(@tagName(t)),
-                //     },
-                //     else => unreachable,
-                // };
-                const resolved_value = try builder.resolveIdentifier(unit, context, type_expect, identifier, global_attributes, side);
+                const resolved_value = try builder.resolveIdentifier(unit, context, type_expect, identifier, global_attributes, side, new_parameters);
                 return switch (resolved_value.value) {
                     .@"comptime" => |ct| ct,
                     .runtime => return error.cannot_evaluate,
@@ -8952,17 +8922,10 @@ pub const Builder = struct {
                     .type = result,
                 };
             },
-            .compare_greater_equal => {
-                const left = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, node.left, null, .right);
-                const left_type = left.getType(unit);
-                const right = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = left_type }, .{}, node.right, null, .right);
-                _ = right; // autofix
-                unreachable;
-            },
             .add => {
-                const left = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, node.left, null, .right);
+                const left = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, node.left, null, .right, &.{});
                 const left_type = left.getType(unit);
-                const right = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = left_type }, .{}, node.right, null, .right);
+                const right = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = left_type }, .{}, node.right, null, .right, &.{});
                 switch (left) {
                     .comptime_int => |left_ct_int| {
                         assert(left_ct_int.signedness == .unsigned);
@@ -8988,7 +8951,7 @@ pub const Builder = struct {
             .empty_container_literal_guess => {
                 assert(node.left != .null);
                 assert(node.right != .null);
-                const container_type = try builder.resolveType(unit, context, node.left);
+                const container_type = try builder.resolveType(unit, context, node.left, &.{});
                 const node_list = unit.getNodeList(node.right);
                 assert(node_list.len == 0);
                 const result = try builder.resolveContainerLiteral(unit, context, node_list, container_type);
@@ -9159,7 +9122,7 @@ pub const Builder = struct {
         const v: V = switch (node.id) {
             .identifier => block: {
                 const identifier = unit.getExpectedTokenBytes(node.token, .identifier);
-                const result = try builder.resolveIdentifier(unit, context, type_expect, identifier, .{}, side);
+                const result = try builder.resolveIdentifier(unit, context, type_expect, identifier, .{}, side, &.{});
                 break :block result;
             },
             .intrinsic => try builder.resolveIntrinsic(unit, context, type_expect, node_index),
@@ -9579,7 +9542,7 @@ pub const Builder = struct {
                 }
             },
             .call => try builder.resolveCall(unit, context, node_index),
-            .field_access => try builder.resolveFieldAccess(unit, context, type_expect, node_index, side),
+            .field_access => try builder.resolveFieldAccess(unit, context, type_expect, node_index, side, &.{}),
             .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(node.token, .number_literal))) {
                 .int => |integer_value| switch (type_expect) {
                     .type => |type_index| switch (unit.types.get(type_index).*) {
@@ -9636,7 +9599,7 @@ pub const Builder = struct {
                 assert(node.left != .null);
                 assert(node.right != .null);
                 const initialization_nodes = unit.getNodeList(node.right);
-                const container_type_index = try builder.resolveType(unit, context, node.left);
+                const container_type_index = try builder.resolveType(unit, context, node.left, &.{});
 
                 const result = try builder.resolveContainerLiteral(unit, context, initialization_nodes, container_type_index);
                 break :block result;
@@ -11178,12 +11141,12 @@ pub const Builder = struct {
                     .struct_type => .@"struct",
                     .bitfield_type => .bitfield,
                     else => unreachable,
-                }, unreachable),
+                }, unreachable, &.{}),
             },
             .empty_container_literal_guess => {
                 assert(node.left != .null);
                 assert(node.right != .null);
-                const container_type = try builder.resolveType(unit, context, node.left);
+                const container_type = try builder.resolveType(unit, context, node.left, &.{});
                 const node_list = unit.getNodeList(node.right);
                 assert(node_list.len == 0);
                 const result = try builder.resolveContainerLiteral(unit, context, node_list, container_type);
@@ -11954,7 +11917,7 @@ pub const Builder = struct {
                             const look_in_parent_scopes = false;
 
                             if (container_scope.lookupDeclaration(right_identifier_hash, look_in_parent_scopes)) |lookup| {
-                                const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{});
+                                const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{}, &.{});
                                 switch (global.initial_value) {
                                     .function_definition, .function_declaration => {
                                         const value = V{
@@ -11986,7 +11949,7 @@ pub const Builder = struct {
                                         } else {
                                             const look_in_parent_scopes = false;
                                             if (struct_type.scope.scope.lookupDeclaration(right_identifier_hash, look_in_parent_scopes)) |lookup| {
-                                                const right_symbol = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{});
+                                                const right_symbol = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{}, &.{});
                                                 switch (right_symbol.initial_value) {
                                                     .function_definition => {
                                                         const function_type_index = right_symbol.declaration.type;
@@ -12094,7 +12057,7 @@ pub const Builder = struct {
                                         } else {
                                             const look_in_parent_scopes = false;
                                             if (struct_type.scope.scope.lookupDeclaration(right_identifier_hash, look_in_parent_scopes)) |lookup| {
-                                                const right_symbol = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{});
+                                                const right_symbol = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{}, &.{});
                                                 switch (right_symbol.initial_value) {
                                                     .function_definition => {
                                                         const function_type_index = right_symbol.declaration.type;
@@ -12254,7 +12217,7 @@ pub const Builder = struct {
             },
             .identifier => blk: {
                 const identifier = unit.getExpectedTokenBytes(left_node.token, .identifier);
-                const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, identifier, .{}, .left);
+                const result = try builder.resolveIdentifier(unit, context, Type.Expect.none, identifier, .{}, .left, &.{});
                 break :blk switch (result.value) {
                     .@"comptime" => |ct| switch (ct) {
                         .global => |global| switch (global.initial_value) {
@@ -12909,7 +12872,7 @@ pub const Builder = struct {
                             const type_node_index = metadata_node.left;
                             assert(metadata_node.right == .null);
                             const type_expect = Type.Expect{
-                                .type = try builder.resolveType(unit, context, type_node_index),
+                                .type = try builder.resolveType(unit, context, type_node_index, &.{}),
                             };
                             break :b type_expect;
                         },
@@ -13732,7 +13695,7 @@ pub const Builder = struct {
     fn resolveComptimeSwitch(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, global_attributes: Debug.Declaration.Global.Attributes, node_index: Node.Index, maybe_global: ?*Debug.Declaration.Global) !V.Comptime {
         const node = unit.getNode(node_index);
         assert(node.id == .@"switch");
-        const expression_to_switch_on = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, node.left, null, .right);
+        const expression_to_switch_on = try builder.resolveComptimeValue(unit, context, Type.Expect.none, .{}, node.left, null, .right, &.{});
         const case_nodes = unit.getNodeList(node.right);
         switch (expression_to_switch_on) {
             .enum_value => |enum_field_index| {
@@ -13750,7 +13713,7 @@ pub const Builder = struct {
                     };
                 } else typecheck_enum_result.else_switch_case_group_index orelse unreachable;
                 const true_switch_case_node = unit.getNode(case_nodes[group_index]);
-                return try builder.resolveComptimeValue(unit, context, type_expect, global_attributes, true_switch_case_node.right, maybe_global, .right);
+                return try builder.resolveComptimeValue(unit, context, type_expect, global_attributes, true_switch_case_node.right, maybe_global, .right, &.{});
             },
             .bool => |boolean| {
                 assert(case_nodes.len == 2);
@@ -13758,11 +13721,11 @@ pub const Builder = struct {
                     const case_node = unit.getNode(case_node_index);
                     assert(case_node.left != .null);
                     assert(case_node.right != .null);
-                    const boolean_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .bool }, .{}, case_node.left, null, .right);
+                    const boolean_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .bool }, .{}, case_node.left, null, .right, &.{});
                     switch (boolean_value) {
                         .bool => |case_boolean| {
                             if (case_boolean == boolean) {
-                                return try builder.resolveComptimeValue(unit, context, type_expect, global_attributes, case_node.right, maybe_global, .right);
+                                return try builder.resolveComptimeValue(unit, context, type_expect, global_attributes, case_node.right, maybe_global, .right, &.{});
                             }
                         },
                         else => |t| @panic(@tagName(t)),
@@ -13807,7 +13770,7 @@ pub const Builder = struct {
                         const case_node = unit.getNode(case_node_index);
                         assert(case_node.left != .null);
                         assert(case_node.right != .null);
-                        const boolean_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .bool }, .{}, case_node.left, null, .right);
+                        const boolean_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .bool }, .{}, case_node.left, null, .right, &.{});
                         switch (boolean_value) {
                             .bool => |case_boolean| {
                                 if (case_boolean == boolean) {
@@ -13866,12 +13829,12 @@ pub const Builder = struct {
                                                 const condition_nodes = unit.getNodeListFromNode(condition_node);
                                                 try conditions.ensure_capacity(context.my_allocator, @intCast(condition_nodes.len));
                                                 for (condition_nodes) |condition_node_index| {
-                                                    const condition = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null, .right);
+                                                    const condition = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null, .right, &.{});
                                                     conditions.append_with_capacity(condition);
                                                 }
                                             },
                                             else => {
-                                                const v = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, case_node.left, null, .right);
+                                                const v = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, case_node.left, null, .right, &.{});
                                                 try conditions.ensure_capacity(context.my_allocator, 1);
                                                 conditions.append_with_capacity(v);
                                             },
@@ -13927,7 +13890,7 @@ pub const Builder = struct {
         }
     }
 
-    fn resolveFieldAccess(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) !V {
+    fn resolveFieldAccess(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side, new_parameters: []const V.Comptime) !V {
         const node = unit.getNode(node_index);
         const right_node = unit.getNode(node.right);
         assert(right_node.id == .identifier);
@@ -13945,7 +13908,7 @@ pub const Builder = struct {
                     const look_in_parent_scopes = false;
 
                     const result: V = if (scope.lookupDeclaration(identifier_hash, look_in_parent_scopes)) |lookup| blk: {
-                        const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{});
+                        const global = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{}, new_parameters);
                         const pointer_type = try unit.getPointerType(context, .{
                             .type = global.declaration.type,
                             .termination = .none,
@@ -14739,11 +14702,6 @@ pub const Builder = struct {
         const function_definition = unit.function_definitions.get(builder.current_function);
         const function_prototype_index = unit.types.get(function_definition.type).function;
         const function_prototype = unit.function_prototypes.get(function_prototype_index);
-        // const LowerKind = union(enum){
-        //     direct,
-        //     direct_pair: [2]Type.Index,
-        // };
-        // _ = LowerKind; // autofix
         const abi_value = switch (function_prototype.abi.return_type_abi.kind) {
             .direct, .ignore => value,
             .direct_pair => |pair| b: {
@@ -16030,13 +15988,6 @@ pub const Unit = struct {
 
             return type_index;
         }
-    }
-
-    fn getPolymorphicTypes(unit: *Unit, type_index: Type.Index) []const Type.Index {
-        const ty = unit.types.get(type_index);
-        return switch (ty.*) {
-            else => |t| @panic(@tagName(t)),
-        };
     }
 };
 
