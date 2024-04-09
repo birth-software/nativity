@@ -475,7 +475,11 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
         } else {
             const debug_args = true;
             if (debug_args) {
-                const home_dir = std.posix.getenv("HOME") orelse unreachable;
+                const home_dir = switch (@import("builtin").os.tag) {
+                    .linux, .macos => std.posix.getenv("HOME") orelse unreachable,
+                    .windows => try std.process.getEnvVarOwned(context.allocator, "USERPROFILE"),
+                    else => @compileError("OS not supported"),
+                };
                 var list = UnpinnedArray(u8){};
                 for (arguments) |arg| {
                     try list.append_slice(context.my_allocator, arg);
@@ -572,6 +576,9 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                     .macos => {
                         try target_triple_buffer.append_slice(context.my_allocator, "macos-");
                     },
+                    .windows => {
+                        try target_triple_buffer.append_slice(context.my_allocator, "windows-");
+                    },
                     else => @compileError("OS not supported"),
                 }
 
@@ -647,6 +654,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                             },
                             else => unreachable, //@compileError("ABI not supported"),
                         },
+                        .windows => &.{},
                         else => @compileError("OS not supported"),
                     };
 
@@ -3230,7 +3238,7 @@ pub const Type = union(enum) {
     array: Type.Array,
     polymorphic: Type.Polymorphic,
 
-    pub const Polymorphic = struct{
+    pub const Polymorphic = struct {
         parameters: []const Token.Index,
         instantiations: MyHashMap(u32, *Debug.Declaration.Global) = .{},
         node: Node.Index,
@@ -3243,7 +3251,7 @@ pub const Type = union(enum) {
 
         pub fn add_instantiation(polymorphic: *Polymorphic, unit: *Unit, context: *const Context, types: []const V.Comptime, original_declaration: *Debug.Declaration.Global, type_index: Type.Index) !void {
             var name = UnpinnedArray(u8){};
-            const original_name = unit.getIdentifier( original_declaration.declaration.name);
+            const original_name = unit.getIdentifier(original_declaration.declaration.name);
             try name.append_slice(context.my_allocator, original_name);
             try name.append(context.my_allocator, '(');
 
@@ -7627,7 +7635,7 @@ pub const Builder = struct {
                 });
 
                 const struct_type = unit.structs.get(struct_index);
-                const struct_options = & struct_type.kind.@"struct".options;
+                const struct_options = &struct_type.kind.@"struct".options;
 
                 var parameter_types = UnpinnedArray(Token.Index){};
 
@@ -8838,7 +8846,7 @@ pub const Builder = struct {
                                 const ty = unit.types.get(type_index);
                                 switch (ty.*) {
                                     .pointer => |_| switch (value) {
-                                        .@"comptime_int" => |ct_int| switch (ct_int.value) {
+                                        .comptime_int => |ct_int| switch (ct_int.value) {
                                             0 => return .null_pointer,
                                             else => unreachable,
                                         },
@@ -12133,7 +12141,7 @@ pub const Builder = struct {
                                                     else => |t| @panic(@tagName(t)),
                                                 }
                                             } else {
-                                                const id = unit.getIdentifier( struct_type.scope.scope.declarations.key_pointer[0]);
+                                                const id = unit.getIdentifier(struct_type.scope.scope.declarations.key_pointer[0]);
                                                 _ = id; // autofix
                                                 unreachable;
                                             }
