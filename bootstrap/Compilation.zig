@@ -6625,6 +6625,8 @@ pub const Builder = struct {
                     _ = &scope;
                     const type_index = global_scope.type;
                     assert(type_index != .null);
+                    const ty = unit.types.get(type_index);
+                    assert(ty.* != .polymorphic);
                     return type_index;
                 }
             },
@@ -10920,6 +10922,20 @@ pub const Builder = struct {
                                     else => |t| @panic(@tagName(t)),
                                 },
                             },
+                            .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
+                                .@"struct" => |*struct_type| if (struct_type.options.sliceable) |sliceable| b: {
+                                    const field_index = struct_type.fields.slice()[sliceable.pointer];
+                                    const field = unit.struct_fields.get(field_index);
+                                    const child_pointer_type = field.type;
+                                    const pointer_type = unit.types.get(field.type).pointer;
+                                    const child_base_type = pointer_type.type;
+                                    const v = try builder.build_slice_indexed_access(unit, context, array_like_expression, pointer.type, child_pointer_type, child_base_type, pointer_type.mutability, sliceable, index);
+                                    break :b v;
+                                } else {
+                                    unreachable;
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
                             else => |t| @panic(@tagName(t)),
                         },
                     },
@@ -12056,6 +12072,7 @@ pub const Builder = struct {
                                             }
                                         } else {
                                             const look_in_parent_scopes = false;
+
                                             if (struct_type.scope.scope.lookupDeclaration(right_identifier_hash, look_in_parent_scopes)) |lookup| {
                                                 const right_symbol = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{}, &.{});
                                                 switch (right_symbol.initial_value) {
@@ -12116,6 +12133,8 @@ pub const Builder = struct {
                                                     else => |t| @panic(@tagName(t)),
                                                 }
                                             } else {
+                                                const id = unit.getIdentifier( struct_type.scope.scope.declarations.key_pointer[0]);
+                                                _ = id; // autofix
                                                 unreachable;
                                             }
                                         }

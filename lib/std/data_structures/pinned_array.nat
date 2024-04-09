@@ -1,5 +1,15 @@
+const std = #import("std");
+const assert = std.assert;
+
 const PinnedArray = struct(.{ .sliceable = true }, $T) {
     pointer: [&]T = #cast(0),
     length: u32 = 0,
     capacity: u32 = 0,
+
+    const append_with_capacity = fn (pinned_array: &Self, item: T) void {
+        const index = pinned_array.length;
+        assert(index < pinned_array.capacity);
+        pinned_array.length += 1;
+        pinned_array[index] = item;
+    }
 };

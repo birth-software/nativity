@@ -9,8 +9,8 @@ const main = fn () *!void {
         .length = 0,
         .capacity = 1,
     };
-    //const n = 5;
-    //pinned_array.append_with_capacity(n);
-    //try expect(pinned_array.length == 1);
-    //try expect(pinned_array[0] == n);
+    const n = 5;
+    pinned_array.append_with_capacity(n);
+    try expect(pinned_array.length == 1);
+    try expect(pinned_array[0] == n);
 }

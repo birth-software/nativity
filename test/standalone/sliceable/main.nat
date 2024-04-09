@@ -27,4 +27,5 @@ const main = fn () *!void {
 
     try expect(s.length == 1);
     try expect(foo[0] == 5);
+    try expect(s[0] == 5);
 }
