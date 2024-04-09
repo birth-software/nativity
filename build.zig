@@ -351,7 +351,7 @@ pub fn build(b: *std.Build) !void {
     };
 
     if (static or target.result.os.tag == .windows) {
-        if (os == .linux) compiler.linkage = .static;
+        if (target.result.os.tag == .linux) compiler.linkage = .static;
         compiler.linkLibCpp();
 
         const prefix = "nat/cache";
