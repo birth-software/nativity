@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     var target_query = b.standardTargetOptionsQueryOnly(.{});
-    const abi = b.option(std.Target.Abi, "abi", "This option modifies the ABI used for the compiler") orelse if (static) switch (os) {
+    const abi = b.option(std.Target.Abi, "abi", "This option modifies the ABI used for the compiler") orelse if (static) switch (target_query.os_tag orelse @import("builtin").os.tag) {
         else => target_query.abi,
         .linux => b: {
             const os_release = try std.fs.cwd().readFileAlloc(b.allocator, "/etc/os-release", 0xffff);
@@ -107,6 +107,7 @@ pub fn build(b: *std.Build) !void {
     compiler.want_lto = false;
 
     compiler.linkLibC();
+    if (target.result.os.tag == .windows) compiler.linkage = .dynamic;
 
     const zstd = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
 
@@ -349,7 +350,7 @@ pub fn build(b: *std.Build) !void {
         "libclangTransformer.a",
     };
 
-    if (static) {
+    if (static or target.result.os.tag == .windows) {
         if (os == .linux) compiler.linkage = .static;
         compiler.linkLibCpp();
 
@@ -448,8 +449,15 @@ pub fn build(b: *std.Build) !void {
                     return err;
                 }
             },
+            .windows => {},
             else => |tag| @panic(@tagName(tag)),
         }
+    }
+
+    if (target.result.os.tag == .windows) {
+        compiler.linkSystemLibrary("ole32");
+        compiler.linkSystemLibrary("version");
+        compiler.linkSystemLibrary("uuid");
     }
 
     const install_exe = b.addInstallArtifact(compiler, .{});

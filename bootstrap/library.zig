@@ -375,7 +375,7 @@ pub fn allocate_virtual_memory(size: usize, flags: packed struct {
 pub fn free_virtual_memory(slice: []align(page_size) const u8) void {
     switch (os) {
         .windows => {
-            std.os.windows.VirtualFree(slice.ptr, slice.len, std.os.windows.MEM_RELEASE);
+            std.os.windows.VirtualFree(@constCast(@ptrCast(slice.ptr)), slice.len, std.os.windows.MEM_RELEASE);
         },
         else => {
             std.posix.munmap(slice);

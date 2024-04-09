@@ -49,15 +49,15 @@ var my_allocator = PageAllocator{};
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena_allocator.allocator();
-    var arg_it = std.process.ArgIterator.init();
+    var arg_it = try std.process.ArgIterator.initWithAllocator(allocator);
     var args = library.UnpinnedArray([]const u8){};
     const context = try Compilation.createContext(allocator, &my_allocator.allocator);
     while (arg_it.next()) |arg| {
         try args.append(context.my_allocator, arg);
     }
     const arguments = args.slice();
-    const debug_args = true;
-    if (debug_args) {
+    const debug_args = false;
+    if (debug_args and @import("builtin").os.tag != .windows) {
         assert(arguments.len > 0);
         const home_dir = std.posix.getenv("HOME") orelse unreachable;
         const timestamp = std.time.milliTimestamp();

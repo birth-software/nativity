@@ -521,7 +521,7 @@ pub fn main() !void {
 
     switch (@import("builtin").os.tag) {
         .macos => {},
-        // .macos => {},
+        .windows => {},
         .linux => switch (@import("builtin").abi) {
             .gnu => runCmakeTests(allocator, "test/cc_linux") catch {
                 errors = true;

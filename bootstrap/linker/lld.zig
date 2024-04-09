@@ -77,6 +77,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
                 try argv.append(context.my_allocator, "/usr/lib/crtn.o");
             }
         },
+        .windows => {},
         else => @compileError("OS not supported"),
     }
 
