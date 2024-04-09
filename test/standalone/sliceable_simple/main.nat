@@ -1,0 +1,17 @@
+const std = #import("std");
+const assert = std.assert;
+const expect = std.testing.expect;
+
+const Foo = struct(.{ .sliceable = true }) {
+    pointer: [&]u32, 
+    length: u32,
+};
+
+const main = fn () *!void {
+    var foo = [1]u32{123};
+    var f = Foo{
+        .pointer = foo.&,
+        .length = foo.length,
+    };
+    try expect(f[0] == foo[0]);
+}
