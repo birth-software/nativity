@@ -1254,7 +1254,7 @@ pub const LLVM = struct {
                 },
                 .slice => |slice| blk: {
                     const llvm_pointer_type = try llvm.getType(unit, context, slice.child_pointer_type);
-                    const llvm_usize_type = try llvm.getType(unit, context, .usize);
+                    const llvm_usize_type = try llvm.getType(unit, context, Compilation.Type.usize);
                     const slice_types = [_]*Type{ llvm_pointer_type, llvm_usize_type };
                     const is_packed = false;
                     const struct_type = llvm.context.getStructType(&slice_types, slice_types.len, is_packed) orelse return Type.Error.@"struct";
@@ -1272,11 +1272,19 @@ pub const LLVM = struct {
                     },
                     .abi_compatible_error_union => |error_union| blk: {
                         const error_union_type = try llvm.getType(unit, context, error_union.type);
-                        const padding_type = try llvm.getType(unit, context, error_union.padding);
                         const boolean_type = try llvm.getType(unit, context, .bool);
-                        const types = [3]*LLVM.Type{ error_union_type, padding_type, boolean_type };
+                        var three_types: [3]*LLVM.Type = undefined;
+                        var two_types: [2]*LLVM.Type = undefined;
+                        const types: []const *LLVM.Type = if (error_union.padding == .null) b: {
+                            two_types = .{ error_union_type, boolean_type };
+                            break :b &two_types;
+                        } else b: {
+                            const padding_type = try llvm.getType(unit, context, error_union.padding);
+                            three_types = .{ error_union_type, padding_type, boolean_type };
+                            break :b &three_types;
+                        };
                         const is_packed = false;
-                        const struct_type = llvm.context.getStructType(&types, types.len, is_packed) orelse return Type.Error.@"struct";
+                        const struct_type = llvm.context.getStructType(types.ptr, types.len, is_packed) orelse return Type.Error.@"struct";
                         break :blk struct_type.toType();
                     },
                     .@"struct" => |*sema_struct_type| blk: {
@@ -1406,6 +1414,7 @@ pub const LLVM = struct {
                     },
                     // TODO
                     .function => "fn_type",
+                    .any => "any",
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -1669,15 +1678,49 @@ pub const LLVM = struct {
                     else => |t| @panic(@tagName(t)),
                 },
                 .pointer => |pointer| b: {
-                    const element_type = try llvm.getDebugType(unit, context, pointer.type);
-                    const pointer_width = @bitSizeOf(usize);
-                    const alignment = 3;
-                    const pointer_type = llvm.debug_info_builder.createPointerType(element_type, pointer_width, alignment, name.ptr, name.len) orelse unreachable;
-                    break :b pointer_type.toType();
+                    if (pointer.type == .any) {
+                        const flags = LLVM.DebugInfo.Node.Flags{
+                            .visibility = .none,
+                            .forward_declaration = false,
+                            .apple_block = false,
+                            .block_by_ref_struct = false,
+                            .virtual = false,
+                            .artificial = false,
+                            .explicit = false,
+                            .prototyped = false,
+                            .objective_c_class_complete = false,
+                            .object_pointer = false,
+                            .vector = false,
+                            .static_member = false,
+                            .lvalue_reference = false,
+                            .rvalue_reference = false,
+                            .reserved = false,
+                            .inheritance = .none,
+                            .introduced_virtual = false,
+                            .bit_field = false,
+                            .no_return = false,
+                            .type_pass_by_value = false,
+                            .type_pass_by_reference = false,
+                            .enum_class = false,
+                            .thunk = false,
+                            .non_trivial = false,
+                            .big_endian = false,
+                            .little_endian = false,
+                            .all_calls_described = false,
+                        };
+                        const pointer_type = llvm.debug_info_builder.createBasicType(name.ptr, name.len, 64, .address, flags) orelse unreachable;
+                        break :b pointer_type;
+                    } else {
+                        const element_type = try llvm.getDebugType(unit, context, pointer.type);
+                        const pointer_width = @bitSizeOf(usize);
+                        const alignment = 3;
+                        const pointer_type = llvm.debug_info_builder.createPointerType(element_type, pointer_width, alignment, name.ptr, name.len) orelse unreachable;
+                        break :b pointer_type.toType();
+                    }
                 },
                 .slice => |slice| b: {
                     const pointer_type = try llvm.getDebugType(unit, context, slice.child_pointer_type);
-                    const len_type = try llvm.getDebugType(unit, context, .usize);
+                    const len_type = try llvm.getDebugType(unit, context, Compilation.Type.usize);
                     const scope = null;
                     const file = null;
                     const line = 1;
@@ -1733,6 +1776,7 @@ pub const LLVM = struct {
                     const byte_size = 1; // array.count * unit.types.get(array.element_type).getSize();
                     const bit_size = byte_size * 8;
                     const element_type = try llvm.getDebugType(unit, context, array.type);
+                    assert(array.count != 0);
                     const array_type = llvm.debug_info_builder.createArrayType(bit_size, 1, element_type, array.count) orelse unreachable;
                     break :b array_type.toType();
                 },
@@ -2630,6 +2674,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .pointer_to_nullable,
                             .pointer_const_to_var,
                             .pointer_to_array_to_pointer_to_many,
+                            .pointer_source_type_to_destination_type,
                             => {
                                 try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, value);
                             },
@@ -2789,7 +2834,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             syscall_argument_type.* = syscall_argument.*.getType();
                         }
 
-                        const return_type = try llvm.getType(unit, context, Compilation.Type.Index.usize);
+                        const return_type = try llvm.getType(unit, context, Compilation.Type.usize);
                         const is_var_args = false;
                         const function_type = LLVM.Context.getFunctionType(return_type, syscall_argument_types.ptr, syscall_argument_types.len, is_var_args) orelse unreachable;
                         var constraints = UnpinnedArray(u8){};

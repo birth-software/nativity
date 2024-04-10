@@ -872,6 +872,12 @@ const mmap = fn(address: ?[&]u8, length: usize, protection_flags: ProtectionFlag
     return result;
 }
 
+const mprotect = fn(address: &any, length: usize, protection_flags: ProtectionFlags) usize {
+    const flat_protection_flags: u32 = #cast(protection_flags);
+    const result = #syscall(#cast(Syscall.mprotect), #cast(address), length, flat_protection_flags);
+    return result;
+}
+
 const munmap = fn(bytes: []const u8) usize {
     const result = #syscall(#cast(Syscall.munmap), #cast(bytes.pointer), bytes.length);
     return result;

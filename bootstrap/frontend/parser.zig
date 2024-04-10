@@ -198,6 +198,7 @@ pub const Node = struct {
         bitfield_type,
         comptime_expression,
         self,
+        any,
     };
 };
 
@@ -1874,6 +1875,15 @@ const Analyzer = struct {
         const token = analyzer.peekToken();
 
         return try switch (token) {
+            .fixed_keyword_any => try analyzer.addNode(.{
+                .id = .any,
+                .token = b: {
+                    analyzer.consumeToken();
+                    break :b token_i;
+                },
+                .left = .null,
+                .right = .null,
+            }),
             .fixed_keyword_Self => try analyzer.addNode(.{
                 .id = .self,
                 .token = b: {
@@ -2051,6 +2061,7 @@ const Analyzer = struct {
                     .right = backing_type,
                 });
             },
+            .operator_ampersand => try analyzer.pointerOrArrayTypeExpression(.single_pointer_type),
             else => |t| switch (t) {
                 .identifier => @panic(analyzer.bytes(token_i)),
                 else => @panic(@tagName(t)),

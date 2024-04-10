@@ -1,9 +1,6 @@
 const std = #import("std");
+const Arena = std.Arena;
 
 const main = fn() *!void {
-    const size = 0x1000;
-
-    const result = try std.page_allocator.allocate(size, alignment = 12);
-    result[0] = 0;
-    try std.page_allocator.free(result);
+    var arena = try Arena.allocate(2*1024*1024);
 }

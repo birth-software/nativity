@@ -441,8 +441,59 @@ const waitpid = fn(pid: Process.Id, flags: u32) WaitPidError!u32 {
 
 }
 
+const reserve = fn (size: u64) *!&any {
+    switch (current) {
+        .linux, .macos => {
+            const syscall_result = system.mmap(null, size, .{
+                .read = false,
+                .write = false,
+                .execute = false,
+            }, .{
+                .anonymous = true,
+                .private = true,
+                .shared = false,
+                .fixed = false,
+            }, -1, 0);
+
+            switch (link_libc) {
+                true => {
+                    if (syscall_result != system.MAP_FAILED) {
+                        const result: &any = #cast(syscall_result);
+                        return result;
+                    } else {
+                        unreachable;
+                    }
+                },
+                false => {
+                    const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                        else => unreachable,
+                    };
+                    const pointer: &any = #cast(result);
+                    return pointer;
+                },
+            }
+        
+        },
+        else => #error("OS not supported"),
+    }
+}
+
+const commit = fn (reserved_memory: &any, size: u64) *!void {
+    switch (current) {
+        .linux, .macos => {
+            const syscall_result = system.mprotect(reserved_memory, size, .{
+                .read = true,
+                .write = true,
+                .execute = false,
+            });
+        },
+        else => #error("OS not supported"),
+    }
+}
+
 const MemFdCreateError = error{
 };
+
 const memfd_create = fn(name: [&:0]const u8, flags: u32) MemFdCreateError!FileDescriptor{
     switch (current) {
         .linux => {
