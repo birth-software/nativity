@@ -161,5 +161,3 @@ const Target = struct {
     os: builtin.Os,
     abi: builtin.Abi,
 };
-
-var page_allocator = PageAllocator{};

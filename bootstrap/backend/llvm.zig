@@ -1521,17 +1521,19 @@ pub const LLVM = struct {
             .field_types = &.{},
             .forward_declaration = null,
         });
+
         try llvm.debug_type_map.put_no_clobber(context.my_allocator, sema_type_index, struct_type.toType());
         var field_types = try UnpinnedArray(*LLVM.DebugInfo.Type).initialize_with_capacity(context.my_allocator, @intCast(fields.len));
         bit_size = 0;
+
         for (fields) |struct_field_index| {
             const struct_field = unit.struct_fields.get(struct_field_index);
             const struct_field_type = unit.types.get(struct_field.type);
             const struct_field_bit_size = struct_field_type.getBitSize(unit);
             const field_type = try llvm.getDebugType(unit, context, struct_field.type);
-            //TODO: fix
+            const field_name = unit.getIdentifier(struct_field.name);
             const alignment = struct_field_bit_size;
-            const member_type = llvm.debug_info_builder.createMemberType(null, "", "".len, file, 0, struct_field_bit_size, alignment, bit_size, flags, field_type).toType();
+            const member_type = llvm.debug_info_builder.createMemberType(null, field_name.ptr, field_name.len, file, 0, struct_field_bit_size, alignment, bit_size, flags, field_type).toType();
             field_types.append_with_capacity(member_type);
             bit_size += struct_field_bit_size;
         }
@@ -1756,8 +1758,8 @@ pub const LLVM = struct {
 
                     const types = [2]*LLVM.DebugInfo.Type{ pointer_type, len_type };
                     const member_types = [2]*LLVM.DebugInfo.Type{
-                        llvm.debug_info_builder.createMemberType(null, "", "".len, null, 0, 64, 3, 0, flags, types[0]).toType(),
-                        llvm.debug_info_builder.createMemberType(null, "", "".len, null, 0, 64, 3, 64, flags, types[1]).toType(),
+                        llvm.debug_info_builder.createMemberType(null, "pointer", "pointer".len, null, 0, 64, 3, 0, flags, types[0]).toType(),
+                        llvm.debug_info_builder.createMemberType(null, "length", "length".len, null, 0, 64, 3, 64, flags, types[1]).toType(),
                     };
                     const struct_type = llvm.createDebugStructType(.{
                         .scope = scope,
