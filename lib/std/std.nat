@@ -156,22 +156,6 @@ const copy_bytes = fn(destination: []u8, source: []const u8) void {
     }
 }
 
-const concatenate_bytes = fn(allocator: &Allocator, slices: []const []const u8) Allocator.Error![]u8 {
-    var total_byte_count: usize = 0;
-    for (slices) |slice| {
-        total_byte_count += slice.length;
-    }
-
-    const bytes = try allocator.allocate(total_byte_count, 1);
-    var offset: usize = 0;
-    for (slice) |slice| {
-        copy_bytes(bytes[offset..][0..slice.length], slice);
-        offset += slice.length;
-    }
-
-    return bytes;
-}
-
 const Target = struct {
     cpu: builtin.Cpu,
     os: builtin.Os,
