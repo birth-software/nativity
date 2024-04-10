@@ -1,6 +1,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/DIBuilder.h"
@@ -934,6 +935,60 @@ extern "C" void NativityLLVMModuleSetTargetTriple(Module& module, const char* ta
     module.setTargetTriple(target_triple);
 }
 
+extern "C" void NativityLLVMRunOptimizationPipeline(Module& module, TargetMachine& target_machine)
+{
+    // TODO: PGO
+    // TODO: CS profile
+    
+    llvm::PipelineTuningOptions pipeline_tuning_options;
+    pipeline_tuning_options.LoopUnrolling = false;
+    pipeline_tuning_options.LoopInterleaving = false;
+    pipeline_tuning_options.LoopVectorization = false;
+    pipeline_tuning_options.SLPVectorization = false;
+    pipeline_tuning_options.MergeFunctions = false;
+    pipeline_tuning_options.CallGraphProfile = false;
+    pipeline_tuning_options.UnifiedLTO = false;
+    
+    // TODO: instrumentation
+
+    LoopAnalysisManager loop_analysis_manager;
+    FunctionAnalysisManager function_analysis_manager;
+    CGSCCAnalysisManager cgscc_analysis_manager;
+    ModuleAnalysisManager module_analysis_manager;
+
+    PassBuilder pass_builder(&target_machine, pipeline_tuning_options); 
+    // TODO: assignment tracking
+    // TODO: debug info preserve
+    // TODO: plugins?
+    
+    // TODO: target library analysis
+
+    pass_builder.registerModuleAnalyses(module_analysis_manager);
+    pass_builder.registerCGSCCAnalyses(cgscc_analysis_manager);
+    pass_builder.registerFunctionAnalyses(function_analysis_manager);
+    pass_builder.registerLoopAnalyses(loop_analysis_manager);
+    pass_builder.crossRegisterProxies(loop_analysis_manager, function_analysis_manager, cgscc_analysis_manager, module_analysis_manager);
+
+    ModulePassManager module_pass_manager;
+
+    OptimizationLevel optimization_level = OptimizationLevel::O0;
+    bool thin_lto = false;
+    bool lto = false;
+
+    // TODO: thin lto post-link
+    // TODO: instrument
+    if (thin_lto) {
+        // TODO
+    } else if (lto) {
+        // TODO
+    } else {
+        module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(optimization_level, lto);
+    }
+    // TODO: if emit bitcode/IR
+
+    module_pass_manager.run(module, module_analysis_manager);
+}
+
 extern "C" bool NativityLLVMModuleAddPassesToEmitFile(Module& module, TargetMachine& target_machine, const char* object_file_path_ptr, size_t object_file_path_len, CodeGenFileType codegen_file_type, bool disable_verify)
 {
     std::error_code error_code;
@@ -944,6 +999,7 @@ extern "C" bool NativityLLVMModuleAddPassesToEmitFile(Module& module, TargetMach
     }
    
     legacy::PassManager pass;
+
     // We invert the condition because LLVM conventions are just stupid
     if (target_machine.addPassesToEmitFile(pass, stream, nullptr, codegen_file_type, disable_verify)) {
         return false;
