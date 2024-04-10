@@ -70,74 +70,55 @@ const print_u8 = fn(n: u8) void {
     print_usize(n);
 }
 
-const Allocator = struct {
-    handler: &const fn(allocator: &Allocator, old_ptr: ?[&]const u8, old_size: usize, new_size: usize, alignment: u16) Allocator.Error![&]u8,
+const kilobytes = fn (n: u64) u64 {
+    return n * 1024;
+}
 
-    const Error = error{
-        out_of_memory,
-        free_failed,
+const megabytes = fn (n: u64) u64 {
+    return n * 1024 * 1024;
+}
+
+const gigabytes = fn (n: u64) u64 {
+    return n * 1024 * 1024 * 1024;
+}
+
+const terabytes = fn (n: u64) u64 {
+    return n * 1024 * 1024 * 1024 * 1024;
+}
+
+const Arena = struct{
+    position: u64,
+    commit_position: u64,
+    alignment: u64,
+    size: u64,
+
+    const Temporary = struct{
+        arena: &Arena,
+        position: u64,
     };
+    
+    const commit_granularity = 2 * 1024 * 1024;
 
-    const allocate = fn (allocator: &Allocator, size: usize, alignment: u16) Allocator.Error![]u8 {
-        const pointer = try allocator.handler(allocator, old_ptr = null, old_size = 0, new_size = size, alignment);
-        return pointer[0..size];
-    }
+    const allocate = fn (requested_size: u64) *!&Arena {
+        var size = requested_size;
+        const size_roundup_granularity = megabytes(64);
+        size += size_roundup_granularity - 1;
+        size -= size % size_roundup_granularity;
+        const initial_commit_size = commit_granularity;
+        assert(initial_commit_size >= #size(Arena));
 
-    const free = fn (allocator: &Allocator, bytes: []const u8) Allocator.Error!void {
-        _ = try allocator.handler(allocator, old_ptr = bytes.pointer, old_size = bytes.length, new_size = 0, alignment = 0);
-    }
+        const reserved_memory = try os.reserve(size);
+        try os.commit(reserved_memory, initial_commit_size);
 
-    const duplicate_bytes = fn (allocator: &Allocator, bytes: []const u8) Allocator.Error![]u8 {
-        const result = try allocator.allocate(size = bytes.length, alignment = 0);
-        copy_bytes(destination = result, source = bytes);
-        return result;
-    }
-};
+        const arena: &Arena = #cast(reserved_memory);
+        arena.@ = .{
+            .position = #size(Arena),
+            .commit_position = initial_commit_size,
+            .alignment = 8,
+            .size = size,
+        };
 
-const PageAllocator = struct{
-    allocator: Allocator = .{
-        .handler = handler.&,
-    },
-
-    const allocate = fn (a: &PageAllocator, size: usize, alignment: u16) Allocator.Error![]u8 {
-        const allocation_result = try a.allocator.allocate(size, alignment);
-        return allocation_result;
-    }
-
-    const free = fn (a: &PageAllocator, bytes: []const u8) Allocator.Error!void {
-        try a.allocator.free(bytes);
-    }
-
-    const handler = fn (allocator: &Allocator, maybe_old_ptr: ?[&]const u8, old_size: usize, new_size: usize, alignment: u16) Allocator.Error![&]u8{
-        var maybe_new_ptr: [&]u8 = undefined;
-        if (new_size > 0) {
-            const general_protection_flags = os.ProtectionFlags{
-                .read = true,
-                .write = true,
-                .execute = false,
-            };
-            const general_map_flags = os.MapFlags{
-                .reserve = true,
-                .commit = true,
-            };
-
-            maybe_new_ptr = os.allocate_virtual_memory(address = null, length = new_size, general_protection_flags, general_map_flags) catch return Allocator.Error.out_of_memory;
-        }
-
-        if (maybe_old_ptr) |old_ptr| {
-            if (new_size > 0) {
-                unreachable;
-            } else {
-                os.free_virtual_memory(old_ptr[0..old_size]) catch return Allocator.Error.free_failed;
-                return undefined;
-            }
-        } else {
-            return maybe_new_ptr;
-        }
-    }
-
-    const get_allocator = fn(page_allocator: &PageAllocator) &Allocator {
-        return page_allocator.allocator.&;
+        return arena;
     }
 };
 
