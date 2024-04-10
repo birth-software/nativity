@@ -3,12 +3,23 @@ const assert = std.assert;
 const Allocator = std.Allocator;
 const Target = std.Target;
 
+const Optimization = enum{
+    none,
+    light,
+    prefer_size,
+    prefer_speed,
+    speed_aggressive,
+    size_aggressive,
+};
+
 const Executable = struct{
     target: Target,
     main_source_path: [:0]const u8,
     link_libc: bool = false,
     name: [:0]const u8,
     c_source_files: []const [:0]const u8 = .{}.&,
+    optimization: Optimization = .none,
+    generate_debug_information: bool = true,
 
     const compile = fn(executable: Executable) *!void {
         const argument_count = std.start.argument_count;
