@@ -1,4 +1,17 @@
 const std = #import("std");
+const Arena = std.Arena;
 
 const main = fn() *!void {
+    const arena = try Arena.allocate(std.megabytes(64));
+    const argument_count = std.start.argument_count;
+    const argument_values = std.start.argument_values;
+    const arguments = argument_values[0..argument_count];
+
+    for (arguments) |c_argument| {
+        const argument_len = std.c_len(c_argument);
+        const argument = c_argument[0..argument_len];
+        std.print("Argument: ");
+        std.print(argument);
+        std.print("\n");
+    }
 }

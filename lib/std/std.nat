@@ -156,6 +156,15 @@ const copy_bytes = fn(destination: []u8, source: []const u8) void {
     }
 }
 
+const c_len = fn (string: [&:0]const u8) usize {
+    var i: usize = 0;
+    while (string[i] != 0) {
+        i += 1;
+    }
+
+    return i;
+}
+
 const Target = struct {
     cpu: builtin.Cpu,
     os: builtin.Os,

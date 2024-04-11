@@ -515,7 +515,18 @@ fn compile_self_hosted(allocator: Allocator, args: struct {
         .Unknown => error.unknown,
     };
 
-    _ = try compilation_result;
+
+
+    _ = compilation_result catch |err| {
+        std.debug.print("Compiling the self-hosted compiler failed!\n", .{});
+        if (compile_run.stdout.len > 0) {
+            std.debug.print("{s}\n", .{compile_run.stdout});
+        }
+        if (compile_run.stderr.len > 0) {
+            std.debug.print("{s}\n", .{compile_run.stderr});
+        }
+        return err;
+    };
 }
 
 fn run_test_suite(allocator: Allocator, args: struct {
