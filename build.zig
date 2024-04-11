@@ -510,6 +510,7 @@ pub fn build(b: *std.Build) !void {
 
     const test_command = b.addRunArtifact(test_runner);
     test_command.step.dependOn(&compiler.step);
+    b.installArtifact(test_runner);
     test_command.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
