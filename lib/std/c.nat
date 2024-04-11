@@ -24,17 +24,17 @@ const unwrap_syscall = fn(syscall_result: ssize) Error!usize {
 
 const MapFlags = switch (os) {
     .macos => bitfield(u32){
-        shared: bool,
-        private: bool,
+        shared: bool = false,
+        private: bool = false,
         reserved: u2 = 0,
-        fixed: bool,
+        fixed: bool = false,
         reserved0: bool = 0,
-        noreserve: bool,
+        noreserve: bool = false,
         reserved1: u2 = 0,
-        has_semaphore: bool,
-        no_cache: bool,
+        has_semaphore: bool = false,
+        no_cache: bool = false,
         reserved2: u1 = 0,
-        anonymous: bool,
+        anonymous: bool = false,
         reserved3: u19 = 0,
     },
     .linux => linux.MapFlags,
@@ -79,5 +79,6 @@ const munmap :: extern = fn cc(.c) (address: [&]const u8, length: usize) s32;
 const execve :: extern = fn cc(.c) (path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) s32;
 const realpath :: extern = fn cc(.c) (path: [&:0]const u8, resolved_path: [&:0]u8) ?[&:0]u8;
 const waitpid :: extern = fn cc(.c) (pid: ProcessId, status: &s32, flags: s32) s32;
+const mprotect :: extern = fn cc(.c) (address: &any, size: usize, flags: ProtectionFlags) s32;
 
 const _NSGetExecutablePath :: extern = fn cc(.c) (buffer: [&:0]u8, buffer_size: &u32) s32;
