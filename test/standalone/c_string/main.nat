@@ -1,0 +1,8 @@
+const std = #import("std");
+const expect = std.testing.expect;
+
+const main = fn() *!void {
+    const foo: [&:0]const u8 = "Foo";
+    const foo_string = std.c_slice(foo);
+    try expect(foo_string.length == 3);
+}

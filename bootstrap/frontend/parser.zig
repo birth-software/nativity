@@ -199,6 +199,9 @@ pub const Node = struct {
         comptime_expression,
         self,
         any,
+        for_expressions,
+        slice_metadata,
+        orelse_expression,
     };
 };
 
@@ -552,6 +555,11 @@ const Analyzer = struct {
 
         const while_block = try analyzer.block();
 
+        if (analyzer.peekToken() == .fixed_keyword_else) {
+            analyzer.consumeToken();
+            unreachable;
+        }
+
         return analyzer.addNode(.{
             .id = .@"while",
             .token = while_identifier_index,
@@ -782,7 +790,7 @@ const Analyzer = struct {
             .right = try analyzer.nodeList(payload_nodes),
         });
 
-        const for_content_node = switch (analyzer.peekToken()) {
+        const true_expression = switch (analyzer.peekToken()) {
             .operator_left_brace => try analyzer.block(),
             else => blk: {
                 const for_content_expression = try analyzer.expression();
@@ -791,11 +799,22 @@ const Analyzer = struct {
             },
         };
 
+        const else_expression: Node.Index = if (analyzer.peekToken() == .fixed_keyword_else) b: {
+            analyzer.consumeToken();
+            const else_expression = if (analyzer.peekToken() == .operator_left_brace) try analyzer.block() else try analyzer.expression();
+            break :b else_expression;
+        } else .null;
+
         const for_node = try analyzer.addNode(.{
             .id = .for_loop,
             .token = token,
             .left = for_condition_node,
-            .right = for_content_node,
+            .right = try analyzer.addNode(.{
+                .id = .for_expressions,
+                .token = .null,
+                .left = true_expression,
+                .right = else_expression,
+            })
         });
 
         return for_node;
@@ -1016,6 +1035,7 @@ const Analyzer = struct {
         shift_left,
         shift_right,
         @"catch",
+        @"orelse",
     };
 
     const operator_precedence = std.EnumArray(PrecedenceOperator, i32).init(.{
@@ -1038,6 +1058,7 @@ const Analyzer = struct {
         .shift_left = 50,
         .shift_right = 50,
         .@"catch" = 40,
+        .@"orelse" = 40,
     });
 
     const operator_associativity = std.EnumArray(PrecedenceOperator, Associativity).init(.{
@@ -1060,6 +1081,7 @@ const Analyzer = struct {
         .shift_left = .left,
         .shift_right = .left,
         .@"catch" = .left,
+        .@"orelse" = .left,
     });
 
     const operator_node_id = std.EnumArray(PrecedenceOperator, Node.Id).init(.{
@@ -1082,6 +1104,7 @@ const Analyzer = struct {
         .shift_left = .shift_left,
         .shift_right = .shift_right,
         .@"catch" = .catch_expression,
+        .@"orelse" = .orelse_expression,
     });
 
     fn expressionPrecedence(analyzer: *Analyzer, minimum_precedence: i32) !Node.Index {
@@ -1139,6 +1162,7 @@ const Analyzer = struct {
                 .operator_shift_left => .shift_left,
                 .operator_shift_right => .shift_right,
                 .fixed_keyword_catch => .@"catch",
+                .fixed_keyword_orelse => .@"orelse",
                 else => |t| @panic(@tagName(t)),
             };
 
@@ -1251,7 +1275,13 @@ const Analyzer = struct {
                     analyzer.consumeToken();
                     break :blk token;
                 },
-                .left = try analyzer.expression(),
+                .left = switch (analyzer.peekToken()) {
+                    .operator_comma,
+                    .operator_semicolon,
+                    .operator_compare_equal,
+                    => Node.Index.null,
+                    else => try analyzer.expression(),
+                },
                 .right = Node.Index.null,
             }),
             .fixed_keyword_break => try analyzer.breakExpression(),
@@ -2102,19 +2132,34 @@ const Analyzer = struct {
                         else => try analyzer.expression(),
                     };
 
-                    _ = try analyzer.expectToken(.operator_right_bracket);
+                    const slice_termination: Node.Index = if (analyzer.peekToken() == .operator_colon) b: {
+                        analyzer.consumeToken();
+                        const result = try analyzer.expression();
+                        break :b result;
+                    } else .null;
 
-                    break :blk try analyzer.addNode(.{
-                        .id = .slice,
+                    const slice_metadata = try analyzer.addNode(.{
+                        .id = .slice_metadata,
                         .token = token,
-                        .left = left,
-                        .right = try analyzer.addNode(.{
+                        .left = try analyzer.addNode(.{
                             .id = .range,
                             .token = token,
                             .left = index_expression,
                             .right = range_end_expression,
                         }),
+                        .right = slice_termination,
                     });
+
+                    _ = try analyzer.expectToken(.operator_right_bracket);
+
+                    const slice = try analyzer.addNode(.{
+                        .id = .slice,
+                        .token = token,
+                        .left = left,
+                        .right = slice_metadata,
+                    });
+
+                    break :blk slice;
                 } else {
                     _ = try analyzer.expectToken(.operator_right_bracket);
                     break :blk try analyzer.addNode(.{

@@ -3791,6 +3791,7 @@ pub const Instruction = union(enum) {
             pointer_const_to_var,
             pointer_to_nullable,
             pointer_source_type_to_destination_type,
+            pointer_to_not_nullable,
             slice_var_to_const,
             slice_to_nullable,
             slice_to_not_null,
@@ -6267,6 +6268,7 @@ pub const Builder = struct {
                         },
                         else => |t| @panic(@tagName(t)),
                     };
+                    assert(expected_right_type != .null);
                     const right = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = expected_right_type }, node.right, .right);
                     const value_to_store = switch (node.id) {
                         .assign => right,
@@ -8691,11 +8693,12 @@ pub const Builder = struct {
             }
 
             const cbb = unit.basic_blocks.get(builder.current_basic_block);
-            const return_type = function_prototype.return_type;
+            const return_type_index = function_prototype.return_type;
+            const return_type = unit.types.get(return_type_index);
 
             if (!cbb.terminated and (cbb.instructions.length > 0 or cbb.predecessors.length > 0)) {
                 if (builder.return_block == .null) {
-                    switch (unit.types.get(return_type).*) {
+                    switch (return_type.*) {
                         .void => try builder.buildRet(unit, context, .{
                             .value = .{
                                 .@"comptime" = .void,
@@ -8713,7 +8716,7 @@ pub const Builder = struct {
                                             .value = .{
                                                 .@"comptime" = .undefined,
                                             },
-                                            .type = return_type,
+                                            .type = return_type_index,
                                         };
                                         const insert = try unit.instructions.append(context.my_allocator, .{
                                             .insert_value = .{
@@ -8735,7 +8738,7 @@ pub const Builder = struct {
                                             .value = .{
                                                 .runtime = insert,
                                             },
-                                            .type = return_type,
+                                            .type = return_type_index,
                                         });
                                     },
                                     else => unreachable,
@@ -8752,7 +8755,8 @@ pub const Builder = struct {
 
                     const phi = &unit.instructions.get(builder.return_phi).phi;
 
-                    switch (unit.types.get(return_type).*) {
+
+                    switch (return_type.*) {
                         .void => unreachable,
                         .noreturn => unreachable,
                         .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
@@ -8767,7 +8771,7 @@ pub const Builder = struct {
                                                 .value = .{
                                                     .@"comptime" = .undefined,
                                                 },
-                                                .type = return_type,
+                                                .type = return_type_index,
                                             },
                                             .index = 1,
                                             .new_value = .{
@@ -8786,7 +8790,7 @@ pub const Builder = struct {
                                         .value = .{
                                             .runtime = return_value,
                                         },
-                                        .type = return_type,
+                                        .type = return_type_index,
                                     }, builder.current_basic_block);
 
                                     try builder.jump(unit, context, builder.return_block);
@@ -9169,9 +9173,6 @@ pub const Builder = struct {
                             .none => b: {
                                 const pointer_type = unit.types.get(pointer_value.type);
                                 const pointer_element_type = pointer_type.pointer.type;
-                                switch (unit.types.get(pointer_element_type).*) {
-                                    else => |t| @panic(@tagName(t)),
-                                }
                                 break :b pointer_element_type;
                             },
                             .type => |type_index| type_index,
@@ -9358,6 +9359,7 @@ pub const Builder = struct {
                     .shift_left => .shift_left,
                     .shift_right => .shift_right,
                     .bool_and => .bit_and,
+                    .bool_or => .bit_or,
                     else => |t| @panic(@tagName(t)),
                 };
 
@@ -9536,6 +9538,7 @@ pub const Builder = struct {
                                     .bool => b: {
                                         const id: Instruction.IntegerBinaryOperation.Id = switch (binary_operation_id) {
                                             .bit_and => .bit_and,
+                                            .bit_or => .bit_or,
                                             else => |t| @panic(@tagName(t)),
                                         };
                                         const i = try unit.instructions.append(context.my_allocator, .{
@@ -9607,17 +9610,18 @@ pub const Builder = struct {
                 break :block result;
             },
             .block => block: {
-                assert(type_expect == .none or type_expect.type == .void);
                 const block = try builder.resolveBlock(unit, context, node_index);
                 const block_i = try unit.instructions.append(context.my_allocator, .{
                     .block = block,
                 });
-
                 break :block .{
                     .value = .{
                         .runtime = block_i,
                     },
-                    .type = .void,
+                    .type = if (type_expect == .none or type_expect.type == .void) .void else b: {
+                        assert(unit.basic_blocks.get( builder.current_basic_block).terminated);
+                        break :b .noreturn;
+                    },
                 };
             },
             .container_literal => block: {
@@ -9688,8 +9692,23 @@ pub const Builder = struct {
                             break :blk nullable_pointer;
                         },
                     },
-                    .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
-                        else => |t| @panic(@tagName(t)),
+                    .slice => |slice| if (slice.nullable) b: {
+                        const constant_slice = try unit.constant_slices.append(context.my_allocator, .{
+                            .array = null,
+                            .start = 0,
+                            .end = 0,
+                            .type = type_index,
+                        });
+                        break :b V{
+                            .value = .{
+                                .@"comptime" = .{
+                                    .constant_slice = constant_slice,
+                                },
+                            },
+                            .type = type_index,
+                        };
+                    } else {
+                        unreachable;
                     },
                     else => |t| @panic(@tagName(t)),
                 },
@@ -9698,7 +9717,8 @@ pub const Builder = struct {
             .slice => block: {
                 const expression_to_slice = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .left);
 
-                const range_node = unit.getNode(node.right);
+                const slice_metadata_node = unit.getNode(node.right);
+                const range_node = unit.getNode(slice_metadata_node.left);
                 assert(range_node.id == .range);
                 const range_start: V = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = Type.usize }, range_node.left, .right);
                 const range_end: V = switch (range_node.right) {
@@ -11182,14 +11202,174 @@ pub const Builder = struct {
                     else => unreachable,
                 }, unreachable, &.{}),
             },
-            .empty_container_literal_guess => {
+            .empty_container_literal_guess => block: {
                 assert(node.left != .null);
                 assert(node.right != .null);
                 const container_type = try builder.resolveType(unit, context, node.left, &.{});
                 const node_list = unit.getNodeList(node.right);
                 assert(node_list.len == 0);
                 const result = try builder.resolveContainerLiteral(unit, context, node_list, container_type);
-                return result;
+                break :block result;
+            },
+            .if_else_payload => block: {
+                assert(node.left != .null);
+                assert(node.right != .null);
+
+                const if_else_node = unit.getNode(node.left);
+                assert(if_else_node.id == .if_else);
+                assert(if_else_node.left != .null);
+                assert(if_else_node.right != .null);
+
+                const if_node = unit.getNode(if_else_node.left);
+                assert(if_node.id == .@"if");
+                assert(if_node.left != .null);
+                assert(if_node.right != .null);
+
+                try builder.resolveBranchPayload(unit, context, .{
+                    .payload_node_index = node.right,
+                    .optional_node_index = if_node.left,
+                    .taken_expression_node_index = if_node.right,
+                    .not_taken_expression_node_index = if_else_node.right,
+                });
+
+                break :block .{
+                    .value = .{
+                        .@"comptime" = .void,
+                    },
+                    .type = .void,
+                };
+            },
+            .orelse_expression => block: {
+                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.left, .right);
+                switch (unit.types.get(v.type).*) {
+                    .pointer => |pointer| if (pointer.nullable) {
+                        const type_to_expect = switch (type_expect) {
+                            .none => b: {
+                                var p = pointer;
+                                p.nullable = false;
+                                const non_null_pointer = try unit.getPointerType(context, p);
+                                break :b non_null_pointer;
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        };
+                        const new_type_expect = Type.Expect{ .type = type_to_expect };
+                        const null_pointer = V{
+                            .type = v.type,
+                            .value = .{
+                                .@"comptime" = .null_pointer,
+                            },
+                        };
+                        const cmp = try unit.instructions.append(context.my_allocator, .{
+                            .integer_compare = .{
+                                .left = v,
+                                .right = null_pointer,
+                                .type = v.type,
+                                .id = .equal,
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, cmp);
+                        const is_null_block = try builder.newBasicBlock(unit, context);
+                        const is_not_null_block = try builder.newBasicBlock(unit, context);
+                        try builder.branch(unit, context, cmp, is_null_block, is_not_null_block);
+
+                        builder.current_basic_block = is_null_block;
+
+                        const else_expr = try builder.resolveRuntimeValue(unit, context, new_type_expect, node.right, .right);
+                        _ = else_expr; // autofix
+                        const is_block_terminated = unit.basic_blocks.get(builder.current_basic_block).terminated;
+                        if (!is_block_terminated) {
+                            unreachable;
+                        } else {
+                            builder.current_basic_block = is_not_null_block;
+                            const cast = try unit.instructions.append(context.my_allocator, .{
+                                .cast = .{
+                                    .id = .pointer_to_not_nullable,
+                                    .value = v,
+                                    .type = type_to_expect,
+                                },
+                            });
+                            try builder.appendInstruction(unit, context, cast);
+
+                            break :block .{
+                                .value = .{
+                                    .runtime = cast,
+                                },
+                                .type = type_to_expect,
+                            };
+                        }
+                    } else unreachable,
+                    .slice => |slice| if (slice.nullable) {
+                        const type_to_expect = switch (type_expect) {
+                            .none => b: {
+                                var s = slice;
+                                s.nullable = false;
+                                const non_null_slice = try unit.getSliceType(context, s);
+                                break :b non_null_slice;
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        };
+                        const new_type_expect = Type.Expect{ .type = type_to_expect };
+                        const null_pointer = V{
+                            .type = slice.child_pointer_type,
+                            .value = .{
+                                .@"comptime" = .null_pointer,
+                            },
+                        };
+
+                        const get_pointer = try unit.instructions.append(context.my_allocator, .{
+                            .extract_value = .{
+                                .expression = v,
+                                .index = 0,
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, get_pointer);
+                        const cmp = try unit.instructions.append(context.my_allocator, .{
+                            .integer_compare = .{
+                                .left = .{
+                                    .value = .{
+                                        .runtime = get_pointer,
+                                    },
+                                    .type = slice.child_pointer_type,
+                                },
+                                .right = null_pointer,
+                                .type = v.type,
+                                .id = .equal,
+                            },
+                        });
+                        try builder.appendInstruction(unit, context, cmp);
+                        const is_null_block = try builder.newBasicBlock(unit, context);
+                        const is_not_null_block = try builder.newBasicBlock(unit, context);
+                        try builder.branch(unit, context, cmp, is_null_block, is_not_null_block);
+
+                        builder.current_basic_block = is_null_block;
+
+                        const else_expr = try builder.resolveRuntimeValue(unit, context, new_type_expect, node.right, .right);
+                        _ = else_expr; // autofix
+                        const is_block_terminated = unit.basic_blocks.get(builder.current_basic_block).terminated;
+                        if (!is_block_terminated) {
+                            unreachable;
+                        } else {
+                            builder.current_basic_block = is_not_null_block;
+                            const cast = try unit.instructions.append(context.my_allocator, .{
+                                .cast = .{
+                                    .id = .slice_to_not_null,
+                                    .value = v,
+                                    .type = type_to_expect,
+                                },
+                            });
+                            try builder.appendInstruction(unit, context, cast);
+
+                            break :block .{
+                                .value = .{
+                                    .runtime = cast,
+                                },
+                                .type = type_to_expect,
+                            };
+                        }
+                    } else unreachable,
+                    else => |t| @panic(@tagName(t)),
+                }
+                @panic("todo");
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -13239,6 +13419,7 @@ pub const Builder = struct {
 
                     const is_last_element_range = last_element_node.id == .range;
                     const not_range_len = payloads.len - @intFromBool(is_last_element_range);
+
                     if (slices.length > 0) {
                         const load_i = try unit.instructions.append(context.my_allocator, .{
                             .load = .{
@@ -13316,8 +13497,15 @@ pub const Builder = struct {
                         }
                     }
 
-                    const body_node_index = statement_node.right;
+                    const for_expressions = unit.getNode(statement_node.right);
+                    assert(for_expressions.id == .for_expressions);
+                    const body_node_index = for_expressions.left;
                     _ = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, body_node_index, .right);
+
+                    const else_node_index = for_expressions.right;
+                    if (else_node_index != .null) { 
+                        unreachable;
+                    }
 
                     const load_iterator = try unit.instructions.append(context.my_allocator, .{
                         .load = .{
@@ -13506,7 +13694,9 @@ pub const Builder = struct {
                         },
                         else => node.right,
                     };
+
                     const v = try builder.resolveRuntimeValue(unit, context, catch_type_expect, catch_expression_node_index, side);
+
                     switch (error_union.type) {
                         .void, .noreturn => {
                             assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
@@ -13519,7 +13709,7 @@ pub const Builder = struct {
                                 phi: Instruction.Index,
                                 exit_block: BasicBlock.Index,
                             };
-                            const catch_info: ?CatchInfo = if (!is_block_terminated) blk: {
+                            const maybe_catch_info: ?CatchInfo = if (!is_block_terminated) blk: {
                                 const expected_type = error_union.type;
                                 assert(v.type == expected_type);
                                 const phi_index = try unit.instructions.append(context.my_allocator, .{
@@ -13555,12 +13745,12 @@ pub const Builder = struct {
                                 },
                                 .type = error_union.type,
                             };
-                            if (is_block_terminated) {
-                                return value;
-                            } else {
-                                const phi_index = catch_info.?.phi;
+
+                            if (maybe_catch_info) |catch_info| {
+                                assert(!is_block_terminated);
+                                const phi_index = catch_info.phi;
                                 const phi = &unit.instructions.get(phi_index).phi;
-                                const exit_block = catch_info.?.exit_block;
+                                const exit_block = catch_info.exit_block;
 
                                 try phi.addIncoming(context, value, builder.current_basic_block);
 
@@ -13575,6 +13765,9 @@ pub const Builder = struct {
                                     },
                                     .type = error_union.type,
                                 };
+                            } else {
+                                assert(is_block_terminated);
+                                return value;
                             }
                         },
                     }
@@ -14755,15 +14948,43 @@ pub const Builder = struct {
     }
 
     fn emitReturn(builder: *Builder, unit: *Unit, context: *const Context, return_node_index: Node.Index) !void {
+        const return_type_index = unit.getReturnType(builder.current_function);
         const return_node = unit.getNode(return_node_index);
         assert(return_node.id == .@"return");
-        assert(return_node.left != .null);
         assert(return_node.right == .null);
-        const return_value_node_index = return_node.left;
-        const return_type = unit.getReturnType(builder.current_function);
-        const return_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{
-            .type = return_type,
-        }, return_value_node_index, .right);
+        const return_value = if (return_node.left != .null) b: {
+            const return_value_node_index = return_node.left;
+            const return_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{
+                .type = return_type_index,
+            }, return_value_node_index, .right);
+            break :b return_value;
+        } else switch (unit.types.get(return_type_index).*) {
+            .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
+                .error_union => |error_union| if (error_union.type == .void) b: {
+                    const fields = &[_]V.Comptime{
+                        .undefined,
+                        .{
+                            .bool = false,
+                        },
+                    };
+                    const constant_struct = try unit.constant_structs.append(context.my_allocator, .{
+                        .fields = fields,
+                        .type = return_type_index,
+                    });
+                    
+                    break :b V{
+                        .type = return_type_index,
+                        .value = .{
+                            .@"comptime" = .{
+                                .constant_struct = constant_struct,
+                            },
+                        },
+                    };
+                } else unreachable,
+                else => |t| @panic(@tagName(t)),
+            },
+            else => |t| @panic(@tagName(t)),
+        };
 
         if (builder.return_block != .null) {
             if (builder.return_phi != .null) {
@@ -14777,7 +14998,7 @@ pub const Builder = struct {
         } else if (builder.exit_blocks.length > 0) {
             builder.return_phi = try unit.instructions.append(context.my_allocator, .{
                 .phi = .{
-                    .type = return_type,
+                    .type = return_type_index,
                 },
             });
 

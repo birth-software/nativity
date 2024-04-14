@@ -1,0 +1,14 @@
+const std = #import("std");
+const expect = std.testing.expect;
+
+const main = fn () *!void {
+    var expected_a: s32 = 5;
+    var a: ?&s32 = null;
+    a = expected_a.&;
+    try expect(a orelse unreachable == expected_a.&);
+
+    var not_expected_b: s32 = 6;
+    var b: ?&s32 = not_expected_b.&;
+    b = null;
+    try expect(b orelse return == not_expected_b.&);
+}

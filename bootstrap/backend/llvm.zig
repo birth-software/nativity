@@ -2051,7 +2051,7 @@ pub const LLVM = struct {
 
             break :b slice_fields;
         } else b: {
-            const ptr = llvm.pointer_type.?.toType().getPoison() orelse unreachable;
+            const ptr = llvm.pointer_type.?.getNull();
             const len = llvm.context.getConstantInt(64, 0, false) orelse unreachable;
             break :b .{ ptr.toConstant(), len.toConstant() };
         };
@@ -2094,6 +2094,9 @@ pub const LLVM = struct {
         var field_values = try UnpinnedArray(*LLVM.Value.Constant).initialize_with_capacity(context.my_allocator, @intCast(constant_struct.fields.len));
         const sema_struct_index = unit.types.get(constant_struct.type).@"struct";
         const sema_struct = unit.structs.get(sema_struct_index);
+        const llvm_type = try llvm.getType(unit, context, constant_struct.type);
+        const struct_type = llvm_type.toStruct() orelse unreachable;
+
         switch (sema_struct.kind) {
             .@"struct" => |*sema_struct_type| {
                 for (constant_struct.fields, sema_struct_type.fields.slice()) |field_value, field_index| {
@@ -2101,14 +2104,28 @@ pub const LLVM = struct {
                     const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field.type);
                     field_values.append_with_capacity(constant);
                 }
-
-                const llvm_type = try llvm.getType(unit, context, constant_struct.type);
-                const struct_type = llvm_type.toStruct() orelse unreachable;
-                const const_struct = struct_type.getConstant(field_values.pointer, field_values.length) orelse unreachable;
-                return const_struct;
+            },
+            .error_union => |error_union| {
+                const abi_ty = unit.types.get(error_union.abi);
+                switch (abi_ty.*) {
+                    .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
+                        .raw_error_union => |err_union_base_type| {
+                            const field_types = [2]Compilation.Type.Index{err_union_base_type, .bool };
+                            for (field_types, constant_struct.fields) |field_type_index, field_value| {
+                                const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field_type_index);
+                                field_values.append_with_capacity(constant);
+                            }
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
             },
             else => |t| @panic(@tagName(t)),
         }
+
+        const const_struct = struct_type.getConstant(field_values.pointer, field_values.length) orelse unreachable;
+        return const_struct;
     }
 
     fn callIntrinsic(llvm: *LLVM, intrinsic_name: []const u8, intrinsic_parameter_types: []const *LLVM.Type, intrinsic_arguments: []const *LLVM.Value) !*LLVM.Value {
@@ -2674,6 +2691,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .slice_coerce_to_zero_termination,
                             .slice_zero_to_no_termination,
                             .pointer_to_nullable,
+                            .pointer_to_not_nullable,
                             .pointer_const_to_var,
                             .pointer_to_array_to_pointer_to_many,
                             .pointer_source_type_to_destination_type,

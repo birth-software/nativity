@@ -397,11 +397,11 @@ pub fn build(b: *std.Build) !void {
         };
 
         const llvm_include_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/include" });
-        compiler.addIncludePath(std.Build.LazyPath.relative(llvm_include_dir));
+        compiler.addIncludePath(std.Build.path(b, llvm_include_dir));
         const llvm_lib_dir = try std.mem.concat(b.allocator, u8, &.{ llvm_path, "/lib" });
 
         for (static_llvm_libraries) |llvm_library| {
-            compiler.addObjectFile(std.Build.LazyPath.relative(try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
+            compiler.addObjectFile(std.Build.path(b, try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
         }
     } else {
         compiler.linkSystemLibrary("LLVM-17");
@@ -463,7 +463,7 @@ pub fn build(b: *std.Build) !void {
     const install_exe = b.addInstallArtifact(compiler, .{});
     b.getInstallStep().dependOn(&install_exe.step);
     b.installDirectory(.{
-        .source_dir = std.Build.LazyPath.relative("lib"),
+        .source_dir = std.Build.path(b, "lib"),
         .install_dir = .bin,
         .install_subdir = "lib",
     });

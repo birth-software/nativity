@@ -1,0 +1,26 @@
+const std = #import("std");
+const print = std.print;
+const exit = std.os.exit;
+const byte_equal = std.byte_equal;
+
+const foo = fn (string: []const u8, wanted: []const u8) ?[]const u8 {
+    if (byte_equal(string, wanted)) {
+        return string;
+    } else {
+        return null;
+    }
+}
+
+const main = fn () *!void {
+    const original: []const u8 = "fasdasD";
+    var f = original;
+    f = "foooo";
+
+    if (foo(f, original)) |string| {
+        print("string: ");
+        print(string);
+        print("\n");
+        exit(1);
+    } else {
+    }
+}

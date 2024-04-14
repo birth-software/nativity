@@ -1,4 +1,99 @@
 const std = #import("std");
+const Arena = std.Arena;
+const c_slice = std.c_slice;
+const byte_equal = std.byte_equal;
+const print = std.print;
+const exit = std.os.exit;
+
+const ArgumentProcessingError = error{
+    no_arguments,
+};
+
+const lex = fn () void {
+
+}
+
+const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {
+    const i = i_ptr.@;
+
+    const are_equal = byte_equal(real_argument, wanted_argument);
+    if (are_equal) {
+        if (i < command_arguments.length) {
+            const new_i = i + 1;
+            const argument = c_slice(command_arguments[new_i]);
+            i_ptr.@ = new_i;
+            return argument;
+        } else {
+            print("error: unterminated argument: '");
+            print(real_argument);
+            print("'\n");
+            exit(1);
+        }
+    } else {
+        return null;
+    }
+}
+
+const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8) void { 
+    var i: usize = 0;
+
+    var maybe_output_argument: ?[]const u8 = null;
+    var maybe_main_source_file: ?[]const u8 = null;
+
+    while (i < command_arguments.length) {
+        const command_argument = c_slice(command_arguments[i]);
+
+        if (get_argument(command_argument, "-o", command_arguments, i.&)) |out_arg| {
+            maybe_output_argument = out_arg;
+        } else if (get_argument(command_argument, "-main_source_file", command_arguments, i.&)) |src_arg| {
+            maybe_main_source_file = src_arg;
+        } else {
+            print("error: unhandled argument: '");
+            print(command_argument);
+            print("'\n");
+            exit(1);
+        }
+
+        i += 1;
+    }
+
+    const main_source_file = maybe_main_source_file orelse {
+        print("error: no main source file specified\n");
+        exit(1);
+    };
+}
 
 const main = fn() *!void {
+    const arena = try Arena.allocate(std.megabytes(64));
+    const argument_count = std.start.argument_count;
+
+    if (argument_count <= 1) {
+        return ArgumentProcessingError.no_arguments;
+    }
+
+    const argument_values = std.start.argument_values;
+    const arguments = argument_values[0..argument_count];
+
+    const command = c_slice(arguments[1]);
+    const command_arguments = arguments[2..];
+
+    if (byte_equal(command, "build")) {
+        print("TODO: build");
+    } else if (byte_equal(command, "clang") or byte_equal(command, "-cc1") or byte_equal(command, "-cc1as")) {
+        unreachable;
+    } else if (byte_equal(command, "cc")) {
+        unreachable;
+    } else if (byte_equal(command, "c++")) {
+        unreachable;
+    } else if (byte_equal(command, "exe")) {
+        command_exe(arena, command_arguments);
+    } else if (byte_equal(command, "lib")) {
+        unreachable;
+    } else if (byte_equal(command, "obj")) {
+        unreachable;
+    } else if (byte_equal(command, "test")) {
+        print("TODO: test");
+    } else {
+        unreachable;
+    }
 }
