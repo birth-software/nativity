@@ -2803,7 +2803,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
     var maybe_executable_name: ?[]const u8 = null;
     var c_source_files = UnpinnedArray([]const u8){};
     var optimization = Optimization.none;
-    const generate_debug_information = true;
+    var generate_debug_information = true;
 
     if (arguments.len == 0) return error.InvalidInput;
 
@@ -2926,6 +2926,15 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
 
                 const optimize_string = arguments[i];
                 optimization = data_structures.enumFromString(Optimization, optimize_string) orelse unreachable;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-debug")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const debug_string = arguments[i];
+                generate_debug_information = if (byte_equal(debug_string, "true")) true else if (byte_equal(debug_string, "false")) false else unreachable;
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
