@@ -22,11 +22,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
 
     // const output_path = out_path orelse "a.out";
     try argv.append(context.my_allocator, "-o");
-    const is_dylib = library.ends_with_slice(options.output_file_path, ".dylib");
     try argv.append(context.my_allocator, options.output_file_path);
-    if (library.byte_equal(options.output_file_path, "lib/LLVMHello.dylib")) {
-        assert(is_dylib);
-    }
 
     try argv.append_slice(context.my_allocator, options.extra_arguments);
 
@@ -43,6 +39,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
                 .aarch64 => "arm64",
                 else => |t| @panic(@tagName(t)),
             });
+
             try argv.append_slice(context.my_allocator, &.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
 
             if (!library.ends_with_slice(options.output_file_path, ".dylib")) {
