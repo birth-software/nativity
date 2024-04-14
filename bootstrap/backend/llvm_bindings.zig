@@ -150,6 +150,7 @@ pub extern fn NativityLLVMGetTarget(target_triple_ptr: [*]const u8, target_tripl
 pub extern fn NativityLLVMTargetCreateTargetMachine(target: *LLVM.Target, target_triple_ptr: [*]const u8, target_triple_len: usize, cpu_ptr: [*]const u8, cpu_len: usize, features_ptr: [*]const u8, features_len: usize, relocation_model: LLVM.RelocationModel, maybe_code_model: LLVM.CodeModel, is_code_model_present: bool, optimization_level: LLVM.CodegenOptimizationLevel, jit: bool) ?*LLVM.Target.Machine;
 pub extern fn NativityLLVMModuleSetTargetMachineDataLayout(module: *LLVM.Module, target_machine: *LLVM.Target.Machine) void;
 pub extern fn NativityLLVMModuleSetTargetTriple(module: *LLVM.Module, target_triple_ptr: [*]const u8, target_triple_len: usize) void;
+pub extern fn NativityLLVMRunOptimizationPipeline(module: *LLVM.Module, target_machine: *LLVM.Target.Machine, optimization_level: LLVM.OptimizationLevel) void;
 pub extern fn NativityLLVMModuleAddPassesToEmitFile(module: *LLVM.Module, target_machine: *LLVM.Target.Machine, object_file_path_ptr: [*]const u8, object_file_path_len: usize, codegen_file_type: LLVM.CodeGenFileType, disable_verify: bool) bool;
 pub extern fn NativityLLVMTypeAssertEqual(a: *LLVM.Type, b: *LLVM.Type) void;
 

@@ -36,6 +36,7 @@ fn runStandalone(allocator: Allocator, args: struct {
     group_name: []const u8,
     self_hosted: bool,
     is_test: bool,
+    compiler_path: []const u8,
 }) !void {
     const test_names = try collectDirectoryDirEntries(allocator, args.directory_path);
 
@@ -55,7 +56,7 @@ fn runStandalone(allocator: Allocator, args: struct {
         const compile_run = try std.ChildProcess.run(.{
             .allocator = allocator,
             // TODO: delete -main_source_file?
-            .argv = &.{ if (args.self_hosted) self_hosted_relative_path else bootstrap_relative_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path },
+            .argv = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path },
             .max_output_bytes = std.math.maxInt(u64),
         });
         ran_compilation_count += 1;
@@ -120,100 +121,16 @@ fn runStandalone(allocator: Allocator, args: struct {
     }
 }
 
-fn runStandaloneTests(allocator: Allocator, args: struct {
-    self_hosted: bool,
-}) !void {
-    const standalone_test_dir_path = "test/standalone";
-    const standalone_test_names = try collectDirectoryDirEntries(allocator, standalone_test_dir_path);
-
-    const total_compilation_count = standalone_test_names.len;
-    var ran_compilation_count: usize = 0;
-    var failed_compilation_count: usize = 0;
-
-    var ran_test_count: usize = 0;
-    var failed_test_count: usize = 0;
-    const total_test_count = standalone_test_names.len;
-
-    for (standalone_test_names) |standalone_test_name| {
-        std.debug.print("{s}... ", .{standalone_test_name});
-        const source_file_path = try std.mem.concat(allocator, u8, &.{ standalone_test_dir_path, "/", standalone_test_name, "/main.nat" });
-        const compile_run = try std.ChildProcess.run(.{
-            .allocator = allocator,
-            // TODO: delete -main_source_file?
-            .argv = &.{ if (args.self_hosted) self_hosted_relative_path else bootstrap_relative_path, "exe", "-main_source_file", source_file_path },
-            .max_output_bytes = std.math.maxInt(u64),
-        });
-        ran_compilation_count += 1;
-
-        const compilation_result: TestError!bool = switch (compile_run.term) {
-            .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
-            .Signal => error.signaled,
-            .Stopped => error.stopped,
-            .Unknown => error.unknown,
-        };
-
-        const compilation_success = compilation_result catch b: {
-            failed_compilation_count += 1;
-            break :b false;
-        };
-
-        std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
-        if (compile_run.stdout.len > 0) {
-            std.debug.print("STDOUT:\n\n{s}\n\n", .{compile_run.stdout});
-        }
-        if (compile_run.stderr.len > 0) {
-            std.debug.print("STDERR:\n\n{s}\n\n", .{compile_run.stderr});
-        }
-
-        if (compilation_success and !args.self_hosted) {
-            const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", standalone_test_name });
-            const test_run = try std.ChildProcess.run(.{
-                .allocator = allocator,
-                // TODO: delete -main_source_file?
-                .argv = &.{test_path},
-                .max_output_bytes = std.math.maxInt(u64),
-            });
-            ran_test_count += 1;
-            const test_result: TestError!bool = switch (test_run.term) {
-                .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
-                .Signal => error.signaled,
-                .Stopped => error.stopped,
-                .Unknown => error.unknown,
-            };
-
-            const test_success = test_result catch b: {
-                failed_test_count += 1;
-                break :b false;
-            };
-            std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
-            if (test_run.stdout.len > 0) {
-                std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
-            }
-            if (test_run.stderr.len > 0) {
-                std.debug.print("STDERR:\n\n{s}\n\n", .{test_run.stderr});
-            }
-        } else {
-            std.debug.print("\n", .{});
-        }
-    }
-
-    std.debug.print("\nTOTAL COMPILATIONS: {}. FAILED: {}\n", .{ total_compilation_count, failed_compilation_count });
-    std.debug.print("TOTAL TESTS: {}. RAN: {}. FAILED: {}\n", .{ total_test_count, ran_test_count, failed_test_count });
-
-    if (failed_compilation_count > 0 or failed_test_count > 0) {
-        return error.fail;
-    }
-}
-
 fn runBuildTests(allocator: Allocator, args: struct {
     self_hosted: bool,
+    compiler_path: []const u8,
 }) !void {
     std.debug.print("\n[BUILD TESTS]\n\n", .{});
     const previous_cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     const test_dir_path = "test/build";
     const test_names = try collectDirectoryDirEntries(allocator, test_dir_path);
     const test_dir_realpath = try std.fs.cwd().realpathAlloc(allocator, test_dir_path);
-    const compiler_realpath = try std.fs.cwd().realpathAlloc(allocator, if (args.self_hosted) self_hosted_relative_path else bootstrap_relative_path);
+    const compiler_realpath = try std.fs.cwd().realpathAlloc(allocator, args.compiler_path);
     try std.posix.chdir(test_dir_realpath);
 
     const total_compilation_count = test_names.len;
@@ -303,13 +220,14 @@ fn runBuildTests(allocator: Allocator, args: struct {
 
 fn runStdTests(allocator: Allocator, args: struct {
     self_hosted: bool,
+    compiler_path: []const u8,
 }) !void {
     var errors = false;
     std.debug.print("std... ", .{});
 
     const result = try std.ChildProcess.run(.{
         .allocator = allocator,
-        .argv = &.{ if (args.self_hosted) self_hosted_relative_path else bootstrap_relative_path, "test", "-main_source_file", "lib/std/std.nat", "-name", "std" },
+        .argv = &.{ args.compiler_path, "test", "-main_source_file", "lib/std/std.nat", "-name", "std" },
         .max_output_bytes = std.math.maxInt(u64),
     });
     const compilation_result: TestError!bool = switch (result.term) {
@@ -362,12 +280,16 @@ fn runStdTests(allocator: Allocator, args: struct {
     if (errors) return error.fail;
 }
 
-fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
+fn runCmakeTests(allocator: Allocator, args: struct {
+    dir_path: []const u8,
+    compiler_path: []const u8,
+}) !void {
     var errors = false;
     const original_dir = try std.fs.cwd().realpathAlloc(allocator, ".");
-    const cc_dir = try std.fs.cwd().openDir(dir_path, .{
+    const cc_dir = try std.fs.cwd().openDir(args.dir_path, .{
         .iterate = true,
     });
+    const compiler_realpath = try std.fs.cwd().realpathAlloc(allocator, args.compiler_path);
 
     const cc_dir_path = try cc_dir.realpathAlloc(allocator, ".");
     try std.posix.chdir(cc_dir_path);
@@ -392,9 +314,9 @@ fn runCmakeTests(allocator: Allocator, dir_path: []const u8) !void {
                         // "--debug-output",
                         // "-G", "Unix Makefiles",
                         // "-DCMAKE_VERBOSE_MAKEFILE=On",
-                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_C_COMPILER=", "nat;cc" }),
-                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_CXX_COMPILER=", "nat;c++" }),
-                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_ASM_COMPILER=", "nat;cc" }),
+                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_C_COMPILER=", compiler_realpath, ";cc" }),
+                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_CXX_COMPILER=", compiler_realpath, ";c++" }),
+                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_ASM_COMPILER=", compiler_realpath, ";cc" }),
                     },
                     .max_output_bytes = std.math.maxInt(u64),
                 });
@@ -500,11 +422,13 @@ const self_hosted_relative_path = "nat/" ++ self_hosted_exe_name;
 
 fn compile_self_hosted(allocator: Allocator, args: struct {
     is_test: bool,
-}) !void {
+    optimization: Optimization,
+}) ![]const u8 {
+    const name = try std.mem.concat(allocator, u8, &.{self_hosted_exe_name, "_", @tagName(args.optimization)});
     const compile_run = try std.ChildProcess.run(.{
         .allocator = allocator,
         // TODO: delete -main_source_file?
-        .argv = &.{ bootstrap_relative_path, if (args.is_test) "test" else "exe", "-main_source_file", "src/main.nat", "-name", self_hosted_exe_name },
+        .argv = &.{ bootstrap_relative_path, if (args.is_test) "test" else "exe", "-main_source_file", "src/main.nat", "-name", name, "-optimize", @tagName(args.optimization) },
         .max_output_bytes = std.math.maxInt(u64),
     });
 
@@ -514,8 +438,6 @@ fn compile_self_hosted(allocator: Allocator, args: struct {
         .Stopped => error.stopped,
         .Unknown => error.unknown,
     };
-
-
 
     _ = compilation_result catch |err| {
         std.debug.print("Compiling the self-hosted compiler failed!\n", .{});
@@ -527,47 +449,75 @@ fn compile_self_hosted(allocator: Allocator, args: struct {
         }
         return err;
     };
+
+    return try std.mem.concat(allocator, u8, &.{"nat/", name});
 }
+
+const Optimization = enum{
+    none,
+    debug_prefer_fast,
+    debug_prefer_size,
+    lightly_optimize_for_speed,
+    optimize_for_speed,
+    optimize_for_size,
+    aggressively_optimize_for_speed,
+    aggressively_optimize_for_size,
+};
 
 fn run_test_suite(allocator: Allocator, args: struct {
     self_hosted: bool,
+    compiler_path: []const u8,
 }) bool {
     const self_hosted = args.self_hosted;
-    std.debug.print("TESTING {s} COMPILER...\n=================\n", .{if (self_hosted) "SELF-HOSTED" else "BOOTSTRAP"});
+    std.debug.print("TESTING {s} COMPILER: {s}...\n=================\n", .{if (self_hosted) "SELF-HOSTED" else "BOOTSTRAP", args.compiler_path});
     var errors = false;
+
     runStandalone(allocator, .{
         .directory_path = "test/standalone",
         .group_name = "STANDALONE",
         .is_test = false,
         .self_hosted = self_hosted,
+        .compiler_path = args.compiler_path,
     }) catch {
         errors = true;
     };
+
     runBuildTests(allocator, .{
         .self_hosted = self_hosted,
+        .compiler_path = args.compiler_path,
     }) catch {
         errors = true;
     };
+
     runStandalone(allocator, .{
         .directory_path = "test/tests",
         .group_name = "TEST EXECUTABLE",
         .is_test = true,
         .self_hosted = self_hosted,
+        .compiler_path = args.compiler_path,
     }) catch {
         errors = true;
     };
-    //
+
     runStdTests(allocator, .{
         .self_hosted = self_hosted,
+        .compiler_path = args.compiler_path,
     }) catch {
         errors = true;
     };
 
     if (!self_hosted) {
-        runCmakeTests(allocator, "test/cc") catch {
+        runCmakeTests(allocator, .{
+            .dir_path = "test/cc",
+            .compiler_path = args.compiler_path,
+        }) catch {
             errors = true;
         };
-        runCmakeTests(allocator, "test/c++") catch {
+
+        runCmakeTests(allocator, .{
+            .dir_path = "test/c++",
+            .compiler_path = args.compiler_path,
+        }) catch {
             errors = true;
         };
 
@@ -575,7 +525,10 @@ fn run_test_suite(allocator: Allocator, args: struct {
             .macos => {},
             .windows => {},
             .linux => switch (@import("builtin").abi) {
-                .gnu => runCmakeTests(allocator, "test/cc_linux") catch {
+                .gnu => runCmakeTests(allocator, .{
+                    .dir_path = "test/cc_linux",
+                    .compiler_path = args.compiler_path,
+                }) catch {
                     errors = true;
                 },
                 .musl => {},
@@ -594,18 +547,24 @@ pub fn main() !void {
 
     var errors = run_test_suite(allocator, .{
         .self_hosted = false,
+        .compiler_path = bootstrap_relative_path,
     });
 
     if (!errors) {
-        if (compile_self_hosted(allocator, .{
-            .is_test = false,
-        })) |_| {
-            errors = errors or run_test_suite(allocator, .{
-                .self_hosted = true,
-            });
-        } else |err| {
-            err catch {};
-            errors = true;
+        inline for (@typeInfo(Optimization).Enum.fields) |opt| {
+            const optimization = @field(Optimization, opt.name);
+            if (compile_self_hosted(allocator, .{
+                .is_test = false,
+                .optimization = optimization,
+            })) |compiler_path| {
+                errors = errors or run_test_suite(allocator, .{
+                    .self_hosted = true,
+                    .compiler_path = compiler_path,
+                });
+            } else |err| {
+                err catch {};
+                errors = true;
+            }
         }
     }
 
