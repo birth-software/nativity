@@ -123,6 +123,7 @@ pub const LLVM = struct {
         const createDebugInfoBuilder = bindings.NativityLLVMModuleCreateDebugInfoBuilder;
         const setTargetMachineDataLayout = bindings.NativityLLVMModuleSetTargetMachineDataLayout;
         const setTargetTriple = bindings.NativityLLVMModuleSetTargetTriple;
+        const runOptimizationPipeline = bindings.NativityLLVMRunOptimizationPipeline;
         const addPassesToEmitFile = bindings.NativityLLVMModuleAddPassesToEmitFile;
     };
 
@@ -496,6 +497,11 @@ pub const LLVM = struct {
         less = 1,
         default = 2,
         aggressive = 3,
+    };
+
+    pub const OptimizationLevel = extern struct{
+        speed_level: c_uint,
+        size_level: c_uint,
     };
 
     pub const FramePointerKind = enum(c_uint) {
@@ -2341,18 +2347,23 @@ pub const LLVM = struct {
             function.setSubprogram(subprogram);
 
             switch (declaration.initial_value) {
-                .function_declaration => {
-                    try llvm.llvm_external_functions.put_no_clobber(context.my_allocator, declaration, function);
-                },
                 .function_definition => |function_definition_index| {
                     const function_definition = unit.function_definitions.get(function_definition_index);
                     const scope = subprogram.toLocalScope().toScope();
 
                     try llvm.scope_map.put_no_clobber(context.my_allocator, &function_definition.scope.scope, scope);
                 },
+                .function_declaration => {},
                 else => |t| @panic(@tagName(t)),
             }
         }
+
+        switch (declaration.initial_value) {
+            .function_declaration => try llvm.llvm_external_functions.put_no_clobber(context.my_allocator, declaration, function),
+            .function_definition => {},
+            else => |t| @panic(@tagName(t)),
+        }
+
     }
 };
 
@@ -2392,7 +2403,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         .context = llvm_context,
         .module = module,
         .builder = builder,
-        .debug_info_builder = module.createDebugInfoBuilder() orelse return Error.debug_info_builder,
+        .debug_info_builder = if (unit.descriptor.generate_debug_information) module.createDebugInfoBuilder() orelse return Error.debug_info_builder else undefined,
         .attributes = .{
             .naked = llvm_context.getAttributeFromEnum(.Naked, 0),
             .noreturn = llvm_context.getAttributeFromEnum(.NoReturn, 0),
@@ -2401,6 +2412,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             .@"noalias" = llvm_context.getAttributeFromEnum(.NoAlias, 0),
         },
     };
+    unit.descriptor.generate_debug_information = false;
 
     if (unit.descriptor.generate_debug_information) {
         const full_path = try std.fs.cwd().realpathAlloc(context.allocator, unit.descriptor.main_package_path);
@@ -2531,30 +2543,35 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
                 switch (sema_instruction.*) {
                     .push_scope => |push_scope| {
-                        const old_scope = try llvm.getScope(unit, context, push_scope.old);
-                        assert(@intFromEnum(push_scope.old.kind) >= @intFromEnum(Compilation.Debug.Scope.Kind.function));
+                        if (unit.descriptor.generate_debug_information) {
+                            const old_scope = try llvm.getScope(unit, context, push_scope.old);
+                            assert(@intFromEnum(push_scope.old.kind) >= @intFromEnum(Compilation.Debug.Scope.Kind.function));
 
-                        const lexical_block = llvm.debug_info_builder.createLexicalBlock(old_scope, llvm.file, push_scope.new.line + 1, push_scope.new.column + 1) orelse unreachable;
-                        try llvm.scope_map.put_no_clobber(context.my_allocator, push_scope.new, lexical_block.toScope());
-                        llvm.scope = lexical_block.toScope();
+                            const lexical_block = llvm.debug_info_builder.createLexicalBlock(old_scope, llvm.file, push_scope.new.line + 1, push_scope.new.column + 1) orelse unreachable;
+                            try llvm.scope_map.put_no_clobber(context.my_allocator, push_scope.new, lexical_block.toScope());
+                            llvm.scope = lexical_block.toScope();
+                        }
                     },
                     .pop_scope => |pop_scope| {
-                        const new = try llvm.getScope(unit, context, pop_scope.new);
-                        if (pop_scope.new.kind == .function) {
-                            assert(new.toSubprogram() orelse unreachable == llvm.function.getSubprogram() orelse unreachable);
+                        if (unit.descriptor.generate_debug_information) {
+                            const new = try llvm.getScope(unit, context, pop_scope.new);
+                            if (pop_scope.new.kind == .function) {
+                                assert(new.toSubprogram() orelse unreachable == llvm.function.getSubprogram() orelse unreachable);
+                            }
+                            llvm.scope = new;
+                            var scope = pop_scope.old;
+                            while (scope.kind != .function) {
+                                scope = scope.parent.?;
+                            }
+                            const subprogram_scope = try llvm.getScope(unit, context, scope);
+                            assert(llvm.function.getSubprogram() orelse unreachable == subprogram_scope.toSubprogram() orelse unreachable);
                         }
-                        llvm.scope = new;
-                        var scope = pop_scope.old;
-                        while (scope.kind != .function) {
-                            scope = scope.parent.?;
-                        }
-                        const subprogram_scope = try llvm.getScope(unit, context, scope);
-                        assert(llvm.function.getSubprogram() orelse unreachable == subprogram_scope.toSubprogram() orelse unreachable);
                     },
                     .debug_checkpoint => |debug_checkpoint| {
-                        const scope = try llvm.getScope(unit, context, debug_checkpoint.scope);
-                        // assert(scope == llvm.scope);
-                        llvm.builder.setCurrentDebugLocation(llvm.context, debug_checkpoint.line + 1, debug_checkpoint.column + 1, scope, llvm.function);
+                        if (unit.descriptor.generate_debug_information) {
+                            const scope = try llvm.getScope(unit, context, debug_checkpoint.scope);
+                            llvm.builder.setCurrentDebugLocation(llvm.context, debug_checkpoint.line + 1, debug_checkpoint.column + 1, scope, llvm.function);
+                        }
                     },
                     .inline_assembly => |inline_assembly_index| {
                         const assembly_block = unit.inline_assembly.get(inline_assembly_index);
@@ -3251,7 +3268,13 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     const jit = false;
     const code_model: LLVM.CodeModel = undefined;
     const is_code_model_present = false;
-    const codegen_optimization_level = LLVM.CodegenOptimizationLevel.none;
+    const codegen_optimization_level: LLVM.CodegenOptimizationLevel = switch (unit.descriptor.optimization) {
+        .none => .none,
+        .debug_prefer_fast, .debug_prefer_size => .none,
+        .lightly_optimize_for_speed => .less,
+        .optimize_for_speed, .optimize_for_size => .default,
+        .aggressively_optimize_for_speed, .aggressively_optimize_for_size => .aggressive,
+    };
     const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features, features.len, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit) orelse unreachable;
     llvm.module.setTargetMachineDataLayout(target_machine);
     llvm.module.setTargetTriple(target_triple.ptr, target_triple.len);
@@ -3265,6 +3288,21 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         const object_file_path = slice[0 .. slice.len - 1 :0];
         break :blk object_file_path;
     };
+
+    if (unit.descriptor.optimization != .none) {
+        const optimization_level: LLVM.OptimizationLevel = switch (unit.descriptor.optimization) {
+            .none => unreachable,
+            .debug_prefer_fast, .debug_prefer_size => .{ .speed_level = 0, .size_level = 0 }, // -O0
+            .lightly_optimize_for_speed => .{ .speed_level = 1, .size_level = 0 }, // -O1
+            .optimize_for_speed => .{ .speed_level = 2, .size_level = 0 }, // -O2
+            .optimize_for_size => .{ .speed_level = 2, .size_level = 1 }, // -Os
+            .aggressively_optimize_for_speed => .{ .speed_level = 3, .size_level = 0 }, // -O3
+            .aggressively_optimize_for_size => .{ .speed_level = 2, .size_level = 2 }, // -Oz
+        };
+
+        llvm.module.runOptimizationPipeline(target_machine, optimization_level);
+    }
+
     const disable_verify = false;
     const result = llvm.module.addPassesToEmitFile(target_machine, object_file_path.ptr, object_file_path.len, LLVM.CodeGenFileType.object, disable_verify);
     if (!result) {

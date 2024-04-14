@@ -12,7 +12,8 @@ const Cpu = enum{
 
 const Abi = enum{
     none,
-    gnu, msvc,
+    gnu,
+    msvc,
 };
 
 const CallingConvention = enum{
@@ -36,4 +37,15 @@ const TestFunction = struct{
 
 const StructOptions = struct{
     sliceable: bool = false,
+};
+
+const Optimization = enum{
+    none,
+    debug_prefer_fast,
+    debug_prefer_size,
+    lightly_optimize_for_speed,
+    optimize_for_speed,
+    optimize_for_size,
+    aggressively_optimize_for_speed,
+    aggressively_optimize_for_size,
 };

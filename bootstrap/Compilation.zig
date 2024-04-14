@@ -49,6 +49,17 @@ const SliceField = enum {
 
 const length_field_name = @tagName(SliceField.length);
 
+const Optimization = enum{
+    none,
+    debug_prefer_fast,
+    debug_prefer_size,
+    lightly_optimize_for_speed,
+    optimize_for_speed,
+    optimize_for_size,
+    aggressively_optimize_for_speed,
+    aggressively_optimize_for_size,
+};
+
 pub fn createContext(allocator: Allocator, my_allocator: *MyAllocator) !*const Context {
     const context: *Context = try allocator.create(Context);
 
@@ -96,6 +107,7 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
             .object_path = "nat/build.o",
             .link_libc = @import("builtin").os.tag == .macos,
             .link_libcpp = false,
+            .optimization = .none,
             .generate_debug_information = true,
             .name = "build",
             .is_test = false,
@@ -2790,6 +2802,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
     var link_libc = false;
     var maybe_executable_name: ?[]const u8 = null;
     var c_source_files = UnpinnedArray([]const u8){};
+    var optimization = Optimization.none;
     const generate_debug_information = true;
 
     if (arguments.len == 0) return error.InvalidInput;
@@ -2907,6 +2920,15 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
+        } else if (byte_equal(current_argument, "-optimize")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const optimize_string = arguments[i];
+                optimization = data_structures.enumFromString(Optimization, optimize_string) orelse unreachable;
+            } else {
+                reportUnterminatedArgumentError(current_argument);
+            }
         } else {
             @panic(current_argument);
             // std.debug.panic("Unrecognized argument: {s}", .{current_argument});
@@ -2948,6 +2970,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             .arch = arch,
             .os = os,
             .abi = abi,
+            .optimization = optimization,
             .link_libc = switch (os) {
                 .linux => link_libc,
                 .macos => true,
@@ -16364,6 +16387,7 @@ pub const Descriptor = struct {
     arch: Arch,
     os: Os,
     abi: Abi,
+    optimization: Optimization,
     only_parse: bool,
     link_libc: bool,
     link_libcpp: bool,
@@ -16691,3 +16715,5 @@ pub fn write(kind: LogKind, string: []const u8) !void {
         try std.io.getStdOut().writeAll(string);
     }
 }
+
+

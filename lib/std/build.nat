@@ -3,14 +3,7 @@ const assert = std.assert;
 const Allocator = std.Allocator;
 const Target = std.Target;
 
-const Optimization = enum{
-    none,
-    light,
-    prefer_size,
-    prefer_speed,
-    speed_aggressive,
-    size_aggressive,
-};
+const Optimization = std.builtin.Optimization;
 
 const Executable = struct{
     target: Target,

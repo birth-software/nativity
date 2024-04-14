@@ -935,17 +935,18 @@ extern "C" void NativityLLVMModuleSetTargetTriple(Module& module, const char* ta
     module.setTargetTriple(target_triple);
 }
 
-extern "C" void NativityLLVMRunOptimizationPipeline(Module& module, TargetMachine& target_machine)
+extern "C" void NativityLLVMRunOptimizationPipeline(Module& module, TargetMachine& target_machine, OptimizationLevel optimization_level)
 {
     // TODO: PGO
     // TODO: CS profile
+    bool loop_optimizations = !optimization_level.isOptimizingForSize() && optimization_level.getSpeedupLevel() >= 2;
     
     llvm::PipelineTuningOptions pipeline_tuning_options;
-    pipeline_tuning_options.LoopUnrolling = false;
-    pipeline_tuning_options.LoopInterleaving = false;
-    pipeline_tuning_options.LoopVectorization = false;
-    pipeline_tuning_options.SLPVectorization = false;
-    pipeline_tuning_options.MergeFunctions = false;
+    pipeline_tuning_options.LoopUnrolling = loop_optimizations;
+    pipeline_tuning_options.LoopInterleaving = loop_optimizations;
+    pipeline_tuning_options.LoopVectorization = loop_optimizations;
+    pipeline_tuning_options.SLPVectorization = loop_optimizations;
+    pipeline_tuning_options.MergeFunctions = true;
     pipeline_tuning_options.CallGraphProfile = false;
     pipeline_tuning_options.UnifiedLTO = false;
     
@@ -971,7 +972,6 @@ extern "C" void NativityLLVMRunOptimizationPipeline(Module& module, TargetMachin
 
     ModulePassManager module_pass_manager;
 
-    OptimizationLevel optimization_level = OptimizationLevel::O0;
     bool thin_lto = false;
     bool lto = false;
 
