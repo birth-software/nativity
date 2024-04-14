@@ -2412,7 +2412,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             .@"noalias" = llvm_context.getAttributeFromEnum(.NoAlias, 0),
         },
     };
-    unit.descriptor.generate_debug_information = false;
 
     if (unit.descriptor.generate_debug_information) {
         const full_path = try std.fs.cwd().realpathAlloc(context.allocator, unit.descriptor.main_package_path);
