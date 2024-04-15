@@ -53,7 +53,7 @@ pub const LLVM = struct {
     tag_count: c_uint = 0,
     inside_branch: bool = false,
 
-    pub const x86_64 = struct{
+    pub const x86_64 = struct {
         pub const initializeTarget = bindings.LLVMInitializeX86Target;
         pub const initializeTargetInfo = bindings.LLVMInitializeX86TargetInfo;
         pub const initializeTargetMC = bindings.LLVMInitializeX86TargetMC;
@@ -61,7 +61,7 @@ pub const LLVM = struct {
         pub const initializeAsmParser = bindings.LLVMInitializeX86AsmParser;
     };
 
-    pub const aarch64 = struct{
+    pub const aarch64 = struct {
         pub const initializeTarget = bindings.LLVMInitializeAArch64Target;
         pub const initializeTargetInfo = bindings.LLVMInitializeAArch64TargetInfo;
         pub const initializeTargetMC = bindings.LLVMInitializeAArch64TargetMC;
@@ -499,7 +499,7 @@ pub const LLVM = struct {
         aggressive = 3,
     };
 
-    pub const OptimizationLevel = extern struct{
+    pub const OptimizationLevel = extern struct {
         speed_level: c_uint,
         size_level: c_uint,
     };
@@ -2116,7 +2116,7 @@ pub const LLVM = struct {
                 switch (abi_ty.*) {
                     .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
                         .raw_error_union => |err_union_base_type| {
-                            const field_types = [2]Compilation.Type.Index{err_union_base_type, .bool };
+                            const field_types = [2]Compilation.Type.Index{ err_union_base_type, .bool };
                             for (field_types, constant_struct.fields) |field_type_index, field_value| {
                                 const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field_type_index);
                                 field_values.append_with_capacity(constant);
@@ -2363,7 +2363,6 @@ pub const LLVM = struct {
             .function_definition => {},
             else => |t| @panic(@tagName(t)),
         }
-
     }
 };
 
@@ -3247,13 +3246,14 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             arch.initializeTargetMC();
             arch.initializeAsmPrinter();
             arch.initializeAsmParser();
-        }
+        },
     }
 
     // TODO: proper target selection
     const target_triple = switch (unit.descriptor.os) {
         .linux => "x86_64-linux-none",
         .macos => "aarch64-apple-macosx-none",
+        .windows => "x86_64-windows-gnu",
     };
     const cpu = "generic";
     const features = "";

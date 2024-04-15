@@ -49,7 +49,7 @@ const SliceField = enum {
 
 const length_field_name = @tagName(SliceField.length);
 
-const Optimization = enum{
+const Optimization = enum {
     none,
     debug_prefer_fast,
     debug_prefer_size,
@@ -2769,6 +2769,7 @@ const Arch = enum {
 const Os = enum {
     linux,
     macos,
+    windows,
 };
 
 const Abi = enum {
@@ -2794,6 +2795,11 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             arch = .aarch64;
             os = .macos;
             abi = .none;
+        },
+        .windows => {
+            arch = .x86_64;
+            os = .windows;
+            abi = .gnu;
         },
         else => unreachable,
     }
@@ -2983,6 +2989,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             .link_libc = switch (os) {
                 .linux => link_libc,
                 .macos => true,
+                .windows => link_libc,
                 // .windows => link_libc,
                 // else => unreachable,
             },
@@ -3066,7 +3073,7 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
             write(.panic, "\nPANIC: ") catch {};
             write(.panic, message) catch {};
             write(.panic, "\n") catch {};
-            @breakpoint();
+            if (@import("builtin").os.tag != .windows) @breakpoint();
             std.posix.abort();
         },
     }
@@ -3277,7 +3284,7 @@ pub const Type = union(enum) {
     polymorphic: Type.Polymorphic,
 
     pub const @"usize" = _usize;
-    pub const @"ssize" = _ssize;
+    pub const ssize = _ssize;
 
     pub const Polymorphic = struct {
         parameters: []const Token.Index,
@@ -8787,7 +8794,6 @@ pub const Builder = struct {
 
                     const phi = &unit.instructions.get(builder.return_phi).phi;
 
-
                     switch (return_type.*) {
                         .void => unreachable,
                         .noreturn => unreachable,
@@ -9651,7 +9657,7 @@ pub const Builder = struct {
                         .runtime = block_i,
                     },
                     .type = if (type_expect == .none or type_expect.type == .void) .void else b: {
-                        assert(unit.basic_blocks.get( builder.current_basic_block).terminated);
+                        assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
                         break :b .noreturn;
                     },
                 };
@@ -13219,7 +13225,7 @@ pub const Builder = struct {
                                     switch (boolean_value) {
                                         .bool => |case_boolean| {
                                             if (case_boolean == boolean) {
-                                                const v =  try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, case_node.right, .right);
+                                                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, case_node.right, .right);
                                                 switch (v.type) {
                                                     .void, .noreturn => break,
                                                     else => @panic("Unexpected type"),
@@ -13535,7 +13541,7 @@ pub const Builder = struct {
                     _ = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, body_node_index, .right);
 
                     const else_node_index = for_expressions.right;
-                    if (else_node_index != .null) { 
+                    if (else_node_index != .null) {
                         unreachable;
                     }
 
@@ -15003,7 +15009,7 @@ pub const Builder = struct {
                         .fields = fields,
                         .type = return_type_index,
                     });
-                    
+
                     break :b V{
                         .type = return_type_index,
                         .value = .{
@@ -16724,5 +16730,3 @@ pub fn write(kind: LogKind, string: []const u8) !void {
         try std.io.getStdOut().writeAll(string);
     }
 }
-
-
