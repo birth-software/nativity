@@ -23,12 +23,13 @@ pub fn build(b: *std.Build) !void {
     const self_hosted_ci = b.option(bool, "self_hosted_ci", "This option enables the self-hosted CI behavior") orelse false;
     const third_party_ci = b.option(bool, "third_party_ci", "This option enables the third-party CI behavior") orelse false;
     const is_ci = self_hosted_ci or third_party_ci;
-    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or os == .macos;
+    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or os == .macos or os == .windows;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
+        .windows => true,
         .macos => true,
     };
     const compiler_options = b.addOptions();
@@ -42,7 +43,17 @@ pub fn build(b: *std.Build) !void {
         .single_threaded = true,
     });
 
-    var target_query = b.standardTargetOptionsQueryOnly(.{});
+    var target_query = b.standardTargetOptionsQueryOnly(switch (@import("builtin").os.tag) {
+        else => .{},
+        .windows => .{
+            .default_target = .{
+                .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 },
+                .cpu_arch = .x86_64,
+                .os_tag = .windows,
+                .abi = .gnu,
+            },
+        },
+    });
     const abi = b.option(std.Target.Abi, "abi", "This option modifies the ABI used for the compiler") orelse if (static) switch (target_query.os_tag orelse @import("builtin").os.tag) {
         else => target_query.abi,
         .linux => b: {
@@ -62,6 +73,7 @@ pub fn build(b: *std.Build) !void {
             break :b if (std.mem.eql(u8, value, "arch") or std.mem.eql(u8, value, "endeavouros")) .musl else target_query.abi;
         },
     } else target_query.abi;
+
     target_query.abi = abi;
     const target = b.resolveTargetQuery(target_query);
 
@@ -107,7 +119,7 @@ pub fn build(b: *std.Build) !void {
     compiler.want_lto = false;
 
     compiler.linkLibC();
-    if (target.result.os.tag == .windows) compiler.linkage = .dynamic;
+    //if (target.result.os.tag == .windows) compiler.linkage = .dynamic;
 
     const zstd = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
 
