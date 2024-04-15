@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) !void {
     const self_hosted_ci = b.option(bool, "self_hosted_ci", "This option enables the self-hosted CI behavior") orelse false;
     const third_party_ci = b.option(bool, "third_party_ci", "This option enables the third-party CI behavior") orelse false;
     const is_ci = self_hosted_ci or third_party_ci;
-    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or os == .macos or os == .windows;
+    const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci or os == .macos;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) !void {
 
     compiler.root_module.addOptions("configuration", compiler_options);
     compiler.formatted_panics = print_stack_trace;
-    compiler.root_module.unwind_tables = print_stack_trace;
+    compiler.root_module.unwind_tables = print_stack_trace or target.result.os.tag == .windows;
     compiler.root_module.omit_frame_pointer = false;
     compiler.root_module.error_tracing = print_stack_trace;
     compiler.want_lto = false;
@@ -496,7 +496,7 @@ pub fn build(b: *std.Build) !void {
         .windows => blk: {
             const result = b.addSystemCommand(&.{"remedybg"});
             result.addArg("-g");
-            result.addArg(compiler_exe_path);
+            // result.addArg(compiler_exe_path);
 
             break :blk result;
         },
