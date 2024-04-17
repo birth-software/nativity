@@ -3258,7 +3258,26 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         .windows => "x86_64-windows-gnu",
     };
     const cpu = "generic";
-    const features = "";
+    const temp_use_native_features = true;
+    const features = if (temp_use_native_features) blk: {
+        var buffer = UnpinnedArray(u8){};
+        for (@import("builtin").cpu.arch.allFeaturesList(), 0..) |feature, index_usize| {
+            const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+            const is_enabled = @import("builtin").cpu.features.isEnabled(index);
+
+            if (feature.llvm_name) |llvm_name| {
+                const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+                try buffer.append(context.my_allocator, plus_or_minus);
+                try buffer.append_slice(context.my_allocator, llvm_name);
+                try buffer.append_slice(context.my_allocator, ",");
+            }
+        }
+        if (buffer.length == 0) break :blk "";
+        assert(std.mem.endsWith(u8, buffer.slice(), ","));
+        buffer.slice()[buffer.length - 1] = 0;
+        break :blk buffer.slice()[0 .. buffer.length - 1 :0];
+    } else "";
+
     const target = blk: {
         var error_message: [*]const u8 = undefined;
         var error_message_len: usize = 0;
@@ -3276,7 +3295,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         .optimize_for_speed, .optimize_for_size => .default,
         .aggressively_optimize_for_speed, .aggressively_optimize_for_size => .aggressive,
     };
-    const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features, features.len, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit) orelse unreachable;
+    const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features.ptr, features.len, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit) orelse unreachable;
     llvm.module.setTargetMachineDataLayout(target_machine);
     llvm.module.setTargetTriple(target_triple.ptr, target_triple.len);
     const file_path = unit.descriptor.executable_path;
