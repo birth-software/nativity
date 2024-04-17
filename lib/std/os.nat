@@ -512,6 +512,22 @@ const memfd_create = fn(name: [&:0]const u8, flags: u32) MemFdCreateError!FileDe
     }
 }
 
+const basename = fn (path: []const u8) ?[]const u8 {
+    var i: usize = path.length;
+
+    while (i > 0) {
+        i -= 1;
+
+        if (path[i] == '/') {
+            i = i + 1;
+            break;
+        }
+    }
+
+    const p = path[i..];
+    return p;
+}
+
 const IoChannelBehavior = enum{
     pipe,
     close,

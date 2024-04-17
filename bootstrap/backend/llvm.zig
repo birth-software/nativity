@@ -1328,6 +1328,7 @@ pub const LLVM = struct {
                     const array_type = LLVM.Type.Array.get(element_type, array.count + @intFromBool(extra_element)) orelse return Type.Error.array;
                     break :blk array_type.toType();
                 },
+                .any => (llvm.pointer_type orelse unreachable).toType(),
                 else => |t| @panic(@tagName(t)),
             };
 

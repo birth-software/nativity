@@ -424,7 +424,7 @@ fn compile_self_hosted(allocator: Allocator, args: struct {
     is_test: bool,
     optimization: Optimization,
 }) ![]const u8 {
-    const name = try std.mem.concat(allocator, u8, &.{self_hosted_exe_name, "_", @tagName(args.optimization)});
+    const name = try std.mem.concat(allocator, u8, &.{ self_hosted_exe_name, "_", @tagName(args.optimization) });
     const compile_run = try std.ChildProcess.run(.{
         .allocator = allocator,
         // TODO: delete -main_source_file?
@@ -450,10 +450,10 @@ fn compile_self_hosted(allocator: Allocator, args: struct {
         return err;
     };
 
-    return try std.mem.concat(allocator, u8, &.{"nat/", name});
+    return try std.mem.concat(allocator, u8, &.{ "nat/", name });
 }
 
-const Optimization = enum{
+const Optimization = enum {
     none,
     debug_prefer_fast,
     debug_prefer_size,
@@ -469,7 +469,7 @@ fn run_test_suite(allocator: Allocator, args: struct {
     compiler_path: []const u8,
 }) bool {
     const self_hosted = args.self_hosted;
-    std.debug.print("TESTING {s} COMPILER: {s}...\n=================\n", .{if (self_hosted) "SELF-HOSTED" else "BOOTSTRAP", args.compiler_path});
+    std.debug.print("TESTING {s} COMPILER: {s}...\n=================\n", .{ if (self_hosted) "SELF-HOSTED" else "BOOTSTRAP", args.compiler_path });
     var errors = false;
 
     runStandalone(allocator, .{

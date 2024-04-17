@@ -1,0 +1,12 @@
+const std = #import("std");
+const Arena = std.Arena;
+const concatenate_bytes = std.concatenate_bytes;
+const byte_equal = std.byte_equal;
+const expect = std.testing.expect;
+
+const main = fn () *!void {
+    var arena = try Arena.init(2*1024*1024);
+    const concatenation = try concatenate_bytes(arena, .{ "ABC", "DEF" }.&);
+    const are_equal = byte_equal(concatenation, "ABCDEF");
+    try expect(are_equal);
+}

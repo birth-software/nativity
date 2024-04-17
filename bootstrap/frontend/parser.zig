@@ -98,6 +98,7 @@ pub const Node = struct {
         slice_type,
         array_type,
         argument_declaration,
+        comptime_argument_declaration,
         intrinsic,
         ssize_type,
         usize_type,
@@ -202,6 +203,7 @@ pub const Node = struct {
         for_expressions,
         slice_metadata,
         orelse_expression,
+        type,
     };
 };
 
@@ -479,6 +481,13 @@ const Analyzer = struct {
 
         while (analyzer.peekToken() != end_token) {
             const identifier_token = analyzer.token_i;
+            const id: Node.Id = switch (analyzer.peekToken()) {
+                .operator_dollar => b: {
+                    analyzer.consumeToken();
+                    break :b .comptime_argument_declaration;
+                },
+                else => .argument_declaration,
+            };
             switch (analyzer.peekToken()) {
                 .identifier, .discard => analyzer.consumeToken(),
                 else => |t| @panic(@tagName(t)),
@@ -491,7 +500,7 @@ const Analyzer = struct {
             }
 
             try list.append(analyzer.my_allocator, try analyzer.addNode(.{
-                .id = .argument_declaration,
+                .id = id,
                 .token = identifier_token,
                 .left = type_expression,
                 .right = Node.Index.null,
@@ -805,17 +814,12 @@ const Analyzer = struct {
             break :b else_expression;
         } else .null;
 
-        const for_node = try analyzer.addNode(.{
-            .id = .for_loop,
-            .token = token,
-            .left = for_condition_node,
-            .right = try analyzer.addNode(.{
-                .id = .for_expressions,
-                .token = .null,
-                .left = true_expression,
-                .right = else_expression,
-            })
-        });
+        const for_node = try analyzer.addNode(.{ .id = .for_loop, .token = token, .left = for_condition_node, .right = try analyzer.addNode(.{
+            .id = .for_expressions,
+            .token = .null,
+            .left = true_expression,
+            .right = else_expression,
+        }) });
 
         return for_node;
     }
@@ -1142,6 +1146,7 @@ const Analyzer = struct {
                 .fixed_keyword_else,
                 .identifier,
                 .discard,
+                .fixed_keyword_test,
                 => break,
                 .operator_compare_equal => .compare_equal,
                 .operator_compare_not_equal => .compare_not_equal,
@@ -1517,7 +1522,8 @@ const Analyzer = struct {
         if (analyzer.peekToken() == .operator_asterisk and analyzer.peekTokenAhead(1) == .operator_bang) {
             const asterisk = try analyzer.expectToken(.operator_asterisk);
             analyzer.consumeToken();
-            const type_node = try analyzer.suffixExpression();
+            // if (analyzer.peekToken() == .operator_left_bracket) @breakpoint();
+            const type_node = try analyzer.typeExpression();
 
             const all_errors_node = try analyzer.addNode(.{
                 .id = .all_errors,
@@ -1905,6 +1911,15 @@ const Analyzer = struct {
         const token = analyzer.peekToken();
 
         return try switch (token) {
+            .fixed_keyword_type => try analyzer.addNode(.{
+                .id = .type,
+                .token = b: {
+                    analyzer.consumeToken();
+                    break :b token_i;
+                },
+                .left = .null,
+                .right = .null,
+            }),
             .fixed_keyword_any => try analyzer.addNode(.{
                 .id = .any,
                 .token = b: {

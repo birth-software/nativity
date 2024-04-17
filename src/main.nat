@@ -34,11 +34,17 @@ const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8,
     }
 }
 
+// TODO: turn this into a block with result
+const make_output_path = fn (main_source_file_path: []const u8) []const u8 {
+    assert(main_source_file_path.length > 0);
+}
+
 const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8) void { 
     var i: usize = 0;
 
     var maybe_output_argument: ?[]const u8 = null;
     var maybe_main_source_file: ?[]const u8 = null;
+    var maybe_main_executable_name: ?[]const u8 = null;
 
     while (i < command_arguments.length) {
         const command_argument = c_slice(command_arguments[i]);
@@ -61,10 +67,14 @@ const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8)
         print("error: no main source file specified\n");
         exit(1);
     };
+
+    const main_executable_name = maybe_main_executable_name orelse (std.os.basename(main_source_file[0..main_source_file.length - 9]) orelse unreachable); // 9 => "/main.nat".length
+
+    print("Foo\n");
 }
 
 const main = fn() *!void {
-    const arena = try Arena.allocate(std.megabytes(64));
+    const arena = try Arena.init(std.megabytes(64));
     const argument_count = std.start.argument_count;
 
     if (argument_count <= 1) {
