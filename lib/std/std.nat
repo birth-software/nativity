@@ -113,8 +113,10 @@ const Arena = struct{
     };
     
     const commit_granularity = 2 * 1024 * 1024;
+    const reserve = os.reserve;
+    const commit = os.commit;
 
-    const allocate = fn (requested_size: u64) *!&Arena {
+    const init = fn (requested_size: u64) *!&Arena {
         var size = requested_size;
         const size_roundup_granularity = megabytes(64);
         size += size_roundup_granularity - 1;
@@ -122,8 +124,8 @@ const Arena = struct{
         const initial_commit_size = commit_granularity;
         assert(initial_commit_size >= #size(Arena));
 
-        const reserved_memory = try os.reserve(size);
-        try os.commit(reserved_memory, initial_commit_size);
+        const reserved_memory = try reserve(size);
+        try commit(reserved_memory, initial_commit_size);
 
         const arena: &Arena = #cast(reserved_memory);
         arena.@ = .{
@@ -134,6 +136,40 @@ const Arena = struct{
         };
 
         return arena;
+    }
+
+    const allocate = fn (arena: &Arena, size: u64) *!&any {
+
+        if (arena.position + size <= arena.size) {
+            const base: &any = #cast(arena);
+            var post_alignment_position = arena.position + arena.alignment - 1;
+            post_alignment_position -= post_alignment_position % arena.alignment;
+            const alignment = post_alignment_position - arena.position;
+            const result = base + arena.position + alignment;
+            arena.position += size + alignment;
+
+            if (arena.commit_position < arena.position - arena.commit_position) {
+                var size_to_commit = arena.position - arena.commit_position;
+                size_to_commit += commit_granularity - 1;
+                size_to_commit -= size_to_commit % commit_granularity;
+                try commit(base + arena.commit_position, size_to_commit);
+                arena.commit_position += size_to_commit;
+            }
+
+            return result;
+        } else {
+            unreachable;
+        }
+    }
+
+    const new = fn (arena: &Arena, $T: type) *!&T {
+        const result: &T = #cast(arena.allocate(#size(T)));
+        return result;
+    }
+
+    const new_array = fn (arena: &Arena, $T: type, count: usize) *![]T {
+        const result: [&]T = #cast(try arena.allocate(#size(T) * count));
+        return result[0..count];
     }
 };
 
@@ -181,8 +217,38 @@ const c_len = fn (pointer_to_string: [&:0]const u8) usize {
 }
 
 const c_slice = fn (pointer_to_string: [&:0]const u8) [:0]const u8 {
-    const len = c_len(pointer_to_string);
-    return pointer_to_string[0..len:0];
+    const length = c_len(pointer_to_string);
+    return pointer_to_string[0..length:0];
+}
+
+const concatenate_bytes = fn (arena: &Arena, byte_sequences: []const []const u8) *![]u8 {
+    var byte_count: usize = 0;
+    for (byte_sequences) |byte_sequence| {
+        byte_count += byte_sequence.length;
+    }
+
+    var concatenation = try arena.new_array($u8, byte_count);
+    var offset: usize = 0;
+
+    for (byte_sequences) |bs| {
+        var i: usize = 0;
+
+        while (i < bs.length) {
+            concatenation[offset + i] = bs[i];
+            i += 1;
+        }
+
+        offset += i;
+    }
+
+    return concatenation;
+}
+
+test "concatenate" {
+    var arena = try Arena.init(2*1024*1024);
+    const concatenation = try concatenate_bytes(arena, .{ "ABC", "DEF" }.&);
+    const are_equal = byte_equal(concatenation, "ABCDEF");
+    try testing.expect(are_equal);
 }
 
 const Target = struct {

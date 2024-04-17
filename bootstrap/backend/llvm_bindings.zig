@@ -154,7 +154,6 @@ pub extern fn NativityLLVMRunOptimizationPipeline(module: *LLVM.Module, target_m
 pub extern fn NativityLLVMModuleAddPassesToEmitFile(module: *LLVM.Module, target_machine: *LLVM.Target.Machine, object_file_path_ptr: [*]const u8, object_file_path_len: usize, codegen_file_type: LLVM.CodeGenFileType, disable_verify: bool) bool;
 pub extern fn NativityLLVMTypeAssertEqual(a: *LLVM.Type, b: *LLVM.Type) void;
 
-
 pub extern fn LLVMInitializeAArch64TargetInfo() void;
 pub extern fn LLVMInitializeAMDGPUTargetInfo() void;
 pub extern fn LLVMInitializeARMTargetInfo() void;

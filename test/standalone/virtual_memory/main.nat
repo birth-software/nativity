@@ -2,5 +2,5 @@ const std = #import("std");
 const Arena = std.Arena;
 
 const main = fn() *!void {
-    var arena = try Arena.allocate(2*1024*1024);
+    var arena = try Arena.init(2*1024*1024);
 }
