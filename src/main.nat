@@ -39,7 +39,7 @@ const make_output_path = fn (main_source_file_path: []const u8) []const u8 {
     assert(main_source_file_path.length > 0);
 }
 
-const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8) void { 
+const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8) *!void { 
     var i: usize = 0;
 
     var maybe_output_argument: ?[]const u8 = null;
@@ -70,7 +70,16 @@ const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8)
 
     const main_executable_name = maybe_main_executable_name orelse (std.os.basename(main_source_file[0..main_source_file.length - 9]) orelse unreachable); // 9 => "/main.nat".length
 
-    print("Foo\n");
+    print("TODO: lex '");
+    print(main_source_file);
+    print("'\n");
+
+    const file_descriptor = try std.os.open(#cast(main_source_file.pointer), .{});
+    const file_size = try file_descriptor.get_size();
+    const file_buffer = try arena.new_array($u8, file_size);
+    file_descriptor.read_all(file_buffer);
+    print("File:\n");
+    print(file_buffer);
 }
 
 const main = fn() *!void {

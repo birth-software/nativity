@@ -44,10 +44,7 @@ const byte_equal = fn (a: []const u8, b: []const u8) bool {
 
 const print = fn(bytes: []const u8) void {
     const file_descriptor = os.StdFileDescriptor.get(descriptor = .stdout);
-    const file_writer = FileWriter{
-        .descriptor = file_descriptor,
-    };
-    _ = file_writer.write_all(bytes) catch unreachable;
+    _ = file_descriptor.write_all(bytes) catch unreachable;
 }
 
 const format_usize = fn(n: usize, buffer: &[65]u8) []u8 {
@@ -75,10 +72,7 @@ const print_usize = fn(n: usize) void {
     const bytes = format_usize(n, buffer = buffer.&);
     assert(bytes.length < buffer.length);
     const file_descriptor = os.StdFileDescriptor.get(descriptor = .stdout);
-    const file_writer = FileWriter{
-        .descriptor = file_descriptor,
-    };
-    file_writer.write_all(bytes) catch unreachable;
+    file_descriptor.write_all(bytes) catch unreachable;
 }
 
 const print_u8 = fn(n: u8) void {
@@ -170,33 +164,6 @@ const Arena = struct{
     const new_array = fn (arena: &Arena, $T: type, count: usize) *![]T {
         const result: [&]T = #cast(try arena.allocate(#size(T) * count));
         return result[0..count];
-    }
-};
-
-const Writer = struct{
-    callback: &const fn(writer: &Writer, bytes: []const u8) Writer.Error!usize,
-    const Error = error{
-        write_failed,
-    };
-};
-
-const FileWriter = struct{
-    descriptor: os.FileDescriptor,
-
-    const write = fn(file_writer: FileWriter, bytes: []const u8) Writer.Error!usize {
-        const bytes_written = file_writer.descriptor.write(bytes) catch return Writer.Error.write_failed;
-        return bytes_written;
-    }
-
-    const write_all = fn(file_writer: FileWriter, bytes: []const u8) Writer.Error!void {
-        var bytes_written: usize = 0;
-
-        while (bytes_written < bytes.length) {
-            const iteration_written_byte_count = try file_writer.write(bytes = bytes[bytes_written..]);
-            bytes_written += iteration_written_byte_count;
-        }
-
-        assert(bytes_written == bytes.length);
     }
 };
 

@@ -908,8 +908,9 @@ const dup2 = fn(old: FileDescriptor, new: FileDescriptor) usize {
     return result;
 }
 
-const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) usize {
-    const result = #syscall(#cast(Syscall.open), #cast(path), flags, permissions);
+const open = fn(path: [&:0]const u8, flags: OpenFlags, permissions: u32) usize {
+    const flattened_flags: u32 = #cast(flags);
+    const result = #syscall(#cast(Syscall.open), #cast(path), flattened_flags, permissions);
     return result;
 }
 
@@ -954,6 +955,37 @@ const memfd_create = fn(name: [&:0]const u8, flags: u32) usize {
     return result;
 }
 
+const TimeSpec = struct{
+    seconds: s64,
+    nanoseconds: s64,
+};
+
+const Stat = struct{
+    dev: u64,
+    inode: u64,
+    nlink: u64,
+
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    _: u32,
+    rdev: u64,
+    size: s64,
+    block_size: s64,
+    blocks: s64,
+
+    atime: TimeSpec,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
+    _: [3]u64,
+};
+
+const fstat = fn(file_descriptor: FileDescriptor, stat_buffer: &Stat) usize {
+    const file_descriptor_u: u32 = #cast(file_descriptor);
+    const result = #syscall(#cast(Syscall.fstat), file_descriptor_u, #cast(stat_buffer));
+    return result;
+}
+
 const unwrap_syscall = fn(syscall_result: usize) Error!usize {
     const signed_syscall_result: ssize = #cast(syscall_result);
 
@@ -988,4 +1020,33 @@ const PollFileDescriptor = struct{
         rdnorm: bool = false,
         rdband: bool = false,
     };
+};
+
+const AccessMode = enum(u2) {
+    read_only = 0,
+    write_only = 1,
+    read_write = 2,
+};
+
+const OpenFlags = bitfield(u32) {
+    access_mode: AccessMode,
+    _: u4 = 0,
+    creat: bool = false,
+    excl: bool = false,
+    noctty: bool = false,
+    truncate: bool = false,
+    append: bool = false,
+    non_block: bool = false,
+    dsync: bool = false,
+    async: bool = false,
+    direct: bool = false,
+    _: u1 = 0,
+    directory: bool = false,
+    no_follow: bool = false,
+    noatime: bool = false,
+    cloexec: bool = false,
+    sync: bool = false,
+    path: bool = false,
+    tmpfile: bool = false,
+    _: u9 = 0,
 };

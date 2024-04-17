@@ -2711,6 +2711,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .pointer_const_to_var,
                             .pointer_to_array_to_pointer_to_many,
                             .pointer_source_type_to_destination_type,
+                            .pointer_none_terminated_to_zero,
                             => {
                                 try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, value);
                             },
