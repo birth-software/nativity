@@ -52,6 +52,7 @@ pub fn BlockList(comptime T: type, comptime E: type) type {
             const block = list.blocks.pointer[block_index];
             const index = block.len;
             _ = try block.addOne();
+            list.len += 1;
             return @enumFromInt(block_index * item_count + index);
         }
 
