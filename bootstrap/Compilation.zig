@@ -4932,6 +4932,7 @@ pub const Builder = struct {
                                 unreachable;
                             }
                         },
+                        .bool => return .zero_extend,
                         else => |t| @panic(@tagName(t)),
                     },
                     .pointer => {
@@ -11303,8 +11304,16 @@ pub const Builder = struct {
             },
             .character_literal => blk: {
                 const ch_literal = unit.getExpectedTokenBytes(node.token, .character_literal);
-                assert(ch_literal.len == 3);
-                const character = ch_literal[1];
+                const character = switch (ch_literal.len) {
+                    3 => ch_literal[1],
+                    // This has a escape character
+                    4 => switch (ch_literal[2]) {
+                        'n' => '\n',
+                        else => unreachable,
+                    },
+                    else => unreachable,
+                };
+
                 break :blk .{
                     .value = .{
                         .@"comptime" = .{
