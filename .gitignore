@@ -5,3 +5,4 @@ nat/
 *.out
 *.obj
 Nativity/
+perf.data
