@@ -132,7 +132,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
             },
             '\'' => blk: {
                 index += 1;
-                index += @intFromBool(text[index] == '\'');
+                index += @intFromBool(text[index] == '\\');
                 index += 1;
                 const is_end_char_literal = text[index] == '\'';
                 index += @intFromBool(is_end_char_literal);

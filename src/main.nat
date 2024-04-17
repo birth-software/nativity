@@ -9,8 +9,15 @@ const ArgumentProcessingError = error{
     no_arguments,
 };
 
-const lex = fn () void {
+const lex = fn (arena: &Arena, bytes: []const u8) void {
+    var line_count: u32 = 0;
+    for (bytes) |b| {
+        line_count += #cast(b == '\n');
+    }
 
+    print("Line count: ");
+    std.print_usize(line_count);
+    print("\n");
 }
 
 const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {
@@ -80,6 +87,8 @@ const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8)
     file_descriptor.read_all(file_buffer);
     print("File:\n");
     print(file_buffer);
+
+    lex(arena, file_buffer);
 }
 
 const main = fn() *!void {
