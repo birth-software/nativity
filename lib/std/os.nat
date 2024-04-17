@@ -40,7 +40,7 @@ const FileDescriptor = struct{
     handle: system.FileDescriptor,
 
     const ReadError = error{
-
+        failed,
     };
 
     const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ReadError!usize {
@@ -48,25 +48,37 @@ const FileDescriptor = struct{
             switch (current) {
                 .linux => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.length);
-                    const syscall_result = system.read(file_descriptor, bytes);
+                    const syscall_result = system.read(file_descriptor.handle, bytes);
                     const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
-                        else => unreachable,
+                        else => return ReadError.failed,
                     };
                     return byte_count;
                 },
                 .macos => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.length);
-                    const syscall_result = system.read(file_descriptor, bytes);
+                    const syscall_result = system.read(file_descriptor.handle, bytes);
                     const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
-                        else => unreachable,
+                        else => return ReadError.failed,
                     };
                     return byte_count;
                 },
                 else => #error("OS not supported"),
             }
         } else {
-            return 0;
+            const result: usize = 0;
+            return result;
         }
+    }
+
+    const read_all = fn(file_descriptor: FileDescriptor, bytes: []u8) ReadError!void {
+        var bytes_read: usize = 0;
+
+        while (bytes_read < bytes.length) {
+            const iteration_read_byte_count = try file_descriptor.read(bytes = bytes[bytes_read..]);
+            bytes_read += iteration_read_byte_count;
+        }
+
+        assert(bytes_read == bytes.length);
     }
 
     const WriteError = error{
@@ -94,6 +106,56 @@ const FileDescriptor = struct{
             else => #error("OS not supported"),
         }
     }
+
+    const write_all = fn(file_descriptor: FileDescriptor, bytes: []const u8) WriteError!void {
+        var bytes_written: usize = 0;
+
+        while (bytes_written < bytes.length) {
+            const iteration_written_byte_count = try file_descriptor.write(bytes = bytes[bytes_written..]);
+            bytes_written += iteration_written_byte_count;
+        }
+
+        assert(bytes_written == bytes.length);
+    }
+
+    const get_size = fn (file_descriptor: FileDescriptor) GetAttributesError!u64 {
+        switch (current) {
+            .linux => {
+                const file_attributes = try file_descriptor.get_attributes();
+                return file_attributes.size;
+            },
+            else => #error("OS not supported"),
+        }
+    }
+
+    const GetAttributesError = error{
+        failed,
+    };
+
+    const get_attributes = fn (file_descriptor: FileDescriptor) GetAttributesError!FileAttributes {
+        switch (current) {
+            .linux => {
+                var stat_buffer: linux.Stat = undefined;
+                const raw_result = linux.fstat(file_descriptor.handle, stat_buffer.&);
+                const result = unwrap_syscall(raw_result) catch |err| switch (err) {
+                    else => return GetAttributesError.failed,
+                };
+
+                const size: u64 = #cast(stat_buffer.size);
+
+                const file_attributes = FileAttributes{
+                    .size = size,
+                };
+
+                return file_attributes;
+            },
+            else => #error("OS not supported"),
+        }
+    }
+};
+
+const FileAttributes = struct{
+    size: u64,
 };
 
 const StdFileDescriptor = enum {
@@ -318,18 +380,38 @@ const dup2 = fn(old_file_descriptor: system.FileDescriptor, new_file_descriptor:
 }
 
 const OpenError = error{
-
+    failed,
 };
-const open = fn(path: [&:0]const u8, flags: u32, permissions: u32) OpenError!FileDescriptor{
+
+const OpenFlags = bitfield(u32) {
+    access_mode: AccessMode = .read_only,
+};
+
+const AccessMode = enum(u2) {
+    read_only = 0,
+    write_only = 1,
+    read_write = 2,
+};
+
+const open = fn(path: [&:0]const u8, open_flags: OpenFlags) OpenError!FileDescriptor{
     switch (current) {
         .linux => {
-            const syscall_result = linux.open(path, flags, permissions);
+            const flags = linux.OpenFlags{
+                .access_mode = switch (open_flags.access_mode) {
+                    .read_only => .read_only,
+                    .write_only => .write_only,
+                    .read_write => .read_write,
+                },
+            };
+            const syscall_result = linux.open(path, flags, 0);
             const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
                 else => unreachable,
             };
 
+            const r: u32 = #cast(result);
+
             const file_descriptor = FileDescriptor{
-                .handle = #cast(result),
+                .handle = #cast(r),
             };
             return file_descriptor;
         },

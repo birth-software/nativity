@@ -1799,7 +1799,7 @@ const Analyzer = struct {
                     },
                     else => |t| @panic(@tagName(t)),
                 },
-                .identifier => b: {
+                .identifier, .discard, => b: {
                     analyzer.consumeToken();
 
                     switch (container_type) {
