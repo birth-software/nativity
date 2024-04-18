@@ -133,7 +133,6 @@ const Arena = struct{
     }
 
     const allocate = fn (arena: &Arena, size: u64) *!&any {
-
         if (arena.position + size <= arena.size) {
             const base: &any = #cast(arena);
             var post_alignment_position = arena.position + arena.alignment - 1;
