@@ -3073,7 +3073,7 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
             write(.panic, "\nPANIC: ") catch {};
             write(.panic, message) catch {};
             write(.panic, "\n") catch {};
-            if (@import("builtin").os.tag != .windows) @breakpoint();
+            @breakpoint();
             std.posix.abort();
         },
     }
@@ -4390,6 +4390,7 @@ pub const Builder = struct {
     current_basic_block: BasicBlock.Index = .null,
     exit_blocks: UnpinnedArray(BasicBlock.Index) = .{},
     loop_exit_block: BasicBlock.Index = .null,
+    loop_header_block: BasicBlock.Index = .null,
     return_phi: Instruction.Index = .null,
     return_block: BasicBlock.Index = .null,
     last_check_point: struct {
@@ -13516,9 +13517,12 @@ pub const Builder = struct {
                     assert(statement_node.left != .null);
                     assert(statement_node.right != .null);
 
-                    const loop_header_block = try builder.newBasicBlock(unit, context);
-                    try builder.jump(unit, context, loop_header_block);
-                    builder.current_basic_block = loop_header_block;
+                    const old_loop_header_block = builder.loop_header_block;
+                    defer builder.loop_header_block = old_loop_header_block;
+
+                    builder.loop_header_block = try builder.newBasicBlock(unit, context);
+                    try builder.jump(unit, context, builder.loop_header_block);
+                    builder.current_basic_block = builder.loop_header_block;
 
                     const condition = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .bool }, statement_node.left, .right);
                     const body_block = try builder.newBasicBlock(unit, context);
@@ -13530,33 +13534,11 @@ pub const Builder = struct {
                     switch (condition.value) {
                         .runtime => |condition_instruction| {
                             try builder.branch(unit, context, condition_instruction, body_block, exit_block);
-
-                            builder.current_basic_block = body_block;
-                            builder.loop_exit_block = exit_block;
-
-                            const body_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, statement_node.right, .right);
-                            _ = body_value; // autofix
-                            try builder.jump(unit, context, loop_header_block);
-
-                            builder.current_basic_block = exit_block;
                         },
                         .@"comptime" => |ct| switch (ct) {
                             .bool => |boolean| switch (boolean) {
                                 true => {
                                     try builder.jump(unit, context, body_block);
-                                    builder.current_basic_block = body_block;
-                                    builder.loop_exit_block = exit_block;
-
-                                    const body_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, statement_node.right, .right);
-                                    switch (unit.types.get(body_value.type).*) {
-                                        .void => {
-                                            try builder.jump(unit, context, loop_header_block);
-                                        },
-                                        .noreturn => {},
-                                        else => |t| @panic(@tagName(t)),
-                                    }
-
-                                    builder.current_basic_block = exit_block;
                                 },
                                 false => unreachable,
                             },
@@ -13564,6 +13546,20 @@ pub const Builder = struct {
                         },
                         else => unreachable,
                     }
+
+                    builder.current_basic_block = body_block;
+                    builder.loop_exit_block = exit_block;
+
+                    const body_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, statement_node.right, .right);
+                    switch (unit.types.get(body_value.type).*) {
+                        .void => {
+                            try builder.jump(unit, context, builder.loop_header_block);
+                        },
+                        .noreturn => {},
+                        else => |t| @panic(@tagName(t)),
+                    }
+
+                    builder.current_basic_block = exit_block;
                 },
                 .for_loop => {
                     assert(statement_node.left != .null);
@@ -13676,9 +13672,12 @@ pub const Builder = struct {
                         },
                     };
 
-                    const loop_header = try builder.newBasicBlock(unit, context);
-                    try builder.jump(unit, context, loop_header);
-                    builder.current_basic_block = loop_header;
+                    const old_loop_header_block = builder.loop_header_block;
+                    defer builder.loop_header_block = old_loop_header_block;
+
+                    builder.loop_header_block = try builder.newBasicBlock(unit, context);
+                    try builder.jump(unit, context, builder.loop_header_block);
+                    builder.current_basic_block = builder.loop_header_block;
 
                     const pointer_to_usize = try unit.getPointerType(context, .{
                         .type = Type.usize,
@@ -13874,12 +13873,15 @@ pub const Builder = struct {
 
                     try builder.appendInstruction(unit, context, increment_store);
 
-                    try builder.jump(unit, context, loop_header);
+                    try builder.jump(unit, context, builder.loop_header_block);
 
                     builder.current_basic_block = exit_block;
                 },
                 .break_expression => {
                     try builder.jump(unit, context, builder.loop_exit_block);
+                },
+                .continue_expression => {
+                    try builder.jump(unit, context, builder.loop_header_block);
                 },
                 .@"if" => {
                     assert(statement_node.left != .null);
@@ -14440,9 +14442,42 @@ pub const Builder = struct {
                                 .node_list => {
                                     const condition_nodes = unit.getNodeListFromNode(condition_node);
                                     try conditions.ensure_capacity(context.my_allocator, @intCast(condition_nodes.len));
+
                                     for (condition_nodes) |condition_node_index| {
-                                        const condition = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null, .right, &.{}, null, &.{});
-                                        conditions.append_with_capacity(condition);
+                                        const cn = unit.getNode(condition_node_index);
+                                        switch (cn.id) {
+                                            .range => {
+                                                const left = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, cn.left, null, .right, &.{}, null, &.{});
+                                                const right = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, cn.right, null, .right, &.{}, null, &.{});
+
+                                                switch (condition_type) {
+                                                    .u8 => {
+                                                        var left_ch: u8 = switch (left) {
+                                                            .constant_int => |ci| @intCast(ci.value),
+                                                            else => |t| @panic(@tagName(t)),
+                                                        };
+                                                        const right_ch: u8 = switch (right) {
+                                                            .constant_int => |ci| @intCast(ci.value),
+                                                            else => |t| @panic(@tagName(t)),
+                                                        };
+
+                                                        if (left_ch < right_ch) {
+                                                            while (left_ch <= right_ch) : (left_ch += 1) {
+                                                                try conditions.append(context.my_allocator, .{
+                                                                    .constant_int = .{
+                                                                        .value = left_ch,
+                                                                    },
+                                                                });
+                                                            }
+                                                        } else {
+                                                            unreachable;
+                                                        }
+                                                    },
+                                                    else => unreachable,
+                                                }
+                                            },
+                                            else => try conditions.append(context.my_allocator, try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null, .right, &.{}, null, &.{})),
+                                        }
                                     }
                                 },
                                 else => {
@@ -16709,6 +16744,7 @@ pub const FixedKeyword = enum {
     Self,
     any,
     type,
+    @"continue"
 };
 
 pub const Descriptor = struct {
@@ -16853,6 +16889,8 @@ pub const Token = struct {
         operator_at,
         operator_comma,
         operator_dot,
+        operator_double_dot,
+        operator_triple_dot,
         operator_colon,
         operator_bang,
         operator_optional,
@@ -16925,6 +16963,8 @@ pub const Token = struct {
         fixed_keyword_Self,
         fixed_keyword_any,
         fixed_keyword_type,
+        fixed_keyword_continue,
+
         unused1,
         unused2,
         unused3,

@@ -259,7 +259,18 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
             },
             '.' => blk: {
                 index += 1;
-                break :blk .operator_dot;
+
+                if (text[index] == '.') {
+                    index += 1;
+                    if (text[index] == '.') {
+                        index += 1;
+                        break :blk .operator_triple_dot;
+                    } else {
+                        break :blk .operator_double_dot;
+                    }
+                } else {
+                    break :blk .operator_dot;
+                }
             },
             ':' => blk: {
                 index += 1;

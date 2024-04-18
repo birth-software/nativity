@@ -176,6 +176,7 @@ pub const Node = struct {
         anonymous_empty_literal,
         empty_container_literal_guess,
         break_expression,
+        continue_expression,
         character_literal,
         function_attribute_naked,
         function_attribute_cc,
@@ -601,13 +602,30 @@ const Analyzer = struct {
                 else => blk: {
                     var array_list = UnpinnedArray(Node.Index){};
                     while (true) {
-                        const switch_case_node = try analyzer.expression();
+                        const token = analyzer.token_i;
+                        const left = try analyzer.expression();
+
+                        const switch_case_node = switch (analyzer.peekToken()) {
+                            .operator_triple_dot => try analyzer.addNode(.{
+                                .id = .range,
+                                .token = b: {
+                                    analyzer.consumeToken();
+                                    break :b token;
+                                },
+                                .left = left,
+                                .right = try analyzer.expression(),
+                            }),
+                            else => left,
+                        };
+
                         try array_list.append(analyzer.my_allocator, switch_case_node);
+
                         switch (analyzer.peekToken()) {
                             .operator_comma => analyzer.consumeToken(),
                             .operator_switch_case => break,
                             else => {},
                         }
+
                     }
 
                     break :blk switch (array_list.length) {
@@ -726,21 +744,17 @@ const Analyzer = struct {
             const first = try analyzer.expression();
 
             const node_index = switch (analyzer.peekToken()) {
-                .operator_dot => switch (analyzer.peekTokenAhead(1)) {
-                    .operator_dot => blk: {
-                        analyzer.consumeTokens(2);
-
-                        break :blk try analyzer.addNode(.{
-                            .id = .range,
-                            .token = expression_token,
-                            .left = first,
-                            .right = switch (analyzer.peekToken()) {
-                                .operator_right_parenthesis, .operator_comma => Node.Index.null,
-                                else => try analyzer.expression(),
-                            },
+                .operator_double_dot => blk: {
+                    analyzer.consumeToken();
+                    break :blk try analyzer.addNode(.{
+                        .id = .range,
+                        .token = expression_token,
+                        .left = first,
+                        .right = switch (analyzer.peekToken()) {
+                            .operator_right_parenthesis, .operator_comma => Node.Index.null,
+                            else => try analyzer.expression(),
+                        },
                         });
-                    },
-                    else => |t| @panic(@tagName(t)),
                 },
                 .operator_right_parenthesis,
                 .operator_comma,
@@ -823,6 +837,17 @@ const Analyzer = struct {
         }) });
 
         return for_node;
+    }
+
+    fn continueExpression(analyzer: *Analyzer) !Node.Index {
+        const t = try analyzer.expectToken(.fixed_keyword_continue);
+        const node_index = try analyzer.addNode(.{
+            .id = .continue_expression,
+            .token = t,
+            .left = Node.Index.null,
+            .right = Node.Index.null,
+        });
+        return node_index;
     }
 
     fn breakExpression(analyzer: *Analyzer) !Node.Index {
@@ -1139,6 +1164,8 @@ const Analyzer = struct {
                 .operator_div_assign,
                 .operator_mod_assign,
                 .operator_dot,
+                .operator_double_dot,
+                .operator_triple_dot,
                 .operator_switch_case,
                 .fixed_keyword_const,
                 .fixed_keyword_var,
@@ -1148,6 +1175,7 @@ const Analyzer = struct {
                 .identifier,
                 .discard,
                 .fixed_keyword_test,
+                .fixed_keyword_break,
                 => break,
                 .operator_compare_equal => .compare_equal,
                 .operator_compare_not_equal => .compare_not_equal,
@@ -1292,6 +1320,7 @@ const Analyzer = struct {
                 .right = Node.Index.null,
             }),
             .fixed_keyword_break => try analyzer.breakExpression(),
+            .fixed_keyword_continue => try analyzer.continueExpression(),
             // todo:?
             .operator_left_brace => try analyzer.block(),
             .fixed_keyword_if => try analyzer.ifExpression(),
@@ -2142,8 +2171,8 @@ const Analyzer = struct {
                 analyzer.consumeToken();
                 const index_expression = try analyzer.expression();
 
-                if (analyzer.peekToken() == .operator_dot and analyzer.peekTokenAhead(1) == .operator_dot) {
-                    analyzer.consumeTokens(2);
+                if (analyzer.peekToken() == .operator_double_dot) {
+                    analyzer.consumeToken();
                     const range_end_expression = switch (analyzer.peekToken()) {
                         .operator_right_bracket => Node.Index.null,
                         else => try analyzer.expression(),
@@ -2206,7 +2235,6 @@ const Analyzer = struct {
                         .right = Node.Index.null,
                     }),
                 }),
-                .operator_dot => Node.Index.null,
                 .operator_ampersand => try analyzer.addNode(.{
                     .id = .address_of,
                     .token = blk: {
