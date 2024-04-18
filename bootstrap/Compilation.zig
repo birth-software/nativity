@@ -3270,6 +3270,49 @@ fn getTypeHomogeneousAggregate(ty: *Type, unit: *Unit) ?HomogeneousAggregate {
 const _usize: Type.Index = .u64;
 const _ssize: Type.Index = .s64;
 
+fn serialize_comptime_parameters(unit: *Unit, context: *const Context, original_declaration: *Debug.Declaration, parameters: []const V.Comptime) !u32 {
+    var name = UnpinnedArray(u8){};
+    const original_name = unit.getIdentifier(original_declaration.name);
+    try name.append_slice(context.my_allocator, original_name);
+    assert(parameters.len > 0);
+    try name.append(context.my_allocator, '(');
+
+    for (parameters) |parameter| {
+        switch (parameter) {
+            .type => |parameter_type_index| if (unit.type_declarations.get(parameter_type_index)) |foo| {
+                _ = foo; // autofix
+                unreachable;
+            } else switch (unit.types.get(parameter_type_index).*) {
+                .integer => |integer| switch (integer.kind) {
+                    .materialized_int => {
+                        const char: u8 = switch (integer.signedness) {
+                            .signed => 's',
+                            .unsigned => 'u',
+                        };
+                        try name.append(context.my_allocator, char);
+                        var bit_buffer: [32]u8 = undefined;
+                        const formatted_int = format_int(&bit_buffer, integer.bit_count, 10, false);
+                        try name.append_slice(context.my_allocator, formatted_int);
+                    },
+                    else => |t| @panic(@tagName(t)),
+                },
+                else => |t| @panic(@tagName(t)),
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+
+        try name.append(context.my_allocator, ',');
+        try name.append(context.my_allocator, ' ');
+    }
+
+    name.length -= 2;
+    name.pointer[name.length] = ')';
+    name.length += 1;
+
+    const name_hash = try unit.processIdentifier(context, name.slice());
+    return name_hash;
+}
+
 pub const Type = union(enum) {
     void,
     noreturn,
@@ -3282,6 +3325,7 @@ pub const Type = union(enum) {
     slice: Type.Slice,
     array: Type.Array,
     polymorphic: Type.Polymorphic,
+    polymorphic_function: void,
 
     pub const @"usize" = _usize;
     pub const ssize = _ssize;
@@ -3298,46 +3342,7 @@ pub const Type = union(enum) {
         }
 
         pub fn add_instantiation(polymorphic: *Polymorphic, unit: *Unit, context: *const Context, parameters: []const V.Comptime, original_declaration: *Debug.Declaration.Global, type_index: Type.Index) !void {
-            var name = UnpinnedArray(u8){};
-            const original_name = unit.getIdentifier(original_declaration.declaration.name);
-            try name.append_slice(context.my_allocator, original_name);
-            try name.append(context.my_allocator, '(');
-
-            if (parameters.len > 0) {
-                for (parameters) |parameter| {
-                    switch (parameter) {
-                        .type => |parameter_type_index| if (unit.type_declarations.get(parameter_type_index)) |foo| {
-                            _ = foo; // autofix
-                            unreachable;
-                        } else switch (unit.types.get(parameter_type_index).*) {
-                            .integer => |integer| switch (integer.kind) {
-                                .materialized_int => {
-                                    const char: u8 = switch (integer.signedness) {
-                                        .signed => 's',
-                                        .unsigned => 'u',
-                                    };
-                                    try name.append(context.my_allocator, char);
-                                    var bit_buffer: [32]u8 = undefined;
-                                    const formatted_int = format_int(&bit_buffer, integer.bit_count, 10, false);
-                                    try name.append_slice(context.my_allocator, formatted_int);
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
-
-                    try name.append(context.my_allocator, ',');
-                    try name.append(context.my_allocator, ' ');
-                }
-
-                name.length -= 2;
-                name.pointer[name.length] = ')';
-                name.length += 1;
-            }
-
-            const name_hash = try unit.processIdentifier(context, name.slice());
+            const name_hash = try serialize_comptime_parameters(unit, context, &original_declaration.declaration, parameters);
 
             const new_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
                 .declaration = .{
@@ -3531,6 +3536,7 @@ pub const Type = union(enum) {
         s16,
         s32,
         s64,
+        polymorphic_function,
         // usize,
         // ssize,
 
@@ -3618,6 +3624,7 @@ pub const Type = union(enum) {
                     .kind = .materialized_int,
                 },
             },
+            .polymorphic_function = .polymorphic_function,
             // .ssize = .{
             //     .integer = .{
             //         .bit_count = 64,
@@ -3909,7 +3916,6 @@ pub const Function = struct {
         body: Debug.Block.Index,
         return_pointer: Instruction.Index = .null,
         alloca_index: u32 = 1,
-        has_polymorphic_parameters: bool = false,
 
         pub const List = BlockList(@This(), enum {});
         pub usingnamespace @This().List.Index;
@@ -3926,6 +3932,7 @@ pub const Function = struct {
         abi: Prototype.Abi = .{},
         attributes: Attributes = .{},
         calling_convention: CallingConvention = .auto,
+        has_polymorphic_parameters: bool = false,
         // comptime_parameter_declarations: []const ComptimeParameterDeclaration = &.{},
         // comptime_parameter_instantiations: []const V.Comptime = &.{},
         // is_member: bool = false,
@@ -4055,10 +4062,49 @@ pub const PolymorphicFunction = struct {
     node: Node.Index,
     is_member_call: bool,
 
-    pub fn add_instantiation() void {
+    pub fn get_instantiation(polymorphic_function: *PolymorphicFunction, types: []const V.Comptime) ?*Debug.Declaration.Global {
+        const param_hash = hash(types);
+        const result = polymorphic_function.instantiations.get(param_hash);
+        return result;
     }
 
-    fn hash() void {
+    pub fn add_instantiation(polymorphic_function: *PolymorphicFunction, unit: *Unit, context: *const Context, parameters: []const V.Comptime, original_declaration: *Debug.Declaration.Global, function_definition_index: Function.Definition.Index) !*Debug.Declaration.Global {
+        const name_hash = try serialize_comptime_parameters(unit, context, &original_declaration.declaration, parameters);
+
+        if (original_declaration.declaration.type != .null) {
+            assert(original_declaration.declaration.type == .polymorphic_function);
+        }
+
+        const function_definition = unit.function_definitions.get(function_definition_index);
+        const type_index = function_definition.type;
+
+        const new_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
+            .declaration = .{
+                .scope = original_declaration.declaration.scope,
+                .type = type_index,
+                .name = name_hash,
+                .line = original_declaration.declaration.line,
+                .column = original_declaration.declaration.column,
+                .mutability = original_declaration.declaration.mutability,
+                .kind = original_declaration.declaration.kind,
+            },
+            .initial_value = .{
+                .function_definition = function_definition_index,
+            },
+            .type_node_index = original_declaration.type_node_index,
+            .attributes = original_declaration.attributes,
+        });
+        const new_declaration = unit.global_declarations.get(new_declaration_index);
+
+        const parameter_hash = hash(parameters);
+        try polymorphic_function.instantiations.put_no_clobber(context.my_allocator, parameter_hash, new_declaration);
+
+        return new_declaration;
+    }
+
+    fn hash(parameters: []const V.Comptime) u32 {
+        const result = data_structures.my_hash(std.mem.sliceAsBytes(parameters));
+        return result;
     }
 };
 
@@ -4137,6 +4183,7 @@ pub const V = struct {
                 .comptime_int => .comptime_int,
                 .constant_struct => |constant_struct| unit.constant_structs.get(constant_struct).type,
                 .function_declaration => |function_type| function_type,
+                .polymorphic_function=> .polymorphic_function,
                 else => |t| @panic(@tagName(t)),
             };
         }
@@ -5229,25 +5276,25 @@ pub const Builder = struct {
                 }
 
                 switch (global_declaration.initial_value) {
+                    .polymorphic_function => |*polymorphic_function| {
+                        assert(polymorphic_function.instantiations.length == 1);
+                        const function_definition_global = polymorphic_function.instantiations.values()[0];
+                        assert(function_definition_global.initial_value == .function_definition);
+
+                        try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_global.initial_value.function_definition, function_definition_global);
+
+                        return function_definition_global;
+                    },
                     .function_definition => |function_definition_index| {
-                        // const function_definition = unit.function_definitions.get(function_definition_index);
-                        // if (function_definition.has_polymorphic_parameters) {
-                        //     const function_prototype_index = unit.types.get(function_definition.type).function;
-                        //     const function_prototype = unit.function_prototypes.get(function_prototype_index);
-                        //     assert(function_prototype.comptime_parameter_declarations.len > 0);
-                        //     assert(function_prototype.comptime_parameter_instantiations.len > 0);
-                        //     unreachable;
-                        // } else {
-                            switch (unit.getNode(declaration_node_index).id) {
-                                .function_definition => try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_index, global_declaration),
-                                else => {
-                                    const actual_function_declaration = unit.code_to_emit.get(function_definition_index).?;
-                                    global_declaration.initial_value = .{
-                                        .global = actual_function_declaration,
-                                    };
-                                },
-                            }
-                        // }
+                        switch (unit.getNode(declaration_node_index).id) {
+                            .function_definition => try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_index, global_declaration),
+                            else => {
+                                const actual_function_declaration = unit.code_to_emit.get(function_definition_index).?;
+                                global_declaration.initial_value = .{
+                                    .global = actual_function_declaration,
+                                };
+                            },
+                        }
                     },
                     .function_declaration => |function_type| {
                         switch (unit.getNode(declaration_node_index).id) {
@@ -5264,8 +5311,9 @@ pub const Builder = struct {
                         assert(declaration.type == .type);
                         switch (unit.types.get(type_index).*) {
                             .polymorphic => |*poly| if (new_parameters.len > 0) {
-                                const result = poly.get_instantiation(new_parameters) orelse unreachable;
-                                return result;
+                                if (poly.get_instantiation(new_parameters)) |result| return result else {
+                                    unreachable;
+                                }
                             },
                             else => unit.type_declarations.put(context.my_allocator, type_index, global_declaration) catch {
                                 assert(unit.type_declarations.get(type_index).? == global_declaration);
@@ -5279,7 +5327,14 @@ pub const Builder = struct {
                     },
                 }
             },
-            else => {},
+            .polymorphic_function => |*polymorphic_function| {
+                const instantiation_value = try builder.resolveComptimeValue(unit, context, Type.Expect.none, global_declaration.attributes, polymorphic_function.node, global_declaration, .right, new_parameters, maybe_member_value, polymorphic_argument_nodes);
+                const instantiation_global = instantiation_value.global;
+                try unit.code_to_emit.put(context.my_allocator, instantiation_global.initial_value.function_definition, instantiation_global);
+
+                return instantiation_global;
+            },
+            else => {}
         }
 
         inline for (@typeInfo(Debug.Declaration.Global.Attribute).Enum.fields) |attribute_enum_field| {
@@ -6671,7 +6726,7 @@ pub const Builder = struct {
             },
             .function_prototype => block: {
                 var b = false;
-                const fp = try builder.resolveFunctionPrototype(unit, context, node_index, .{}, null, &.{}, null, null, &b);
+                const fp = try builder.resolveFunctionPrototype(unit, context, node_index, .{}, null, &.{}, null, null, null, &b, null);
                 break :block fp;
             },
             .error_union => blk: {
@@ -6791,8 +6846,8 @@ pub const Builder = struct {
         }
     }
 
-    fn resolveFunctionPrototype(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index, global_attributes: Debug.Declaration.Global.Attributes, member: ?V, polymorphic_argument_nodes: []const Node.Index, maybe_scope: ?*Debug.Scope.Function, comptime_declarations: ?*UnpinnedArray(ComptimeParameterDeclaration), is_member: *bool) !Type.Index {
-        _ = comptime_declarations; // autofix
+    fn resolveFunctionPrototype(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index, global_attributes: Debug.Declaration.Global.Attributes, member: ?V, polymorphic_argument_nodes: []const Node.Index, maybe_scope: ?*Debug.Scope.Function, maybe_comptime_argument_declarations: ?*UnpinnedArray(ComptimeParameterDeclaration), maybe_comptime_argument_instantiations: ?*UnpinnedArray(V.Comptime), is_member: *bool, maybe_global: ?*Debug.Declaration.Global) !Type.Index {
+        _ = maybe_global; // autofix
         const node = unit.getNode(node_index);
         assert(node.id == .function_prototype);
         const attribute_and_return_type_node_list = unit.getNodeList(node.right);
@@ -6847,6 +6902,8 @@ pub const Builder = struct {
             var argument_types = try UnpinnedArray(Type.Index).initialize_with_capacity(context.my_allocator, @intCast(argument_node_list.len));
 
             if (polymorphic_argument_nodes.len > 0) {
+                const comptime_parameter_declarations = maybe_comptime_argument_declarations orelse unreachable;
+                const comptime_parameter_instantiations = maybe_comptime_argument_instantiations orelse unreachable;
                 is_member.* = polymorphic_argument_nodes.len + 1 == argument_node_list.len;
                 const scope = maybe_scope orelse unreachable;
                 assert(&scope.scope == builder.current_scope);
@@ -6863,9 +6920,6 @@ pub const Builder = struct {
                     try builder.put_argument_in_scope(unit, context, member_node, 0, member_type);
                     argument_types.append_with_capacity(member_type);
                 }
-
-                var comptime_parameter_declarations = UnpinnedArray(ComptimeParameterDeclaration){};
-                var comptime_parameter_instantiations = UnpinnedArray(V.Comptime){};
 
                 for (argument_node_list[@intFromBool(is_member.*)..], polymorphic_argument_nodes, 0..) |argument_declaration_node_index, polymorphic_call_argument_node_index, index| {
                     const argument_declaration_node = unit.getNode(argument_declaration_node_index);
@@ -6921,6 +6975,8 @@ pub const Builder = struct {
                         else => unreachable,
                     }
                 }
+
+                function_prototype.has_polymorphic_parameters = true;
 
                 // function_prototype.comptime_parameter_declarations = comptime_parameter_declarations.slice();
                 // function_prototype.comptime_parameter_instantiations = comptime_parameter_instantiations.slice();
@@ -8526,7 +8582,7 @@ pub const Builder = struct {
         };
     }
 
-    fn resolveFunctionDefinition(builder: *Builder, unit: *Unit, context: *const Context, maybe_function_type_index: Type.Index, function_node_index: Node.Index, body_node_index: Node.Index, argument_list_node_index: Node.Index, global_attributes: Debug.Declaration.Global.Attributes, maybe_member_value: ?V, polymorphic_argument_nodes: []const Node.Index, maybe_polymorphic_function: ?*PolymorphicFunction) !V.Comptime {
+    fn resolveFunctionDefinition(builder: *Builder, unit: *Unit, context: *const Context, maybe_function_type_index: Type.Index, function_node_index: Node.Index, body_node_index: Node.Index, argument_list_node_index: Node.Index, global_attributes: Debug.Declaration.Global.Attributes, maybe_member_value: ?V, polymorphic_argument_nodes: []const Node.Index, maybe_global: ?*Debug.Declaration.Global) !V.Comptime {
         const current_basic_block = builder.current_basic_block;
         defer builder.current_basic_block = current_basic_block;
         builder.current_basic_block = .null;
@@ -8571,10 +8627,18 @@ pub const Builder = struct {
         defer builder.popScope(unit, context) catch unreachable;
 
         var comptime_parameter_declarations = UnpinnedArray(ComptimeParameterDeclaration){};
+        var comptime_parameter_instantiations = UnpinnedArray(V.Comptime){};
         var is_member_call = false;
         function.type = if (maybe_function_type_index == .null) b: {
             const function_prototype_node_index = function_node.left;
-            break :b try builder.resolveFunctionPrototype(unit, context, function_prototype_node_index, global_attributes, maybe_member_value, polymorphic_argument_nodes, &function.scope, &comptime_parameter_declarations, &is_member_call);
+            const function_prototype_index = try builder.resolveFunctionPrototype(unit, context, function_prototype_node_index, global_attributes, maybe_member_value, polymorphic_argument_nodes, &function.scope, &comptime_parameter_declarations, &comptime_parameter_instantiations, &is_member_call, maybe_global);
+            if (maybe_global) |g| {
+                switch (g.initial_value) {
+                    .polymorphic_function => |*pf| if (pf.get_instantiation(comptime_parameter_instantiations.slice())) |_| unreachable else {},
+                    else => {},
+                }
+            }
+            break :b function_prototype_index;
         } else maybe_function_type_index;
 
         const entry_basic_block = try builder.newBasicBlock(unit, context);
@@ -9035,16 +9099,19 @@ pub const Builder = struct {
 
             const current_function = builder.current_function;
 
-            if (maybe_polymorphic_function) |polymorphic_function| {
-                _ = polymorphic_function; // autofix
-                unreachable;
+            if (maybe_global != null and maybe_global.?.initial_value == .polymorphic_function) {
+                const polymorphic_function = &maybe_global.?.initial_value.polymorphic_function;
+                const instantiation = try polymorphic_function.add_instantiation(unit, context, comptime_parameter_instantiations.slice(), maybe_global orelse unreachable, current_function);
+                return .{
+                    .global = instantiation,
+                };
             } else if (comptime_parameter_declarations.length > 0) {
                 var polymorphic_function = PolymorphicFunction{
                     .node = function_node_index,
                     .parameters = comptime_parameter_declarations.slice(),
                     .is_member_call = is_member_call,
                 };
-                _ =&polymorphic_function;
+                _ = try polymorphic_function.add_instantiation(unit, context, comptime_parameter_instantiations.slice(), maybe_global orelse unreachable, current_function);
                 return V.Comptime{
                     .polymorphic_function = polymorphic_function,
                 };
@@ -9131,7 +9198,7 @@ pub const Builder = struct {
 
                 // const function_type_index = try builder.resolveFunctionPrototype(unit, context, function_prototype_node_index, global_attributes, maybe_member_value, polymorphic_argument_nodes);
 
-                const function_definition = try builder.resolveFunctionDefinition(unit, context, .null, node_index, body_node_index, argument_list_node_index, global_attributes, maybe_member_value, polymorphic_argument_nodes, null);
+                const function_definition = try builder.resolveFunctionDefinition(unit, context, .null, node_index, body_node_index, argument_list_node_index, global_attributes, maybe_member_value, polymorphic_argument_nodes, maybe_global);
 
                 return function_definition;
             },
@@ -9232,7 +9299,7 @@ pub const Builder = struct {
             },
             .function_prototype => {
                 var b = false;
-                const function_prototype = try builder.resolveFunctionPrototype(unit, context, node_index, global_attributes, null, &.{}, null, null, &b);
+                const function_prototype = try builder.resolveFunctionPrototype(unit, context, node_index, global_attributes, null, &.{}, null, null, null, &b, null);
                 if (global_attributes.contains(.@"extern")) {
                     return .{
                         .function_declaration = function_prototype,
@@ -12532,6 +12599,7 @@ pub const Builder = struct {
                         }
                     } else if (struct_type.scope.scope.lookupDeclaration(right_identifier_hash, false)) |lookup| {
                         const right_symbol = try builder.referenceGlobalDeclaration(unit, context, lookup.scope, lookup.declaration, .{}, &.{}, value, argument_nodes);
+                        assert(right_symbol.initial_value != .polymorphic_function);
                         switch (right_symbol.initial_value) {
                             .function_definition => {
                                 const function_type_index = right_symbol.declaration.type;

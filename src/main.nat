@@ -3,19 +3,43 @@ const Arena = std.Arena;
 const c_slice = std.c_slice;
 const byte_equal = std.byte_equal;
 const print = std.print;
+const print_usize = std.print_usize;
 const exit = std.os.exit;
 
 const ArgumentProcessingError = error{
     no_arguments,
 };
 
-const lex = fn (arena: &Arena, bytes: []const u8) void {
+const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     if (bytes.length >= 0xffffffff) {
         unreachable;
     }
 
     const length: u32 = #cast(bytes.length);
     var i: u32 = 0;
+
+    const line_offset_arena = try Arena.init(bytes.length + #size(Arena));
+    var line_offsets = try line_offset_arena.new_array($u32, bytes.length);
+    line_offsets[0] = 0;
+    var line_count: u32 = 1;
+
+    var index: u32 = 0;
+    while (index < length) {
+        const byte = bytes[index];
+        line_offsets[line_count] = index;
+        line_count += #cast(byte == '\n');
+
+        index += 1;
+    }
+
+    print("Line count: ");
+    print_usize(line_count);
+    print("\n");
+
+    for (line_offsets[0..line_count]) |offset| {
+        print_usize(offset);
+        print("\n");
+    }
 }
 
 const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {
