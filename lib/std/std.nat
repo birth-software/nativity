@@ -210,6 +210,11 @@ const concatenate_bytes = fn (arena: &Arena, byte_sequences: []const []const u8)
     return concatenation;
 }
 
+const align_forward = fn(value: u64, alignment: u64) u64 {
+    const mask = alignment - 1;
+    return (value + mask) & ~mask;
+}
+
 test "concatenate" {
     var arena = try Arena.init(2*1024*1024);
     const concatenation = try concatenate_bytes(arena, .{ "ABC", "DEF" }.&);

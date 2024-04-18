@@ -31,15 +31,6 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
 
         index += 1;
     }
-
-    print("Line count: ");
-    print_usize(line_count);
-    print("\n");
-
-    for (line_offsets[0..line_count]) |offset| {
-        print_usize(offset);
-        print("\n");
-    }
 }
 
 const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {

@@ -156,6 +156,7 @@ pub const Node = struct {
         slice,
         range,
         negation,
+        one_complement,
         anonymous_container_literal,
         anonymous_array_literal,
         array_literal,
@@ -1226,6 +1227,7 @@ const Analyzer = struct {
             },
             .operator_bang => .boolean_not,
             .operator_minus => .negation,
+            .operator_tilde => .one_complement,
             .fixed_keyword_try => .try_expression,
             // .tilde => |t| @panic(@tagName(t)),
         };
