@@ -1,0 +1,22 @@
+const std = #import("std");
+const expect = std.testing.expect;
+
+const main = fn () *!void {
+    var i: u32 = 0;
+    var b: bool = false;
+
+    while (i < 10) {
+        if (b) {
+            break;
+        }
+
+        i += 1;
+
+
+        if (i == 5) {
+            break;
+        }
+    }
+
+    try expect(i == 5);
+}
