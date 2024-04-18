@@ -14427,6 +14427,7 @@ pub const Builder = struct {
                 };
 
                 const before_switch_bb = builder.current_basic_block;
+                const switch_exit_block = try builder.newBasicBlock(unit, context);
 
                 for (case_nodes) |case_node_index| {
                     builder.current_basic_block = before_switch_bb;
@@ -14500,6 +14501,17 @@ pub const Builder = struct {
                             try phi_instruction.addIncoming(context, v, case_block);
                             try builder.jump(unit, context, phi.block);
                         }
+                    } else if (builder.current_basic_block != .null) {
+                        const current_block = unit.basic_blocks.get(builder.current_basic_block);
+                        const v_ty = unit.types.get(v.type); 
+                        switch (v_ty.*) {
+                            .void => {
+                                assert(!current_block.terminated);
+                                try builder.jump(unit, context, switch_exit_block);
+                            },
+                            .noreturn => {},
+                            else => |t| @panic(@tagName(t)),
+                        }
                     }
 
                     if (conditions.length > 0) {
@@ -14538,12 +14550,38 @@ pub const Builder = struct {
                     }
                 }
 
-                return V{
-                    .value = .{
-                        .@"comptime" = .void,
-                    },
-                    .type = .void,
-                };
+                if (builder.current_basic_block != .null) {
+                    const current_block = unit.basic_blocks.get(builder.current_basic_block);
+                    assert(current_block.terminated);
+                    const sw_exit_block = unit.basic_blocks.get(switch_exit_block);
+                    assert(current_block.terminated);
+                    if (sw_exit_block.predecessors.length > 0) {
+                        builder.current_basic_block = switch_exit_block;
+
+                        switch (type_expect) {
+                            .type => |ti| switch (ti) {
+                                .void => return V{
+                                    .value = .{
+                                        .@"comptime" = .void,
+                                    },
+                                    .type = .void,
+                                },
+                                else => unreachable,
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    } else {
+                        return V{
+                            .value = .{
+                                .@"comptime" = .@"unreachable",
+                            },
+                            .type = .noreturn,
+                        };
+                    }
+                } else {
+                    unreachable;
+                }
+
             },
             else => |t| @panic(@tagName(t)),
         }

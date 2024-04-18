@@ -39,25 +39,25 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
 
     index = 0;
 
-    //while (index < length) {
-    //    const start_index = index;
-    //    const start_character = bytes[index];
+    while (index < length) {
+        const start_index = index;
+        const start_character = bytes[index];
 
-    //    switch (start_character) {
-    //        'a'...'z', 'A'...'Z', '_' => {
-    //            while (true) {
-    //                const ch = bytes[index];
-    //                if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_' or (ch >= '0' and ch <= '9')) {
-    //                    index += 1;
-    //                    continue;
-    //                }
+        switch (start_character) {
+            'a'...'z', 'A'...'Z', '_' => {
+                while (true) {
+                    const ch = bytes[index];
+                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_' or (ch >= '0' and ch <= '9')) {
+                        index += 1;
+                        continue;
+                    }
 
-    //                break;
-    //            }
-    //        },
-    //        else => unreachable,
-    //    }
-    //}
+                    break;
+                }
+            },
+            else => index += 1,
+        }
+    }
 }
 
 const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {
