@@ -11766,6 +11766,34 @@ pub const Builder = struct {
                 .type => |type_index| try builder.resolveContainerLiteral(unit, context, &.{}, type_index),
                 else => |t| @panic(@tagName(t)),
             },
+            .one_complement => block: {
+                const value = try builder.resolveRuntimeValue(unit, context, type_expect, node.left, .right);
+                const not = try unit.instructions.append(context.my_allocator, .{
+                    .integer_binary_operation = .{
+                        .id = .bit_xor,
+                        .left = value,
+                        .right = .{
+                            .value = .{
+                                .@"comptime" = .{
+                                    .constant_int = .{
+                                        .value = @bitCast(@as(i64, -1)),
+                                    },
+                                },
+                            },
+                            .type = value.type,
+                        },
+                        .signedness = .unsigned,
+                    },
+                });
+                try builder.appendInstruction(unit, context, not);
+
+                break :block V{
+                    .type = value.type,
+                    .value = .{
+                        .runtime = not,
+                    },
+                };
+            },
             else => |t| @panic(@tagName(t)),
         };
 
@@ -16831,6 +16859,7 @@ pub const Token = struct {
         operator_dollar,
         operator_switch_case,
         operator_backtick,
+        operator_tilde,
         // Binary
         operator_assign,
         operator_add,

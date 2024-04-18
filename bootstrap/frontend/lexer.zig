@@ -265,6 +265,10 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                 index += 1;
                 break :blk .operator_colon;
             },
+            '~' => blk: {
+                index += 1;
+                break :blk .operator_tilde;
+            },
             '!' => blk: {
                 index += 1;
                 switch (text[index]) {

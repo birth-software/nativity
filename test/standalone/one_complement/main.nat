@@ -1,0 +1,15 @@
+const std = #import("std");
+const align_forward = std.align_forward;
+const expect = std.testing.expect;
+
+const main = fn () *!void {
+    const a: u64 = 1;
+    const aligned_a = align_forward(a, 8);
+    try expect(aligned_a == 8);
+    const b: u64 = 9;
+    const aligned_b = align_forward(b, 8);
+    try expect(aligned_b == 16);
+    const c = 512;
+    const aligned_c = align_forward(c, 0x1000);
+    try expect(aligned_c == 0x1000);
+}
