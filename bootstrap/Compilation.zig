@@ -4980,15 +4980,20 @@ pub const Builder = struct {
 
         assert(@intFromEnum(old_scope.kind) <= @intFromEnum(new_scope.kind));
 
-        if (builder.current_basic_block != .null and (unit.function_definitions.get(builder.current_function).basic_blocks.length <= 1 or (unit.basic_blocks.get(builder.current_basic_block).instructions.length > 0 or unit.basic_blocks.get(builder.current_basic_block).predecessors.length > 0))) {
-            assert(@intFromEnum(old_scope.kind) >= @intFromEnum(Debug.Scope.Kind.function));
-            const instruction = try unit.instructions.append(context.my_allocator, .{
-                .push_scope = .{
-                    .old = old_scope,
-                    .new = new_scope,
-                },
-            });
-            try builder.appendInstruction(unit, context, instruction);
+        if (builder.current_basic_block != .null) {
+            const current_function = unit.function_definitions.get(builder.current_function);
+            const current_basic_block = unit.basic_blocks.get(builder.current_basic_block);
+
+            if (current_function.basic_blocks.length <= 1 or current_basic_block.instructions.length > 0 or current_basic_block.predecessors.length > 0) {
+                assert(@intFromEnum(old_scope.kind) >= @intFromEnum(Debug.Scope.Kind.function));
+                const instruction = try unit.instructions.append(context.my_allocator, .{
+                    .push_scope = .{
+                        .old = old_scope,
+                        .new = new_scope,
+                    },
+                });
+                try builder.appendInstruction(unit, context, instruction);
+            }
         }
 
         new_scope.parent = old_scope;
@@ -5144,7 +5149,6 @@ pub const Builder = struct {
     }
 
     fn appendInstruction(builder: *Builder, unit: *Unit, context: *const Context, instruction_index: Instruction.Index) !void {
-        // if (@intFromEnum(instruction_index) == 430) @breakpoint();
         switch (unit.instructions.get(instruction_index).*) {
             .extract_value => |extract_value| switch (unit.types.get(extract_value.expression.type).*) {
                 .pointer => unreachable,
@@ -9364,9 +9368,11 @@ pub const Builder = struct {
                     else => |t| @panic(@tagName(t)),
                 }
             },
+            .character_literal => return try unit.resolve_character_literal(node_index),
             else => |t| @panic(@tagName(t)),
         }
     }
+
 
     fn resolveRuntimeValue(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) anyerror!V {
         const node = unit.getNode(node_index);
@@ -9898,9 +9904,12 @@ pub const Builder = struct {
                     .value = .{
                         .runtime = block_i,
                     },
-                    .type = if (type_expect == .none or type_expect.type == .void) .void else b: {
-                        assert(unit.basic_blocks.get(builder.current_basic_block).terminated);
-                        break :b .noreturn;
+                    .type = if (builder.current_basic_block != .null and unit.basic_blocks.get(builder.current_basic_block).terminated) .noreturn else switch (type_expect) {
+                        .type => |type_index| switch (unit.types.get(type_index).*) {
+                            .void => type_index,
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        else => |t| @panic(@tagName(t)),
                     },
                 };
             },
@@ -11302,28 +11311,11 @@ pub const Builder = struct {
                     },
                 }
             },
-            .character_literal => blk: {
-                const ch_literal = unit.getExpectedTokenBytes(node.token, .character_literal);
-                const character = switch (ch_literal.len) {
-                    3 => ch_literal[1],
-                    // This has a escape character
-                    4 => switch (ch_literal[2]) {
-                        'n' => '\n',
-                        else => unreachable,
-                    },
-                    else => unreachable,
-                };
-
-                break :blk .{
-                    .value = .{
-                        .@"comptime" = .{
-                            .constant_int = .{
-                                .value = character,
-                            },
-                        },
-                    },
-                    .type = .u8,
-                };
+            .character_literal => V{
+                .type = .u8,
+                .value = .{
+                    .@"comptime" = try unit.resolve_character_literal(node_index),
+                },
             },
             .boolean_not => blk: {
                 switch (type_expect) {
@@ -13420,63 +13412,7 @@ pub const Builder = struct {
                         else => |t| @panic(@tagName(t)),
                     }
                 },
-                .@"switch" => {
-                    const expression_to_switch_on = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, statement_node.left, .right);
-                    const case_nodes = unit.getNodeList(statement_node.right);
-
-                    switch (expression_to_switch_on.value) {
-                        .@"comptime" => |ct| switch (ct) {
-                            .enum_value => |enum_field_index| {
-                                const enum_field = unit.enum_fields.get(enum_field_index);
-                                const enum_type = &unit.types.get(enum_field.parent).integer.kind.@"enum";
-                                const typecheck_enum_result = try unit.typecheckSwitchEnums(context, enum_type, case_nodes);
-
-                                const group_index = for (typecheck_enum_result.switch_case_groups.pointer[0..typecheck_enum_result.switch_case_groups.length], 0..) |switch_case_group, switch_case_group_index| {
-                                    break for (switch_case_group.pointer[0..switch_case_group.length]) |field_index| {
-                                        if (enum_field_index == field_index) {
-                                            break switch_case_group_index;
-                                        }
-                                    } else {
-                                        continue;
-                                    };
-                                } else typecheck_enum_result.else_switch_case_group_index orelse unreachable;
-                                const true_switch_case_node = unit.getNode(case_nodes[group_index]);
-                                const value = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, true_switch_case_node.right, .right);
-                                switch (value.type) {
-                                    .void, .noreturn => {},
-                                    else => @panic("Unexpected type"),
-                                }
-                            },
-                            .bool => |boolean| {
-                                assert(case_nodes.len == 2);
-
-                                for (case_nodes) |case_node_index| {
-                                    const case_node = unit.getNode(case_node_index);
-                                    assert(case_node.left != .null);
-                                    assert(case_node.right != .null);
-                                    const boolean_value = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = .bool }, .{}, case_node.left, null, .right, &.{}, null, &.{});
-                                    switch (boolean_value) {
-                                        .bool => |case_boolean| {
-                                            if (case_boolean == boolean) {
-                                                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, case_node.right, .right);
-                                                switch (v.type) {
-                                                    .void, .noreturn => break,
-                                                    else => @panic("Unexpected type"),
-                                                }
-                                            }
-                                        },
-                                        else => |t| @panic(@tagName(t)),
-                                    }
-                                } else {
-                                    unreachable;
-                                }
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        },
-                        .runtime => todo(),
-                        else => |t| @panic(@tagName(t)),
-                    }
-                },
+                .@"switch" => _ = try builder.resolveSwitch(unit, context, Type.Expect{ .type = .void }, statement_node_index, .right, null),
                 .@"unreachable" => {
                     try builder.buildTrap(unit, context);
                 },
@@ -13516,8 +13452,14 @@ pub const Builder = struct {
                                     builder.loop_exit_block = exit_block;
 
                                     const body_value = try builder.resolveRuntimeValue(unit, context, Type.Expect{ .type = .void }, statement_node.right, .right);
-                                    try builder.jump(unit, context, loop_header_block);
-                                    _ = body_value; // autofix
+                                    switch (unit.types.get(body_value.type).*) {
+                                        .void => {
+                                            try builder.jump(unit, context, loop_header_block);
+                                        },
+                                        .noreturn => {},
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+
                                     builder.current_basic_block = exit_block;
                                 },
                                 false => unreachable,
@@ -14356,108 +14298,121 @@ pub const Builder = struct {
                     else => {},
                 }
 
-                switch (type_expect) {
-                    .type => |type_index| switch (type_index) {
-                        .void => unreachable,
-                        .noreturn => unreachable,
-                        else => {
-                            const switch_instruction_index = try unit.instructions.append(context.my_allocator, .{
-                                .@"switch" = .{
-                                    .condition = expression_to_switch_on,
-                                    .block_type = type_index,
-                                },
-                            });
-                            try builder.appendInstruction(unit, context, switch_instruction_index);
-                            const switch_instruction = &unit.instructions.get(switch_instruction_index).@"switch";
-                            const phi_index = try unit.instructions.append(context.my_allocator, .{
-                                .phi = .{
-                                    .type = type_index,
-                                },
-                            });
-                            const phi = &unit.instructions.get(phi_index).phi;
-
-                            const phi_block = try builder.newBasicBlock(unit, context);
-
-                            const before_switch_bb = builder.current_basic_block;
-
-                            for (case_nodes) |case_node_index| {
-                                builder.current_basic_block = before_switch_bb;
-                                const case_node = unit.getNode(case_node_index);
-                                assert(case_node.right != .null);
-                                var conditions = UnpinnedArray(V.Comptime){};
-                                switch (case_node.left) {
-                                    .null => {},
-                                    else => {
-                                        const condition_node = unit.getNode(case_node.left);
-                                        switch (condition_node.id) {
-                                            .node_list => {
-                                                const condition_nodes = unit.getNodeListFromNode(condition_node);
-                                                try conditions.ensure_capacity(context.my_allocator, @intCast(condition_nodes.len));
-                                                for (condition_nodes) |condition_node_index| {
-                                                    const condition = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null, .right, &.{}, null, &.{});
-                                                    conditions.append_with_capacity(condition);
-                                                }
-                                            },
-                                            else => {
-                                                const v = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, case_node.left, null, .right, &.{}, null, &.{});
-                                                try conditions.ensure_capacity(context.my_allocator, 1);
-                                                conditions.append_with_capacity(v);
-                                            },
-                                        }
-                                    },
-                                }
-
-                                const case_block = try builder.newBasicBlock(unit, context);
-                                builder.current_basic_block = case_block;
-                                const v = try builder.resolveRuntimeValue(unit, context, type_expect, case_node.right, .right);
-
-                                if (!unit.basic_blocks.get(builder.current_basic_block).terminated) {
-                                    try phi.addIncoming(context, v, case_block);
-                                    try builder.jump(unit, context, phi_block);
-                                }
-
-                                if (conditions.length > 0) {
-                                    for (conditions.slice()) |condition| {
-                                        const case = Instruction.Switch.Case{
-                                            .condition = condition,
-                                            .basic_block = case_block,
-                                        };
-                                        try switch_instruction.cases.append(context.my_allocator, case);
-                                    }
-                                } else {
-                                    switch_instruction.else_block = case_block;
-                                }
-                            }
-
-                            if (switch_instruction.else_block == .null) {
-                                switch_instruction.else_block = try builder.newBasicBlock(unit, context);
-                                const old_block = builder.current_basic_block;
-                                builder.current_basic_block = switch_instruction.else_block;
-                                try builder.buildUnreachable(unit, context);
-                                builder.current_basic_block = old_block;
-                            }
-
-                            if (phi.values.length > 0) {
-                                builder.current_basic_block = phi_block;
-                                try builder.appendInstruction(unit, context, phi_index);
-
-                                return V{
-                                    .value = .{
-                                        .runtime = phi_index,
-                                    },
-                                    .type = type_index,
-                                };
-                            } else return V{
-                                .value = .{
-                                    .@"comptime" = .void,
-                                },
-                                .type = .void,
-                            };
-                        },
-                    },
+                const PhiInfo = struct{
+                    block: BasicBlock.Index,
+                    instruction: Instruction.Index,
+                };
+                const type_index = switch (type_expect) {
+                    .type => |type_index| type_index,
                     else => |t| @panic(@tagName(t)),
+                };
+
+                const switch_instruction_index = try unit.instructions.append(context.my_allocator, .{
+                    .@"switch" = .{
+                        .condition = expression_to_switch_on,
+                        .block_type = type_index,
+                    },
+                });
+                try builder.appendInstruction(unit, context, switch_instruction_index);
+
+                const switch_instruction = &unit.instructions.get(switch_instruction_index).@"switch";
+                const phi_info: ?PhiInfo = switch (unit.types.get(type_index).*) {
+                    .void, .noreturn => null,
+                    else => PhiInfo{
+                        .instruction = try unit.instructions.append(context.my_allocator, .{
+                            .phi = .{
+                                .type = type_index,
+                            },
+                        }),
+                        .block = try builder.newBasicBlock(unit, context),
+                    },
+                };
+
+                const before_switch_bb = builder.current_basic_block;
+
+                for (case_nodes) |case_node_index| {
+                    builder.current_basic_block = before_switch_bb;
+                    const case_node = unit.getNode(case_node_index);
+                    assert(case_node.right != .null);
+                    var conditions = UnpinnedArray(V.Comptime){};
+
+                    switch (case_node.left) {
+                        .null => {},
+                        else => {
+                            const condition_node = unit.getNode(case_node.left);
+                            switch (condition_node.id) {
+                                .node_list => {
+                                    const condition_nodes = unit.getNodeListFromNode(condition_node);
+                                    try conditions.ensure_capacity(context.my_allocator, @intCast(condition_nodes.len));
+                                    for (condition_nodes) |condition_node_index| {
+                                        const condition = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, condition_node_index, null, .right, &.{}, null, &.{});
+                                        conditions.append_with_capacity(condition);
+                                    }
+                                },
+                                else => {
+                                    const v = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = condition_type }, .{}, case_node.left, null, .right, &.{}, null, &.{});
+                                    try conditions.ensure_capacity(context.my_allocator, 1);
+                                    conditions.append_with_capacity(v);
+                                },
+                            }
+                        },
+                    }
+
+                    const case_block = try builder.newBasicBlock(unit, context);
+                    try unit.basic_blocks.get(case_block).predecessors.append(context.my_allocator, before_switch_bb);
+                    builder.current_basic_block = case_block;
+                    const v = try builder.resolveRuntimeValue(unit, context, type_expect, case_node.right, .right);
+
+                    if (phi_info) |phi| {
+                        if (!unit.basic_blocks.get(builder.current_basic_block).terminated) {
+                            const phi_instruction = &unit.instructions.get(phi.instruction).phi;
+                            try phi_instruction.addIncoming(context, v, case_block);
+                            try builder.jump(unit, context, phi.block);
+                        }
+                    }
+
+                    if (conditions.length > 0) {
+                        for (conditions.slice()) |condition| {
+                            const case = Instruction.Switch.Case{
+                                .condition = condition,
+                                .basic_block = case_block,
+                            };
+                            try switch_instruction.cases.append(context.my_allocator, case);
+                        }
+                    } else {
+                        switch_instruction.else_block = case_block;
+                    }
                 }
-                todo();
+
+                if (switch_instruction.else_block == .null) {
+                    switch_instruction.else_block = try builder.newBasicBlock(unit, context);
+                    const old_block = builder.current_basic_block;
+                    builder.current_basic_block = switch_instruction.else_block;
+                    try builder.buildUnreachable(unit, context);
+                    builder.current_basic_block = old_block;
+                }
+
+                if (phi_info) |phi| {
+                    const phi_instruction = &unit.instructions.get(phi.instruction).phi;
+                    if (phi_instruction.values.length > 0) {
+                        builder.current_basic_block = phi.block;
+                        try builder.appendInstruction(unit, context, phi.instruction);
+
+                        return V{
+                            .value = .{
+                                .runtime = phi.instruction,
+                            },
+                            .type = type_index,
+                        };
+                    }
+                }
+
+                return V{
+                    .value = .{
+                        .@"comptime" = .void,
+                    },
+                    .type = .void,
+                };
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -16600,6 +16555,26 @@ pub const Unit = struct {
             return type_index;
         }
     }
+
+    fn resolve_character_literal(unit: *Unit, node_index: Node.Index) !V.Comptime {
+        const node = unit.getNode(node_index);
+        const ch_literal = unit.getExpectedTokenBytes(node.token, .character_literal);
+        const character = switch (ch_literal.len) {
+            3 => ch_literal[1],
+            // This has a escape character
+            4 => switch (ch_literal[2]) {
+                'n' => '\n',
+                else => unreachable,
+            },
+            else => unreachable,
+        };
+
+        return V.Comptime{
+            .constant_int = .{
+                .value = character,
+            },
+        };
+    }
 };
 
 pub const FixedKeyword = enum {
@@ -16966,7 +16941,7 @@ const LogKind = enum {
 
 const should_log_map = std.EnumSet(LogKind).initMany(&.{
     // .parser,
-    // .ir,
+    //.ir,
     //.llvm,
     .panic,
 });
