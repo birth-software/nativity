@@ -1,0 +1,24 @@
+const std = #import("std");
+const print = std.print;
+const print_usize = std.print_usize;
+const expect = std.testing.expect;
+
+const Enum = enum(u32) {
+    a, b, c,
+};
+
+const main = fn () *!void {
+    var result: u32 = 0;
+    for (#fields(Enum)) |e| {
+        //print(#name(e));
+        //print(": ");
+        const value: u32 = #cast(e);
+        print_usize(value);
+        print("\n");
+        result += value;
+    }
+
+    //try expect(#fields(Enum).length == 3);
+
+    try expect(result == 3);
+}

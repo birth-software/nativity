@@ -4358,11 +4358,13 @@ pub const IntrinsicId = enum {
     @"asm", //this is processed separately as it need special parsing
     cast,
     enum_to_int,
+    fields,
     @"export",
     @"error",
     int_to_pointer,
     import,
     min,
+    name,
     size,
     sign_extend,
     syscall,
@@ -4503,42 +4505,6 @@ pub const Builder = struct {
             try unit.error_unions.put_no_clobber(context.my_allocator, error_union, error_union_type_index);
 
             return error_union_type_index;
-        }
-    }
-
-    fn processArrayLiteral(builder: *Builder, unit: *Unit, context: *const Context, constant_array_index: V.Comptime.ConstantArray.Index, token: Token.Index) !*Debug.Declaration.Global {
-        if (unit.global_array_constants.get(constant_array_index)) |global| {
-            return global;
-        } else {
-            const token_debug_info = builder.getTokenDebugInfo(unit, token);
-            const name = try join_name(context, "_anon_arr_", unit.global_array_constants.length, 10);
-            const identifier = try unit.processIdentifier(context, name);
-            const constant_array = unit.constant_arrays.get(constant_array_index);
-
-            const global_declaration_index = try unit.global_declarations.append(context.allocator, .{
-                .declaration = .{
-                    .scope = builder.current_scope,
-                    .name = identifier,
-                    .type = constant_array.type,
-                    .line = token_debug_info.line,
-                    .column = token_debug_info.column,
-                    .mutability = .@"const",
-                    .kind = .global,
-                },
-                .initial_value = .{
-                    .constant_array = constant_array_index,
-                },
-                .type_node_index = .null,
-                .attributes = Debug.Declaration.Global.Attributes.initMany(&.{
-                    .@"export",
-                }),
-            });
-            const global_declaration = unit.global_declarations.get(global_declaration_index);
-            try unit.data_to_emit.append(context.allocator, global_declaration);
-
-            try unit.global_array_constants.put_no_clobber(context.my_allocator, constant_array_index, global_declaration);
-
-            return global_declaration;
         }
     }
 
@@ -4887,7 +4853,86 @@ pub const Builder = struct {
                     .type = .noreturn,
                 };
             },
+            .fields => {
+                assert(argument_node_list.len == 1);
+                const container_type_index = try builder.resolveType(unit, context, argument_node_list[0], &.{});
+                const fields = try builder.get_fields_array(unit, context, container_type_index, unit.getNode(argument_node_list[0]).token);
+                return .{
+                    .value = .{
+                        .@"comptime" = .{
+                            .global = fields,
+                        },
+                    },
+                    .type = try unit.getPointerType(context, .{
+                        .type = fields.declaration.type,
+                        .termination = .none,
+                        .mutability = .@"const",
+                        .many = false,
+                        .nullable = false,
+                    }),
+                };
+            },
             else => |t| @panic(@tagName(t)),
+        }
+    }
+
+    fn get_fields_array(builder: *Builder, unit: *Unit, context: *const Context, container_type_index: Type.Index, token: Token.Index) !*Debug.Declaration.Global{
+        if (unit.fields_array.get(container_type_index)) |result| return result else {
+            const container_type = unit.types.get(container_type_index);
+
+            switch (container_type.*) {
+                .integer => |*integer| switch (integer.kind) {
+                    .@"enum" => |*enum_type| {
+                        const enum_count = enum_type.fields.length;
+                        const array_type = try unit.getArrayType(context, .{
+                            .type = container_type_index,
+                            .count = enum_count,
+                            .termination = .none,
+                        });
+                        var fields = try UnpinnedArray(V.Comptime).initialize_with_capacity(context.my_allocator, enum_count);
+                        for (enum_type.fields.slice()) |enum_field_index| {
+                            fields.append_with_capacity(V.Comptime{
+                                .enum_value = enum_field_index,
+                            });
+                        }
+                        const constant_array = try unit.constant_arrays.append(context.my_allocator, .{
+                            .values = fields.slice(),
+                            .type = array_type,
+                        });
+
+                        const token_debug_info = builder.getTokenDebugInfo(unit, token);
+                        const name = try join_name(context, "_field_array_", unit.fields_array.length, 10);
+                        const identifier = try unit.processIdentifier(context, name);
+
+                        const global_declaration_index = try unit.global_declarations.append(context.my_allocator, .{
+                            .declaration = .{
+                                .scope = builder.current_scope,
+                                .name = identifier,
+                                .type = array_type,
+                                .line = token_debug_info.line,
+                                .column = token_debug_info.column,
+                                .mutability = .@"const",
+                                .kind = .global,
+                            },
+                            .initial_value = .{
+                                .constant_array = constant_array,
+                            },
+                            .type_node_index = .null,
+                            .attributes = Debug.Declaration.Global.Attributes.initMany(&.{
+                                .@"export",
+                            }),
+                        });
+                        const global_declaration = unit.global_declarations.get(global_declaration_index);
+                        try unit.data_to_emit.append(context.my_allocator, global_declaration);
+
+                        try unit.fields_array.put_no_clobber(context.my_allocator, container_type_index, global_declaration);
+
+                        return global_declaration;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                },
+                else => |t| @panic(@tagName(t)),
+            }
         }
     }
 
@@ -13630,24 +13675,24 @@ pub const Builder = struct {
                         },
                         else => blk: {
                             const for_loop_value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, last_element_node_index, .right);
-                            try slices.append(context.my_allocator, for_loop_value);
+
+                            const name = try join_name(context, "__anon_i_", unit.anon_i, 10);
+                            unit.anon_i += 1;
+                            const emit = true;
+                            const stack_slot = try builder.emitLocalVariableDeclaration(unit, context, last_element_payload.token, .@"var", Type.usize, .{
+                                .value = .{
+                                    .@"comptime" = .{
+                                        .constant_int = .{
+                                            .value = 0,
+                                        },
+                                    },
+                                },
+                                .type = Type.usize,
+                            }, emit, name);
 
                             switch (unit.types.get(for_loop_value.type).*) {
-                                .slice => |slice| {
-                                    _ = slice; // autofix
-                                    const name = try join_name(context, "__anon_i_", unit.anon_i, 10);
-                                    unit.anon_i += 1;
-                                    const emit = true;
-                                    const stack_slot = try builder.emitLocalVariableDeclaration(unit, context, last_element_payload.token, .@"var", Type.usize, .{
-                                        .value = .{
-                                            .@"comptime" = .{
-                                                .constant_int = .{
-                                                    .value = 0,
-                                                },
-                                            },
-                                        },
-                                        .type = Type.usize,
-                                    }, emit, name);
+                                .slice => {
+                                    try slices.append(context.my_allocator, for_loop_value);
 
                                     const len_extract_value = try unit.instructions.append(context.my_allocator, .{
                                         .extract_value = .{
@@ -13666,6 +13711,59 @@ pub const Builder = struct {
                                             .type = Type.usize,
                                         },
                                     };
+                                },
+                                .pointer => |pointer| switch (unit.types.get(pointer.type).*){
+                                    .array => |array| {
+                                        const slice_type = try unit.getSliceType(context, .{
+                                            .child_pointer_type = try unit.getPointerType(context, .{
+                                                .type = array.type,
+                                                .termination = pointer.termination,
+                                                .mutability = pointer.mutability,
+                                                .many = true,
+                                                .nullable = pointer.nullable,
+                                            }),
+                                            .child_type = array.type,
+                                            .termination = pointer.termination,
+                                            .mutability = pointer.mutability,
+                                            .nullable = pointer.nullable,
+                                        });
+                                        const slice = try unit.constant_slices.append(context.my_allocator, .{
+                                            .array = switch (for_loop_value.value) {
+                                                .@"comptime" => |ct| switch (ct) {
+                                                    .global => |global| global,
+                                                    else => |t| @panic(@tagName(t)),
+                                                },
+                                                else => |t| @panic(@tagName(t)),
+                                            },
+                                            .start = 0,
+                                            .end = array.count,
+                                            .type = slice_type,
+                                        });
+                                        const slice_value = V{
+                                            .value = .{
+                                                .@"comptime" = .{
+                                                    .constant_slice = slice,
+                                                },
+                                            },
+                                            .type = slice_type,
+                                        };
+                                        try slices.append(context.my_allocator, slice_value);
+                                        break :blk .{
+                                            .stack_slot = stack_slot,
+                                            .end = .{
+                                                .value = .{
+                                                    .@"comptime" = .{
+                                                        .constant_int = .{
+                                                            .value = array.count,
+                                                        },
+                                                    },
+                                                },
+                                                .type = Type.usize,
+                                            },
+                                        };
+                                        // TODO: fix this
+                                    },
+                                    else => |t| @panic(@tagName(t)),
                                 },
                                 else => |t| @panic(@tagName(t)),
                             }
@@ -15916,7 +16014,7 @@ pub const Unit = struct {
     integers: MyHashMap(Type.Integer, Type.Index) = .{},
     error_unions: MyHashMap(Type.Error.Union.Descriptor, Type.Index) = .{},
     two_structs: MyHashMap([2]Type.Index, Type.Index) = .{},
-    global_array_constants: MyHashMap(V.Comptime.ConstantArray.Index, *Debug.Declaration.Global) = .{},
+    fields_array: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
     error_count: u32 = 0,
 
     code_to_emit: MyHashMap(Function.Definition.Index, *Debug.Declaration.Global) = .{},

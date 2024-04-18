@@ -2016,7 +2016,7 @@ pub const LLVM = struct {
             .file => {
                 unreachable;
             },
-            .file_container => {
+            .file_container, .struct_type => {
                 if (llvm.scope_map.get(sema_scope)) |scope| {
                     if (true) unreachable;
                     return scope;
@@ -2087,6 +2087,16 @@ pub const LLVM = struct {
                 },
                 .constant_slice => |constant_slice_index| try llvm.getConstantSlice(unit, context, constant_slice_index),
                 .constant_struct => |constant_struct_index| try llvm.getConstantStruct(unit, context, constant_struct_index),
+                .enum_value => |enum_field_index| b: {
+                    const integer_type = unit.types.get(sema_array_type.type).integer;
+                    const signed = switch (integer_type.signedness) {
+                        .signed => true,
+                        .unsigned => false,
+                    };
+                    assert(!signed);
+                    const constant_int = llvm.context.getConstantInt(integer_type.bit_count, unit.enum_fields.get(enum_field_index).value, signed) orelse unreachable;
+                    break :b constant_int.toConstant();
+                },
                 else => |t| @panic(@tagName(t)),
             };
             list.append_with_capacity(value);

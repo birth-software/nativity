@@ -12,6 +12,10 @@ const ArgumentProcessingError = error{
 
 const Token = struct {
     const Id = enum(u8) {
+        invalid,
+        keyword_unsigned_integer,
+        keyword_signed_integer,
+        identifier,
     };
 };
 
@@ -42,6 +46,7 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     while (index < length) {
         const start_index = index;
         const start_character = bytes[index];
+        var token_id = Token.Id.invalid;
 
         switch (start_character) {
             'a'...'z', 'A'...'Z', '_' => {
@@ -53,6 +58,23 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
                     }
 
                     break;
+                }
+
+                if (start_character == 'u' or start_character == 's' and bytes[start_index + 1] >= '0' and bytes[start_index + 1] <= '9') {
+                    var index_integer = start_index + 1;
+                    while (bytes[index_integer] >= '0' and bytes[index_integer] <= '9') {
+                        index_integer += 1;
+                    }
+
+                    if (index_integer == index) {
+                        token_id = switch (start_character) {
+                            'u' => .keyword_unsigned_integer,
+                            's' => .keyword_signed_integer,
+                            else => unreachable,
+                        };
+                    } else {
+                        //unreachable;
+                    }
                 }
             },
             else => index += 1,
