@@ -2270,29 +2270,6 @@ pub const LLVM = struct {
         try llvm.setCallOrFunctionAttributes(unit, context, function_prototype, .{
             .function = function,
         });
-        // const calling_convention = getCallingConvention(function_prototype.calling_convention);
-        // function.setCallingConvention(calling_convention);
-        //
-        // const function_attribute_set = llvm.getFunctionAttributes(unit, context, function_prototype);
-        //
-        // var parameter_attribute_sets = try UnpinnedArray(*const LLVM.Attribute.Set).initialize_with_capacity(context.my_allocator, @intCast(function_prototype.abi.parameter_types_abi.len + @intFromBool(function_prototype.abi.return_type_abi.kind == .indirect)));
-        // const return_attribute_set = blk: {
-        //     const attribute_set = try llvm.emitParameterAttributes(unit, context, function_prototype.abi.return_type_abi, true);
-        //     break :blk switch (function_prototype.abi.return_type_abi.kind) {
-        //         .indirect => b: {
-        //             parameter_attribute_sets.append_with_capacity(attribute_set);
-        //             break :b llvm.context.getAttributeSet(null, 0);
-        //         },
-        //         else => attribute_set,
-        //     };
-        // };
-        //
-        // for (function_prototype.abi.parameter_types_abi) |parameter_type_abi| {
-        //     const parameter_attribute_set = try llvm.emitParameterAttributes(unit, context, parameter_type_abi, false);
-        //     parameter_attribute_sets.append_with_capacity(parameter_attribute_set);
-        // }
-
-        // function.setAttributes(llvm.context, function_attribute_set, return_attribute_set, parameter_attribute_sets.pointer, parameter_attribute_sets.length);
 
         switch (declaration.initial_value) {
             .function_declaration => try llvm.function_declaration_map.put_no_clobber(context.my_allocator, declaration, function),
@@ -2300,7 +2277,13 @@ pub const LLVM = struct {
             else => unreachable,
         }
 
-        if (unit.descriptor.generate_debug_information) {
+        const generate_debug_information = unit.descriptor.generate_debug_information and switch (declaration.initial_value) {
+            .function_declaration => true,
+            .function_definition => |function_definition_index| unit.function_definitions.get(function_definition_index).has_debug_info,
+            else => unreachable,
+        };
+
+        if (generate_debug_information) {
             // if (data_structures.byte_equal(name, "nat_split_struct_ints")) @breakpoint();
             const debug_file = try llvm.getDebugInfoFile(unit, context, declaration.declaration.scope.file);
             var parameter_types = try UnpinnedArray(*LLVM.DebugInfo.Type).initialize_with_capacity(context.my_allocator, @intCast(function_prototype.argument_types.len));
@@ -2522,7 +2505,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         llvm.sema_function = function_declaration;
         llvm.inside_branch = false;
 
-        if (unit.descriptor.generate_debug_information) {
+        const generate_debug_information = unit.descriptor.generate_debug_information and function_definition.has_debug_info;
+
+        if (generate_debug_information) {
             const subprogram = llvm.function.getSubprogram() orelse unreachable;
             llvm.file = subprogram.getFile() orelse unreachable;
             llvm.scope = subprogram.toLocalScope().toScope();
@@ -2552,7 +2537,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
                 switch (sema_instruction.*) {
                     .push_scope => |push_scope| {
-                        if (unit.descriptor.generate_debug_information) {
+                        if (generate_debug_information) {
                             const old_scope = try llvm.getScope(unit, context, push_scope.old);
                             assert(@intFromEnum(push_scope.old.kind) >= @intFromEnum(Compilation.Debug.Scope.Kind.function));
 
@@ -2562,7 +2547,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         }
                     },
                     .pop_scope => |pop_scope| {
-                        if (unit.descriptor.generate_debug_information) {
+                        if (generate_debug_information) {
                             const new = try llvm.getScope(unit, context, pop_scope.new);
                             if (pop_scope.new.kind == .function) {
                                 assert(new.toSubprogram() orelse unreachable == llvm.function.getSubprogram() orelse unreachable);
@@ -2577,7 +2562,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         }
                     },
                     .debug_checkpoint => |debug_checkpoint| {
-                        if (unit.descriptor.generate_debug_information) {
+                        if (generate_debug_information) {
                             const scope = try llvm.getScope(unit, context, debug_checkpoint.scope);
                             llvm.builder.setCurrentDebugLocation(llvm.context, debug_checkpoint.line + 1, debug_checkpoint.column + 1, scope, llvm.function);
                         }
@@ -2921,7 +2906,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, argument.toValue());
                     },
                     .debug_declare_argument => |debug_declare| {
-                        if (unit.descriptor.generate_debug_information) {
+                        if (generate_debug_information) {
                             const argument_index: c_uint = debug_declare.argument.index;
                             const declaration = &debug_declare.argument.declaration;
                             const debug_declaration_type = try llvm.getDebugType(unit, context, declaration.type);
@@ -2966,7 +2951,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         }
                     },
                     .debug_declare_local_variable => |declare_local_variable| {
-                        if (unit.descriptor.generate_debug_information) {
+                        if (generate_debug_information) {
                             const local_variable = declare_local_variable.variable;
                             const debug_declaration_type = try llvm.getDebugType(unit, context, local_variable.declaration.type);
                             const always_preserve = true;
@@ -3190,7 +3175,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             @panic("Function block with no termination");
         }
 
-        if (unit.descriptor.generate_debug_information) {
+        if (generate_debug_information) {
             llvm.debug_info_builder.finalizeSubprogram(llvm.function.getSubprogram() orelse unreachable, llvm.function);
         }
 
