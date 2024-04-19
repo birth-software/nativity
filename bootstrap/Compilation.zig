@@ -3916,6 +3916,7 @@ pub const Function = struct {
         body: Debug.Block.Index,
         return_pointer: Instruction.Index = .null,
         alloca_index: u32 = 1,
+        has_debug_info: bool,
 
         pub const List = BlockList(@This(), enum {});
         pub usingnamespace @This().List.Index;
@@ -3933,9 +3934,6 @@ pub const Function = struct {
         attributes: Attributes = .{},
         calling_convention: CallingConvention = .auto,
         has_polymorphic_parameters: bool = false,
-        // comptime_parameter_declarations: []const ComptimeParameterDeclaration = &.{},
-        // comptime_parameter_instantiations: []const V.Comptime = &.{},
-        // is_member: bool = false,
 
         const Attributes = struct {
             naked: bool = false,
@@ -4872,7 +4870,241 @@ pub const Builder = struct {
                     }),
                 };
             },
+            .name => {
+                assert(argument_node_list.len == 1);
+                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_list[0], .right);
+                switch (v.value) {
+                    .runtime => switch (unit.types.get(v.type).*) {
+                        .integer => |*integer| switch (integer.kind) {
+                            .@"enum" => {
+                                const name_function = try builder.get_name_function(unit, context, v.type);
+                                var args = try UnpinnedArray(V).initialize_with_capacity(context.my_allocator, 1);
+                                args.append_with_capacity(v);
+                                const call = try unit.instructions.append(context.my_allocator, .{
+                                    .call = .{
+                                        .callable = .{
+                                            .value = .{
+                                                .@"comptime" = .{
+                                                    .global = name_function,
+                                                },
+                                            },
+                                            .type = name_function.declaration.type,
+                                        },
+                                        .function_type = name_function.declaration.type,
+                                        .arguments = args.slice(),
+                                    },
+                                });
+                                try builder.appendInstruction(unit, context, call);
+                                return V{
+                                    .value = .{
+                                        .runtime = call,
+                                    },
+                                    .type = unit.function_prototypes.get(unit.types.get(name_function.declaration.type).function).return_type,
+                                };
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
             else => |t| @panic(@tagName(t)),
+        }
+    }
+
+    fn get_name_function(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index) !*Debug.Declaration.Global {
+        if (unit.name_functions.get(type_index)) |result| return result else {
+            var argument_types = try UnpinnedArray(Type.Index).initialize_with_capacity(context.my_allocator, 1);
+            argument_types.append_with_capacity(type_index);
+            const return_type_index = try unit.getSliceType(context, .{
+                .child_pointer_type = try unit.getPointerType(context, .{
+                    .type = .u8,
+                    // TODO: zero-terminate?
+                    .termination = .none,
+                    .mutability = .@"const",
+                    .many = true,
+                    .nullable = false,
+                }),
+                .child_type = .u8,
+                // TODO: zero-terminate?
+                .termination = .none,
+                .mutability = .@"const",
+                .nullable = false,
+            });
+            const function_prototype_index = try unit.function_prototypes.append(context.my_allocator, .{
+                .argument_types = argument_types.slice(),
+                .return_type = return_type_index,
+                .abi = .{
+                    .return_type = return_type_index,
+                    .parameter_types = argument_types.slice(),
+                },
+            });
+            const function_type_index = try unit.types.append(context.my_allocator, .{
+                .function = function_prototype_index,
+            });
+            const function_definition_index = try unit.function_definitions.append(context.my_allocator, .{
+                .scope = .{
+                    .scope = .{
+                        .file = builder.current_file,
+                        .line = 0,
+                        .column = 0,
+                        .kind = .function,
+                        .local = true,
+                        .level = builder.current_scope.level + 1,
+                    },
+                    },
+                .type = function_type_index,
+                .body = .null,
+                .has_debug_info = false,
+            });
+
+            const function_definition = unit.function_definitions.get(function_definition_index);
+            const old_scope = builder.current_scope;
+            builder.current_scope = &function_definition.scope.scope;
+            defer builder.current_scope = old_scope;
+
+            const old_function = builder.current_function;
+            builder.current_function = function_definition_index;
+            defer builder.current_function = old_function;
+
+            const old_basic_block = builder.current_basic_block;
+            defer builder.current_basic_block = old_basic_block;
+
+            const argument_name_hash = try unit.processIdentifier(context, "_enum_value_");
+            const argument_declaration_index = try unit.argument_declarations.append(context.my_allocator, .{
+                .declaration = .{
+                    .scope = builder.current_scope,
+                    .name = argument_name_hash,
+                    .type = type_index,
+                    .mutability = .@"const",
+                    .line = 0,
+                    .column = 0,
+                    .kind = .argument,
+                },
+                .index = 0,
+            });
+            comptime assert(@TypeOf(argument_declaration_index) == Debug.Declaration.Argument.Index);
+            const argument = unit.argument_declarations.get(argument_declaration_index);
+
+            try builder.current_scope.declarations.put_no_clobber(context.my_allocator, argument_name_hash, &argument.declaration);
+
+            const entry_block = try builder.newBasicBlock(unit, context);
+            const exit_block = try builder.newBasicBlock(unit, context);
+            builder.current_basic_block = entry_block;
+
+            const argument_instruction = try unit.instructions.append(context.my_allocator, .{
+                .abi_argument = 0,
+            });
+            try builder.appendInstruction(unit, context, argument_instruction);
+            const switch_instruction_index = try unit.instructions.append(context.my_allocator, .{
+                .@"switch" = .{
+                    .condition = .{
+                        .value = .{
+                            .runtime = argument_instruction,
+                        },
+                        .type = type_index,
+                    },
+                    .block_type = return_type_index,
+                },
+            });
+            try builder.appendInstruction(unit, context, switch_instruction_index);
+            const switch_instruction = &unit.instructions.get(switch_instruction_index).@"switch";
+
+            const phi_instruction_index = try unit.instructions.append(context.my_allocator, .{
+                .phi = .{
+                    .type = return_type_index,
+                },
+                });
+            const phi = &unit.instructions.get(phi_instruction_index).phi;
+
+            const cases = switch (unit.types.get(type_index).*) {
+                .integer => |*integer| switch (integer.kind) {
+                    .@"enum" => |*enum_type| b: {
+                        var cases = try UnpinnedArray(Instruction.Switch.Case).initialize_with_capacity(context.my_allocator, enum_type.fields.length);
+                        for (enum_type.fields.slice()) |enum_field_index| {
+                            builder.current_basic_block = entry_block;
+                            const enum_field = unit.enum_fields.get(enum_field_index);
+                            const case_block = try builder.newBasicBlock(unit, context);
+                            builder.current_basic_block = case_block;
+                            const identifier = unit.getIdentifier(enum_field.name);
+                            const identifier_z = try context.allocator.dupeZ(u8, identifier);
+                            const string_literal = try builder.processStringLiteralFromStringAndDebugInfo(unit, context, identifier_z, .{
+                                .line = 0,
+                                .column = 0,
+                            });
+                            const slice = try unit.constant_slices.append(context.my_allocator,.{
+                                .array = string_literal,
+                                .start = 0,
+                                .end = identifier_z.len,
+                                .type = return_type_index,
+                            });
+                            const v = V{
+                                .value = .{
+                                    .@"comptime" = .{
+                                        .constant_slice = slice,
+                                    },
+                                },
+                                .type = return_type_index,
+                            };
+                            try phi.addIncoming(context, v, builder.current_basic_block);
+                            try builder.jump(unit, context, exit_block);
+
+                            const case = Instruction.Switch.Case{
+                                .condition = .{
+                                    .enum_value = enum_field_index,
+                                },
+                                .basic_block = case_block,
+                            };
+                            cases.append_with_capacity(case);
+                        }
+
+                        break :b cases;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                },
+                else => |t| @panic(@tagName(t)),
+            };
+
+            switch_instruction.cases = cases;
+            switch_instruction.else_block = try builder.create_unreachable_block(unit, context);
+
+            builder.current_basic_block = exit_block;
+            try builder.appendInstruction(unit, context, phi_instruction_index);
+
+            const ret = try unit.instructions.append(context.my_allocator, .{
+                .ret = .{
+                    .type = return_type_index,
+                    .value = .{
+                        .runtime = phi_instruction_index,
+                    },
+                },
+            });
+            try builder.appendInstruction(unit, context, ret);
+
+            const global_index = try unit.global_declarations.append(context.my_allocator, .{
+                .declaration = .{
+                    .scope = builder.current_scope,
+                    .name = try unit.processIdentifier(context, try std.fmt.allocPrint(context.allocator, "get_enum_name_{}", .{@intFromEnum(type_index)})),
+                    .type = function_type_index,
+                    .line = 0,
+                    .column = 0,
+                    .mutability = .@"const",
+                    .kind = .global,
+                },
+                .initial_value = .{
+                    .function_definition = function_definition_index,
+                },
+                .type_node_index = .null,
+                .attributes = .{},
+            });
+
+            const global = unit.global_declarations.get(global_index);
+
+            try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_index, global);
+            try unit.name_functions.put_no_clobber(context.my_allocator, type_index, global);
+
+            return global;
         }
     }
 
@@ -8662,6 +8894,7 @@ pub const Builder = struct {
                     .file = builder.current_file,
                 },
             },
+            .has_debug_info = true,
         });
 
         defer builder.current_function = old_function;
@@ -14626,11 +14859,7 @@ pub const Builder = struct {
                 }
 
                 if (switch_instruction.else_block == .null) {
-                    switch_instruction.else_block = try builder.newBasicBlock(unit, context);
-                    const old_block = builder.current_basic_block;
-                    builder.current_basic_block = switch_instruction.else_block;
-                    try builder.buildUnreachable(unit, context);
-                    builder.current_basic_block = old_block;
+                    switch_instruction.else_block = try builder.create_unreachable_block(unit, context);
                 }
 
                 if (phi_info) |phi| {
@@ -14683,6 +14912,16 @@ pub const Builder = struct {
             },
             else => |t| @panic(@tagName(t)),
         }
+    }
+
+    fn create_unreachable_block(builder: *Builder, unit: *Unit, context: *const Context) !BasicBlock.Index {
+        const block = try builder.newBasicBlock(unit, context);
+        const old_block = builder.current_basic_block;
+        builder.current_basic_block = block;
+        try builder.buildUnreachable(unit, context);
+        builder.current_basic_block = old_block;
+
+        return block;
     }
 
     fn resolveFieldAccess(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side, new_parameters: []const V.Comptime) !V {
@@ -14803,6 +15042,23 @@ pub const Builder = struct {
                     };
 
                     break :b result;
+                },
+                .global => |global| switch (unit.types.get(global.declaration.type).*) {
+                    .array => |array| if (byte_equal(identifier, length_field_name)) switch (type_expect) {
+                        .none => V{
+                            .value = .{
+                                .@"comptime" = .{
+                                    .comptime_int = .{
+                                        .value = array.count,
+                                        .signedness = .unsigned,
+                                    },
+                                },
+                            },
+                            .type = .comptime_int,
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    } else unreachable,
+                    else => |t| @panic(@tagName(t)),
                 },
                 else => |t| @panic(@tagName(t)),
             },
@@ -16015,6 +16271,7 @@ pub const Unit = struct {
     error_unions: MyHashMap(Type.Error.Union.Descriptor, Type.Index) = .{},
     two_structs: MyHashMap([2]Type.Index, Type.Index) = .{},
     fields_array: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
+    name_functions: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
     error_count: u32 = 0,
 
     code_to_emit: MyHashMap(Function.Definition.Index, *Debug.Declaration.Global) = .{},
