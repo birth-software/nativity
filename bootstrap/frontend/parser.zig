@@ -625,7 +625,6 @@ const Analyzer = struct {
                             .operator_switch_case => break,
                             else => {},
                         }
-
                     }
 
                     break :blk switch (array_list.length) {
@@ -754,7 +753,7 @@ const Analyzer = struct {
                             .operator_right_parenthesis, .operator_comma => Node.Index.null,
                             else => try analyzer.expression(),
                         },
-                        });
+                    });
                 },
                 .operator_right_parenthesis,
                 .operator_comma,
@@ -1830,7 +1829,10 @@ const Analyzer = struct {
                     },
                     else => |t| @panic(@tagName(t)),
                 },
-                .identifier, .discard, => b: {
+                .identifier,
+                .discard,
+                .string_literal,
+                => b: {
                     analyzer.consumeToken();
 
                     switch (container_type) {

@@ -46,17 +46,9 @@ const FileDescriptor = struct{
     const read = fn(file_descriptor: FileDescriptor, bytes: []u8) ReadError!usize {
         if (bytes.length > 0) {
             switch (current) {
-                .linux => {
+                .linux, .macos => {
                     const len: usize = #min(max_file_operation_byte_count, bytes.length);
-                    const syscall_result = system.read(file_descriptor.handle, bytes);
-                    const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
-                        else => return ReadError.failed,
-                    };
-                    return byte_count;
-                },
-                .macos => {
-                    const len: usize = #min(max_file_operation_byte_count, bytes.length);
-                    const syscall_result = system.read(file_descriptor.handle, bytes);
+                    const syscall_result = system.read(file_descriptor.handle, bytes.pointer, bytes.length);
                     const byte_count = unwrap_syscall(syscall_result) catch |err| switch (err) {
                         else => return ReadError.failed,
                     };
@@ -119,13 +111,8 @@ const FileDescriptor = struct{
     }
 
     const get_size = fn (file_descriptor: FileDescriptor) GetAttributesError!u64 {
-        switch (current) {
-            .linux => {
-                const file_attributes = try file_descriptor.get_attributes();
-                return file_attributes.size;
-            },
-            else => #error("OS not supported"),
-        }
+        const file_attributes = try file_descriptor.get_attributes();
+        return file_attributes.size;
     }
 
     const GetAttributesError = error{
@@ -134,9 +121,9 @@ const FileDescriptor = struct{
 
     const get_attributes = fn (file_descriptor: FileDescriptor) GetAttributesError!FileAttributes {
         switch (current) {
-            .linux => {
-                var stat_buffer: linux.Stat = undefined;
-                const raw_result = linux.fstat(file_descriptor.handle, stat_buffer.&);
+            .linux, .macos => {
+                var stat_buffer: system.Stat = undefined;
+                const raw_result = system.fstat(file_descriptor.handle, stat_buffer.&);
                 const result = unwrap_syscall(raw_result) catch |err| switch (err) {
                     else => return GetAttributesError.failed,
                 };
@@ -396,14 +383,34 @@ const AccessMode = enum(u2) {
 const open = fn(path: [&:0]const u8, open_flags: OpenFlags) OpenError!FileDescriptor{
     switch (current) {
         .linux => {
-            const flags = linux.OpenFlags{
+            const flags = system.OpenFlags{
                 .access_mode = switch (open_flags.access_mode) {
                     .read_only => .read_only,
                     .write_only => .write_only,
                     .read_write => .read_write,
                 },
             };
-            const syscall_result = linux.open(path, flags, 0);
+            const syscall_result = system.open(path, flags, 0);
+            const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
+                else => unreachable,
+            };
+
+            const r: u32 = #cast(result);
+
+            const file_descriptor = FileDescriptor{
+                .handle = #cast(r),
+            };
+            return file_descriptor;
+        },
+        .macos => {
+            const flags = system.OpenFlags{
+                .access_mode = switch (open_flags.access_mode) {
+                    .read_only => .read_only,
+                    .write_only => .write_only,
+                    .read_write => .read_write,
+                },
+            };
+            const syscall_result = system.open(path, flags);
             const result = unwrap_syscall(syscall_result) catch |err| switch (err) {
                 else => unreachable,
             };

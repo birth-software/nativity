@@ -41,6 +41,77 @@ const MapFlags = switch (os) {
     else => #error("OS not supported"),
 };
 
+const AccessMode = enum(u2) {
+    read_only = 0,
+    write_only = 1,
+    read_write = 2,
+};
+
+const OpenFlags = switch (os) {
+    .macos => bitfield(u32) {
+        access_mode: AccessMode,
+        non_block: bool = false,
+        append: bool = false,
+        shared_lock: bool = false,
+        exclusive_lock: bool = false,
+        async: bool = false,
+        sync: bool = false,
+        no_follow: bool = false,
+        creat: bool = false,
+        truncate: bool = false,
+        exclusive: bool = false,
+        _: u3 = 0,
+        evt_only: bool = false,
+        _: u1 = 0,
+        no_ctty: bool = false,
+        _: u2 = 0,
+        directory: bool = false,
+        symlink: bool = false,
+        dsync: bool = false,
+        _: u1 = 0,
+        cloexec: bool = false,
+        _: u4 = 0,
+        alert: bool = false,
+        _: u1 = 0,
+        popup: bool = false,
+    },
+    .linux => linux.OpenFlags,
+    else => #error("OS not supported"),
+};
+
+const TimeSpec = struct{
+    seconds: s64,
+    nanoseconds: s64,
+};
+
+const Stat = switch (os) {
+    .macos => struct{
+        dev: s32,
+        mode: u16,
+        nlink: u16,
+
+        inode: u64,
+        uid: u32,
+        gid: u32,
+        rdev: s32,
+
+        a_timespec: TimeSpec,
+        m_timespec: TimeSpec,
+        c_timespec: TimeSpec,
+        birth_timespec: TimeSpec,
+        size: s64,
+        blocks: s64,
+        block_size: s32,
+        flags: u32,
+        gen: u32,
+        lspare: s32,
+        qspare: [2]s64,
+    },
+    .linux => linux.Stat,
+    else => #error("OS not supported"),
+};
+
+
 const FileDescriptor = s32;
 const ProcessId = s32;
 const MAP_FAILED = 0xffffffffffffffff;
@@ -71,7 +142,9 @@ const get_map_flags = fn(flags: std.os.MapFlags) MapFlags{
     };
 }
 
-const write :: extern = fn cc(.c) (file_descriptor: FileDescriptor, bytes_ptr: [&]const u8, bytes_len: usize) ssize;
+const open :: extern = fn cc(.c) (path: [&:0]const u8, flags: OpenFlags) s32;
+const read :: extern = fn cc(.c) (file_descriptor: FileDescriptor, bytes_ptr: [&]const u8, byte_count: usize) ssize;
+const write :: extern = fn cc(.c) (file_descriptor: FileDescriptor, bytes_ptr: [&]const u8, byte_count: usize) ssize;
 const exit :: extern = fn cc(.c) (exit_code: s32) noreturn;
 const fork :: extern = fn cc(.c) () ProcessId;
 const mmap :: extern = fn cc(.c) (address: ?[&]const u8, length: usize, protection_flags: ProtectionFlags, map_flags: MapFlags, file_descriptor: FileDescriptor, offset: u64) usize;
@@ -80,5 +153,6 @@ const execve :: extern = fn cc(.c) (path: [&:0]const u8, argv: [&:null]const ?[&
 const realpath :: extern = fn cc(.c) (path: [&:0]const u8, resolved_path: [&:0]u8) ?[&:0]u8;
 const waitpid :: extern = fn cc(.c) (pid: ProcessId, status: &s32, flags: s32) s32;
 const mprotect :: extern = fn cc(.c) (address: &any, size: usize, flags: ProtectionFlags) s32;
+const fstat :: extern = fn cc(.c) (file_descriptor: FileDescriptor, stat: &Stat) s32;
 
 const _NSGetExecutablePath :: extern = fn cc(.c) (buffer: [&:0]u8, buffer_size: &u32) s32;

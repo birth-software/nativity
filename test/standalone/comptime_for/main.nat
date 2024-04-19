@@ -1,0 +1,18 @@
+const std = #import("std");
+const print = std.print;
+
+const Enum = enum{
+    first_name,
+    second_name,
+    third_name,
+};
+
+const main = fn () *!void {
+    print("Enum values:\n");
+
+    for ($#fields(Enum)) |e| {
+        const name: []const u8 = #name(e);
+        print(name);
+        print("\n");
+    }
+}
