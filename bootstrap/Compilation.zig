@@ -653,7 +653,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                     const libc_include_dirs: []const []const u8 = switch (@import("builtin").os.tag) {
                         .macos => &.{
                             "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1",
-                            try context.pathFromCompiler("lib/include"),
+                            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/15.0.0/include",
                             "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
                         },
                         .linux => switch (@import("builtin").abi) {
