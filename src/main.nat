@@ -19,6 +19,45 @@ const Token = struct {
     };
 };
 
+const FixedKeyword = enum{
+    "comptime",
+    "const",
+    "var",
+    "void",
+    "noreturn",
+    "while",
+    "bool",
+    "true",
+    "false",
+    "fn",
+    "unreachable",
+    "return",
+    "ssize",
+    "usize",
+    ""switch",
+    "if",
+    "else",
+    "struct",
+    "enum",
+    "null",
+    "align",
+    "for",
+    "undefined",
+    "break",
+    "test",
+    "catch",
+    "try",
+    "orelse",
+    "error",
+    "and",
+    "or",
+    "bitfield",
+    "Self",
+    "any",
+    "type",
+    "continue",
+};
+
 const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     if (bytes.length >= 0xffffffff) {
         unreachable;
@@ -72,10 +111,11 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
                             's' => .keyword_signed_integer,
                             else => unreachable,
                         };
-                    } else {
-                        //unreachable;
                     }
                 }
+
+                const string_length = index - start_index;
+                const string = bytes[start_index..][0..string_length];
             },
             else => index += 1,
         }

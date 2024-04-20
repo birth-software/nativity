@@ -919,8 +919,8 @@ const openat = fn(directory_file_descriptor: FileDescriptor, path: [&:0]const u8
     return result;
 }
 
-const read = fn(file_descriptor: FileDescriptor, bytes: []u8) usize {
-    const result = #syscall(#cast(Syscall.read), #cast(file_descriptor), #cast(bytes.pointer), bytes.length);
+const read = fn(file_descriptor: FileDescriptor, byte_pointer: [&]u8, byte_count: usize) usize {
+    const result = #syscall(#cast(Syscall.read), #cast(file_descriptor), #cast(byte_pointer), byte_count);
     return result;
 }
 
