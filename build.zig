@@ -429,10 +429,36 @@ pub fn build(b: *std.Build) !void {
 
         switch (target.result.os.tag) {
             .linux => {
-                compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/gcc/x86_64-pc-linux-gnu/13.2.1/../../../../lib/libstdc++.so" });
+                const result = try std.ChildProcess.run(.{
+                    .allocator = b.allocator,
+                    .argv = &.{ "c++", "--version" },
+                });
+                const success = switch (result.term) {
+                    .Exited => |exit_code| exit_code == 0,
+                    else => false,
+                };
+
+                if (!success) {
+                    unreachable;
+                }
+
+                var tokenizer = std.mem.tokenize(u8, result.stdout, " ");
+                const cxx_version = while (tokenizer.next()) |chunk| {
+                    if (std.ascii.isDigit(chunk[0])) {
+                        if (std.SemanticVersion.parse(chunk)) |_| {
+                            break chunk;
+                        } else |err| err catch {};
+                    }
+                } else {
+                    unreachable;
+                };
+
+                const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{"/usr/include/c++/", cxx_version} );
+
+                compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/libstdc++.so" });
                 compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
-                compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/13.2.1" });
-                compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu" });
+                compiler.addIncludePath(.{ .cwd_relative =  cxx_include_base});
+                compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{cxx_include_base, "/x86_64-pc-linux-gnu"}) });
                 compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
             },
             .macos => {
