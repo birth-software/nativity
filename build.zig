@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) !void {
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
         .windows => true,
-        .macos => true,
+        // .macos => true,
     };
     const compiler_options = b.addOptions();
     compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
@@ -481,7 +481,7 @@ pub fn build(b: *std.Build) !void {
             .macos => {
                 compiler.linkLibCpp();
 
-                if (discover_brew_prefix(b, "llvm")) |llvm_prefix| {
+                if (discover_brew_prefix(b, "llvm@17")) |llvm_prefix| {
                     const llvm_include_path = try std.mem.concat(b.allocator, u8, &.{ llvm_prefix, "/include" });
                     const llvm_lib_path = try std.mem.concat(b.allocator, u8, &.{ llvm_prefix, "/lib" });
                     compiler.addIncludePath(.{ .cwd_relative = llvm_include_path });

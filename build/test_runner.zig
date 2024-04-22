@@ -523,7 +523,12 @@ fn run_test_suite(allocator: Allocator, args: struct {
         };
 
         switch (@import("builtin").os.tag) {
-            .macos => {},
+            .macos => runCmakeTests(allocator, .{
+                .dir_path = "test/cc_macos",
+                .compiler_path = args.compiler_path,
+            }) catch {
+                errors = true;
+            },
             .windows => {},
             .linux => switch (@import("builtin").abi) {
                 .gnu => runCmakeTests(allocator, .{
