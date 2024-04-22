@@ -30,6 +30,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
         try argv.append(context.my_allocator, object.path);
     }
 
+    const ci = @import("configuration").ci;
     switch (@import("builtin").os.tag) {
         .macos => {
             try argv.append(context.my_allocator, "-dynamic");
@@ -54,24 +55,46 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
             }
         },
         .linux => {
-            if (options.link_libcpp) {
-                assert(options.link_libc);
-                try argv.append(context.my_allocator, "/usr/lib/libstdc++.so");
-            }
+            if (ci) {
+                if (options.link_libcpp) {
+                    assert(options.link_libc);
+                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/libstdc++.so.6");
+                }
 
-            if (options.link_libc) {
-                try argv.append(context.my_allocator, "/usr/lib/crt1.o");
-                try argv.append(context.my_allocator, "/usr/lib/crti.o");
-                try argv.append_slice(context.my_allocator, &.{ "-L", "/usr/lib" });
-                try argv.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
-                try argv.append(context.my_allocator, "--as-needed");
-                try argv.append(context.my_allocator, "-lm");
-                try argv.append(context.my_allocator, "-lpthread");
-                try argv.append(context.my_allocator, "-lc");
-                try argv.append(context.my_allocator, "-ldl");
-                try argv.append(context.my_allocator, "-lrt");
-                try argv.append(context.my_allocator, "-lutil");
-                try argv.append(context.my_allocator, "/usr/lib/crtn.o");
+                if (options.link_libc) {
+                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/crt1.o");
+                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/crti.o");
+                    try argv.append_slice(context.my_allocator, &.{ "-L", "/lib/x86_64-linux-gnu" });
+                    try argv.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                    try argv.append(context.my_allocator, "--as-needed");
+                    try argv.append(context.my_allocator, "-lm");
+                    try argv.append(context.my_allocator, "-lpthread");
+                    try argv.append(context.my_allocator, "-lc");
+                    try argv.append(context.my_allocator, "-ldl");
+                    try argv.append(context.my_allocator, "-lrt");
+                    try argv.append(context.my_allocator, "-lutil");
+                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/crtn.o");
+                }
+            } else {
+                if (options.link_libcpp) {
+                    assert(options.link_libc);
+                    try argv.append(context.my_allocator, "/usr/lib/libstdc++.so");
+                }
+
+                if (options.link_libc) {
+                    try argv.append(context.my_allocator, "/usr/lib/crt1.o");
+                    try argv.append(context.my_allocator, "/usr/lib/crti.o");
+                    try argv.append_slice(context.my_allocator, &.{ "-L", "/usr/lib" });
+                    try argv.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                    try argv.append(context.my_allocator, "--as-needed");
+                    try argv.append(context.my_allocator, "-lm");
+                    try argv.append(context.my_allocator, "-lpthread");
+                    try argv.append(context.my_allocator, "-lc");
+                    try argv.append(context.my_allocator, "-ldl");
+                    try argv.append(context.my_allocator, "-lrt");
+                    try argv.append(context.my_allocator, "-lutil");
+                    try argv.append(context.my_allocator, "/usr/lib/crtn.o");
+                }
             }
         },
         .windows => {},

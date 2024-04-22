@@ -65,7 +65,7 @@ pub fn main() !void {
         .server_header_buffer = &buffer,
     });
     defer request.deinit();
-    try request.send(.{});
+    try request.send();
     try request.wait();
 
     if (request.response.status != .ok) {
