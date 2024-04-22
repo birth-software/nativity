@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) !void {
     };
     const compiler_options = b.addOptions();
     compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
+    compiler_options.addOption(bool, "ci", is_ci);
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
@@ -119,7 +120,6 @@ pub fn build(b: *std.Build) !void {
     compiler.want_lto = false;
 
     compiler.linkLibC();
-    //if (target.result.os.tag == .windows) compiler.linkage = .dynamic;
 
     const zstd = if (target.result.os.tag == .windows) "zstd.lib" else "libzstd.a";
 
@@ -372,20 +372,24 @@ pub fn build(b: *std.Build) !void {
             assert(!self_hosted_ci);
             if (third_party_ci or (!target.query.isNativeOs() or !target.query.isNativeCpu())) {
                 var llvm_directory = try std.ArrayListUnmanaged(u8).initCapacity(b.allocator, 128);
-                llvm_directory.appendSliceAssumeCapacity(prefix ++ "/");
-                llvm_directory.appendSliceAssumeCapacity("llvm-");
-                llvm_directory.appendSliceAssumeCapacity(llvm_version);
-                llvm_directory.appendSliceAssumeCapacity("-");
-                llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.cpu.arch));
-                llvm_directory.appendSliceAssumeCapacity("-");
-                llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.os.tag));
-                llvm_directory.appendSliceAssumeCapacity("-");
-                llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.abi));
-                llvm_directory.appendSliceAssumeCapacity("-");
                 const cpu = if (std.mem.eql(u8, target.result.cpu.model.name, @tagName(target.result.cpu.arch))) "baseline" else target.result.cpu.model.name;
-                llvm_directory.appendSliceAssumeCapacity(cpu);
+                if (!is_ci) {
+                    llvm_directory.appendSliceAssumeCapacity(prefix ++ "/");
+                    llvm_directory.appendSliceAssumeCapacity("llvm-");
+                    llvm_directory.appendSliceAssumeCapacity(llvm_version);
+                    llvm_directory.appendSliceAssumeCapacity("-");
+                    llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.cpu.arch));
+                    llvm_directory.appendSliceAssumeCapacity("-");
+                    llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.os.tag));
+                    llvm_directory.appendSliceAssumeCapacity("-");
+                    llvm_directory.appendSliceAssumeCapacity(@tagName(target.result.abi));
+                    llvm_directory.appendSliceAssumeCapacity("-");
+                    llvm_directory.appendSliceAssumeCapacity(cpu);
+                } else {
+                    llvm_directory.appendSliceAssumeCapacity(prefix ++ "/x86_64-linux-gnu-x86_64_v3-release-static");
+                }
 
-                const url = try std.mem.concat(b.allocator, u8, &.{ "https://github.com/birth-software/fetch-llvm/releases/download/v", llvm_version, "/llvm-", llvm_version, "-", @tagName(target.result.cpu.arch), "-", @tagName(target.result.os.tag), "-", @tagName(target.result.abi), "-", cpu, ".tar.xz" });
+                const url = if (is_ci) "https://github.com/birth-software/fetch-llvm/releases/download/v17.0.6/x86_64-linux-gnu-x86_64_v3-release-static.tar.gz" else try std.mem.concat(b.allocator, u8, &.{ "https://github.com/birth-software/fetch-llvm/releases/download/v", llvm_version, "/llvm-", llvm_version, "-", @tagName(target.result.cpu.arch), "-", @tagName(target.result.os.tag), "-", @tagName(target.result.abi), "-", cpu, ".tar.xz" });
 
                 var dir = std.fs.cwd().openDir(llvm_directory.items, .{}) catch {
                     const run = b.addRunArtifact(fetcher);
@@ -424,42 +428,55 @@ pub fn build(b: *std.Build) !void {
         compiler.linkSystemLibrary("lldMachO");
         compiler.linkSystemLibrary("lldWasm");
         compiler.linkSystemLibrary("unwind");
-        compiler.linkSystemLibrary("zlib");
+        compiler.linkSystemLibrary(if (is_ci) "z" else "zlib");
         compiler.linkSystemLibrary("zstd");
 
         switch (target.result.os.tag) {
             .linux => {
-                const result = try std.ChildProcess.run(.{
-                    .allocator = b.allocator,
-                    .argv = &.{ "c++", "--version" },
-                });
-                const success = switch (result.term) {
-                    .Exited => |exit_code| exit_code == 0,
-                    else => false,
-                };
-
-                if (!success) {
-                    unreachable;
-                }
-
-                var tokenizer = std.mem.tokenize(u8, result.stdout, " ");
-                const cxx_version = while (tokenizer.next()) |chunk| {
-                    if (std.ascii.isDigit(chunk[0])) {
-                        if (std.SemanticVersion.parse(chunk)) |_| {
-                            break chunk;
-                        } else |err| err catch {};
-                    }
+                if (third_party_ci) {
+                    compiler.addObjectFile(.{ .cwd_relative = "/lib/x86_64-linux-gnu/libstdc++.so.6" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/11" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu/c++/11" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/lib/llvm-17/include" });
+                    compiler.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu" });
+                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib/llvm-17/lib" });
                 } else {
-                    unreachable;
-                };
+                    const result = try std.ChildProcess.run(.{
+                        .allocator = b.allocator,
+                        .argv = &.{
+                            "cc", "--version",
+                        },
+                        .max_output_bytes = 0xffffffffffffff,
+                    });
+                    const success = switch (result.term) {
+                        .Exited => |exit_code| exit_code == 0,
+                        else => false,
+                    };
 
-                const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{"/usr/include/c++/", cxx_version} );
+                    if (!success) {
+                        unreachable;
+                    }
 
-                compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/libstdc++.so" });
-                compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
-                compiler.addIncludePath(.{ .cwd_relative =  cxx_include_base});
-                compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{cxx_include_base, "/x86_64-pc-linux-gnu"}) });
-                compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+                    var tokenizer = std.mem.tokenize(u8, result.stdout, " ");
+                    const cxx_version = while (tokenizer.next()) |chunk| {
+                        if (std.ascii.isDigit(chunk[0])) {
+                            if (std.SemanticVersion.parse(chunk)) |_| {
+                                break chunk;
+                            } else |err| err catch {};
+                        }
+                    } else {
+                        unreachable;
+                    };
+
+                    const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
+                    compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/libstdc++.so" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                    compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
+                    compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/x86_64-pc-linux-gnu" }) });
+                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+                }
             },
             .macos => {
                 compiler.linkLibCpp();
@@ -522,12 +539,10 @@ pub fn build(b: *std.Build) !void {
         .windows => blk: {
             const result = b.addSystemCommand(&.{"remedybg"});
             result.addArg("-g");
-            // result.addArg(compiler_exe_path);
 
             break :blk result;
         },
         .macos => blk: {
-            // not tested
             const result = b.addSystemCommand(&.{"lldb"});
             result.addArg("--");
             break :blk result;

@@ -657,7 +657,13 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                             "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
                         },
                         .linux => switch (@import("builtin").abi) {
-                            .gnu => &.{
+                            .gnu => if (@import("configuration").ci) &.{
+                                "/usr/include/c++/11",
+                                "/usr/include/x86_64-linux-gnu/c++/11",
+                                "/usr/lib/clang/17/include",
+                                "/usr/include",
+                                "/usr/include/x86_64-linux-gnu",
+                            } else &.{
                                 "/usr/include/c++/13.2.1",
                                 "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
                                 "/usr/lib/clang/17/include",
@@ -13925,8 +13931,8 @@ pub const Builder = struct {
                                         .@"comptime" = .{
                                             .enum_value = enum_fields[0],
                                         },
-                                        },
-                                    }, emit, null);
+                                    },
+                                }, emit, null);
                                 _ = comptime_payload; // autofix
                                 const identifier = unit.getExpectedTokenBytes(payload_node.token, .identifier);
                                 const hash = try unit.processIdentifier(context, identifier);

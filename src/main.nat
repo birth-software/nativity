@@ -58,6 +58,13 @@ const FixedKeyword = enum{
     "continue",
 };
 
+const FileStartToken = enum{
+    "comptime",
+    "test",
+    "const",
+    "var",
+};
+
 const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     if (bytes.length >= 0xffffffff) {
         unreachable;
@@ -66,60 +73,14 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     const length: u32 = #cast(bytes.length);
     var i: u32 = 0;
 
-    const line_offset_arena = try Arena.init(bytes.length + #size(Arena));
-    var line_offsets = try line_offset_arena.new_array($u32, bytes.length);
-    line_offsets[0] = 0;
-    var line_count: u32 = 1;
-
-    var index: u32 = 0;
-    while (index < length) {
-        const byte = bytes[index];
-        line_count += #cast(byte == '\n');
-        line_offsets[line_count] = index;
-
-        index += 1;
-    }
-
-    index = 0;
-
-    while (index < length) {
-        const start_index = index;
-        const start_character = bytes[index];
-        var token_id = Token.Id.invalid;
-
-        switch (start_character) {
-            'a'...'z', 'A'...'Z', '_' => {
-                while (true) {
-                    const ch = bytes[index];
-                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_' or (ch >= '0' and ch <= '9')) {
-                        index += 1;
-                        continue;
-                    }
-
-                    break;
-                }
-
-                if (start_character == 'u' or start_character == 's' and bytes[start_index + 1] >= '0' and bytes[start_index + 1] <= '9') {
-                    var index_integer = start_index + 1;
-                    while (bytes[index_integer] >= '0' and bytes[index_integer] <= '9') {
-                        index_integer += 1;
-                    }
-
-                    if (index_integer == index) {
-                        token_id = switch (start_character) {
-                            'u' => .keyword_unsigned_integer,
-                            's' => .keyword_signed_integer,
-                            else => unreachable,
-                        };
-                    }
-                }
-
-                const string_length = index - start_index;
-                const string = bytes[start_index..][0..string_length];
-            },
-            else => index += 1,
-        }
-    }
+    //var index: u32 = 0;
+    //while (index + 64 < length) {
+    //    var i = index;
+    //    const top = index + 64;
+    //    while (i < top) {
+    //        i += 1;
+    //    }
+    //}
 }
 
 const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {
