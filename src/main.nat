@@ -20,15 +20,31 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     //    var i = index;
     //    const top = index + max_initial_keyword_len + 1;
     //    var space: u32 = 0;
+
     //    while (i < top) {
     //        const is_space = bytes[i] == ' ';
-    //        space |= #cast(
+    //        const is_space_int: u32 = #cast(is_space);
+    //        const space_mask = 0 -% is_space_int;
+    //        space |= (1 << i) & space_mask;
     //        i += 1;
     //    }
 
     //    if (space == 0) {
     //        unreachable;
     //    }
+
+    //    const word_byte_count = #trailing_zeroes(space);
+    //    const word = bytes[index..][0..word_byte_count];
+
+    //    if (byte_equal(word, #name(FileStartToken."comptime"))) {
+    //    } else if (byte_equal(word, #name(FileStartToken."test"))) {
+    //    } else if (byte_equal(word, #name(FileStartToken."const"))) {
+    //    } else if (byte_equal(word, #name(FileStartToken."var"))) {
+    //    } else {
+    //        print("Wrong file declaration start\n");
+    //    }
+
+    //    break;
     //}
 }
 

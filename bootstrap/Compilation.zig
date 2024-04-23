@@ -3670,6 +3670,7 @@ pub const Instruction = union(enum) {
     integer_compare: IntegerCompare,
     integer_binary_operation: Instruction.IntegerBinaryOperation,
     jump: Jump,
+    leading_zeroes: V,
     load: Load,
     memcpy: Memcpy,
     umin: Min,
@@ -3683,6 +3684,7 @@ pub const Instruction = union(enum) {
     store: Store,
     syscall: Syscall,
     @"switch": Switch,
+    trailing_zeroes: V,
     trap,
     @"unreachable",
 
@@ -4375,11 +4377,13 @@ pub const IntrinsicId = enum {
     @"error",
     int_to_pointer,
     import,
+    leading_zeroes,
     min,
     name,
     size,
     sign_extend,
     syscall,
+    trailing_zeroes,
     trap,
     zero_extend,
 };
@@ -4963,6 +4967,36 @@ pub const Builder = struct {
                     },
                     else => |t| @panic(@tagName(t)),
                 }
+            },
+            .trailing_zeroes => {
+                assert(argument_node_list.len == 1);
+                const argument = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_list[0], .right);
+                const trailing_zeroes = try unit.instructions.append(context.my_allocator, .{
+                    .trailing_zeroes = argument,
+                });
+                try builder.appendInstruction(unit, context, trailing_zeroes);
+
+                return V{
+                    .type = argument.type,
+                    .value = .{
+                        .runtime = trailing_zeroes,
+                    },
+                };
+            },
+            .leading_zeroes => {
+                assert(argument_node_list.len == 1);
+                const argument = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_list[0], .right);
+                const leading_zeroes = try unit.instructions.append(context.my_allocator, .{
+                    .leading_zeroes = argument,
+                });
+                try builder.appendInstruction(unit, context, leading_zeroes);
+
+                return V{
+                    .type = argument.type,
+                    .value = .{
+                        .runtime = leading_zeroes,
+                    },
+                };
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -8667,6 +8701,7 @@ pub const Builder = struct {
                 const field_node = unit.getNode(field_node_index);
                 const identifier = switch (unit.getTokenId(field_node.token)) {
                     .identifier => unit.getExpectedTokenBytes(field_node.token, .identifier),
+                    .string_literal => try unit.fixupStringLiteral(context, field_node.token),
                     .discard => try std.mem.concat(context.allocator, u8, &.{ "_", &.{'0' + b: {
                         const ch = '0' + ignore_field_count;
                         ignore_field_count += 1;
@@ -15060,8 +15095,11 @@ pub const Builder = struct {
     fn resolveFieldAccess(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side, new_parameters: []const V.Comptime) !V {
         const node = unit.getNode(node_index);
         const right_node = unit.getNode(node.right);
-        assert(right_node.id == .identifier);
-        const identifier = unit.getExpectedTokenBytes(right_node.token, .identifier);
+        const identifier = switch (right_node.id) {
+            .identifier => unit.getExpectedTokenBytes(right_node.token, .identifier),
+            .string_literal => try unit.fixupStringLiteral(context, right_node.token),
+            else => |t| @panic(@tagName(t)),
+        };
         const identifier_hash = try unit.processIdentifier(context, identifier);
 
         const left_node_index = node.left;
