@@ -1,0 +1,12 @@
+const std = #import("std");
+const expect = std.testing.expect;
+const main = fn () *!void {
+    var a: u8 = 255;
+    var b: u8 = 1;
+    const result = a +% b;
+    try expect(result == 0);
+    var c: u16 = 0;
+    var d: u16 = 1;
+    const sub_result = c -% d;
+    try expect(sub_result == 65535);
+}

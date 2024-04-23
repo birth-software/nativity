@@ -313,6 +313,26 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                         index += 1;
                         break :b .operator_add_assign;
                     },
+                    '|' => b: {
+                        index += 1;
+                        break :b switch (text[index]) {
+                            '=' => assign: {
+                                index += 1;
+                                break :assign .operator_saturated_add_assign;
+                            },
+                            else => .operator_saturated_add,
+                        };
+                    },
+                    '%' => b: {
+                        index += 1;
+                        break :b switch (text[index]) {
+                            '=' => assign: {
+                                index += 1;
+                                break :assign .operator_wrapping_add_assign;
+                            },
+                            else => .operator_wrapping_add,
+                        };
+                    },
                     else => .operator_add,
                 };
 
@@ -325,6 +345,26 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                         index += 1;
                         break :b .operator_sub_assign;
                     },
+                    '|' => b: {
+                        index += 1;
+                        break :b switch (text[index]) {
+                            '=' => assign: {
+                                index += 1;
+                                break :assign .operator_saturated_add_assign;
+                            },
+                            else => .operator_saturated_sub,
+                        };
+                    },
+                    '%' => b: {
+                        index += 1;
+                        break :b switch (text[index]) {
+                            '=' => assign: {
+                                index += 1;
+                                break :assign .operator_wrapping_sub_assign;
+                            },
+                            else => .operator_wrapping_sub,
+                        };
+                    },
                     else => .operator_minus,
                 };
 
@@ -336,6 +376,26 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                     '=' => b: {
                         index += 1;
                         break :b .operator_mul_assign;
+                    },
+                    '|' => b: {
+                        index += 1;
+                        break :b switch (text[index]) {
+                            '=' => assign: {
+                                index += 1;
+                                break :assign .operator_saturated_mul_assign;
+                            },
+                            else => .operator_saturated_mul,
+                        };
+                    },
+                    '%' => b: {
+                        index += 1;
+                        break :b switch (text[index]) {
+                            '=' => assign: {
+                                index += 1;
+                                break :assign .operator_wrapping_mul_assign;
+                            },
+                            else => .operator_wrapping_mul,
+                        };
                     },
                     else => .operator_asterisk,
                 };
