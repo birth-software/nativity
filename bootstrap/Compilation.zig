@@ -3863,6 +3863,7 @@ pub const Instruction = union(enum) {
             error_union_type_int_to_pointer,
             error_union_type_upcast,
             error_union_type_downcast,
+            array_bitcast_to_integer,
         };
     };
 
@@ -4708,6 +4709,36 @@ pub const Builder = struct {
                     .type => |type_index| {
                         const cast_id = try builder.resolveCast(unit, context, type_index, v);
                         switch (cast_id) {
+                            .array_bitcast_to_integer => switch (v.value) {
+                                .@"comptime" => |ct| switch (ct) {
+                                    .constant_array => |constant_array_index| {
+                                        const constant_array = unit.constant_arrays.get(constant_array_index);
+                                        const array_type = unit.types.get(constant_array.type).array;
+                                        switch (array_type.type) {
+                                            .u8 => {
+                                                var value: u64 = 0;
+                                                _ = &value;
+                                                for (constant_array.values, 0..) |array_value, i| {
+                                                    value |= array_value.constant_int.value << @as(u6, @intCast(i * 8));
+                                                }
+                                                return V{
+                                                    .value = .{
+                                                        .@"comptime" = .{
+                                                            .constant_int = .{
+                                                                .value = value,
+                                                            },
+                                                        },
+                                                    },
+                                                    .type = type_index,
+                                                };
+                                            },
+                                            else => unreachable,
+                                        }
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
                             else => {
                                 const instruction = try unit.instructions.append(context.my_allocator, .{
                                     .cast = .{
@@ -5358,6 +5389,18 @@ pub const Builder = struct {
                         }
 
                         return .pointer_to_int;
+                    },
+                    .array => |source_array| {
+                        const array_size = source_array.count * unit.types.get(source_array.type).getAbiSize(unit);
+                        if (destination_integer.bit_count % 8 != 0) {
+                            unreachable;
+                        }
+                        const destination_byte_count = @divExact(destination_integer.bit_count, 8);
+                        if (destination_byte_count == array_size) {
+                            return .array_bitcast_to_integer;
+                        } else {
+                            unreachable;
+                        }
                     },
                     else => |t| @panic(@tagName(t)),
                 },
@@ -9859,38 +9902,72 @@ pub const Builder = struct {
                     else => unreachable,
                 };
 
-                // TODO: is this right? .right
-                const pointer_value = try builder.resolveRuntimeValue(unit, context, pointer_type_expect, node.left, .right);
+                const left_node = unit.getNode(node.left);
+                switch (left_node.id) {
+                    .string_literal => {
+                        const string_literal = try unit.fixupStringLiteral(context, left_node.token);
+                        var values = try UnpinnedArray(V.Comptime).initialize_with_capacity(context.my_allocator, @intCast(string_literal.len));
 
-                break :block switch (side) {
-                    .left => pointer_value,
-                    .right => right: {
-                        const load_type = switch (type_expect) {
-                            .none => b: {
-                                const pointer_type = unit.types.get(pointer_value.type);
-                                const pointer_element_type = pointer_type.pointer.type;
-                                break :b pointer_element_type;
-                            },
-                            .type => |type_index| type_index,
-                            else => unreachable,
-                        };
+                        for (string_literal) |b| {
+                            values.append_with_capacity(V.Comptime{
+                                .constant_int = .{
+                                    .value = b,
+                                },
+                            });
+                        }
 
-                        const load = try unit.instructions.append(context.my_allocator, .{
-                            .load = .{
-                                .value = pointer_value,
-                                .type = load_type,
-                            },
+                        const array_type = try unit.getArrayType(context, .{
+                            .count = string_literal.len,
+                            .type = .u8,
+                            .termination = .none,
                         });
-                        try builder.appendInstruction(unit, context, load);
 
-                        break :right .{
+                        return V{
                             .value = .{
-                                .runtime = load,
+                                .@"comptime" = .{
+                                    .constant_array = try unit.constant_arrays.append(context.my_allocator, .{
+                                        .values = values.slice(),
+                                        .type = array_type,
+                                    }),
+                                },
                             },
-                            .type = load_type,
+                            .type = array_type,
                         };
                     },
-                };
+                    else => {
+                        const pointer_value = try builder.resolveRuntimeValue(unit, context, pointer_type_expect, node.left, .right);
+
+                        break :block switch (side) {
+                            .left => pointer_value,
+                            .right => right: {
+                                const load_type = switch (type_expect) {
+                                    .none => b: {
+                                        const pointer_type = unit.types.get(pointer_value.type);
+                                        const pointer_element_type = pointer_type.pointer.type;
+                                        break :b pointer_element_type;
+                                    },
+                                    .type => |type_index| type_index,
+                                    else => unreachable,
+                                };
+
+                                const load = try unit.instructions.append(context.my_allocator, .{
+                                    .load = .{
+                                        .value = pointer_value,
+                                        .type = load_type,
+                                    },
+                                    });
+                                try builder.appendInstruction(unit, context, load);
+
+                                break :right .{
+                                    .value = .{
+                                        .runtime = load,
+                                    },
+                                    .type = load_type,
+                                };
+                            },
+                        };
+                    },
+                }
             },
             .compare_equal,
             .compare_not_equal,

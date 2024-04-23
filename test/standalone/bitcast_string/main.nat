@@ -1,0 +1,6 @@
+const std = #import("std");
+const expect = std.testing.expect;
+const main = fn () *!void {
+    const a: u64 = #cast("comptime".@);
+    try expect(a == 7308613719115525987);
+}
