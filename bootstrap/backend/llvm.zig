@@ -2693,6 +2693,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 const cast_instruction = llvm.builder.createCast(cast_type, value, value.getType(), cast_name.ptr, cast_name.len) orelse return LLVM.Value.Instruction.Error.cast;
                                 try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, cast_instruction);
                             },
+                            .array_bitcast_to_integer => unreachable,
                             // TODO: Poke metadata
                             .pointer_var_to_const,
                             .slice_var_to_const,
