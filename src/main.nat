@@ -6,6 +6,39 @@ const print = std.print;
 const print_usize = std.print_usize;
 const exit = std.os.exit;
 
+const lex = fn (arena: &Arena, bytes: []const u8) *!void {
+    if (bytes.length >= 0xffffffff) {
+        unreachable;
+    }
+
+    const length: u32 = #cast(bytes.length);
+
+    const max_initial_keyword_len: u32 = 8;
+    
+    //var index: u32 = 0;
+    //while (index + 64 < length) {
+    //    var i = index;
+    //    const top = index + max_initial_keyword_len + 1;
+    //    var space: u32 = 0;
+    //    while (i < top) {
+    //        const is_space = bytes[i] == ' ';
+    //        space |= #cast(
+    //        i += 1;
+    //    }
+
+    //    if (space == 0) {
+    //        unreachable;
+    //    }
+    //}
+}
+
+const FileStartToken = enum{
+    "comptime",
+    "test",
+    "const",
+    "var",
+};
+
 const ArgumentProcessingError = error{
     no_arguments,
 };
@@ -57,31 +90,6 @@ const FixedKeyword = enum{
     "type",
     "continue",
 };
-
-const FileStartToken = enum{
-    "comptime",
-    "test",
-    "const",
-    "var",
-};
-
-const lex = fn (arena: &Arena, bytes: []const u8) *!void {
-    if (bytes.length >= 0xffffffff) {
-        unreachable;
-    }
-
-    const length: u32 = #cast(bytes.length);
-    var i: u32 = 0;
-
-    //var index: u32 = 0;
-    //while (index + 64 < length) {
-    //    var i = index;
-    //    const top = index + 64;
-    //    while (i < top) {
-    //        i += 1;
-    //    }
-    //}
-}
 
 const get_argument = fn (real_argument: []const u8, wanted_argument: []const u8, command_arguments: []const [&:0]const u8, i_ptr: &usize) ?[]const u8 {
     const i = i_ptr.@;

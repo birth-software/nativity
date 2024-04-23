@@ -3805,10 +3805,16 @@ pub const Instruction = union(enum) {
 
         const Id = enum {
             add,
+            wrapping_add,
+            saturated_add,
+            sub,
+            wrapping_sub,
+            saturated_sub,
+            mul,
+            wrapping_mul,
+            saturated_mul,
             div,
             mod,
-            mul,
-            sub,
             bit_and,
             bit_or,
             bit_xor,
@@ -4380,8 +4386,14 @@ pub const IntrinsicId = enum {
 
 pub const ArithmeticLogicIntegerInstruction = enum {
     add,
+    wrapping_add,
+    saturated_add,
     sub,
+    wrapping_sub,
+    saturated_sub,
     mul,
+    wrapping_mul,
+    saturated_mul,
     div,
     mod,
     bit_and,
@@ -6728,7 +6740,7 @@ pub const Builder = struct {
     fn resolveAssignment(builder: *Builder, unit: *Unit, context: *const Context, node_index: Node.Index) !V {
         const node = unit.getNode(node_index);
         switch (node.id) {
-            .assign, .add_assign, .sub_assign, .div_assign => {
+            .assign, .add_assign, .sub_assign, .div_assign, .or_assign => {
                 if (unit.getNode(node.left).id == .discard) {
                     _ = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, node.right, .right);
                     return .{
@@ -6778,6 +6790,7 @@ pub const Builder = struct {
                                                     .add_assign => .add,
                                                     .sub_assign => .sub,
                                                     .div_assign => .div,
+                                                    .or_assign => .bit_or,
                                                     else => |t| @panic(@tagName(t)),
                                                 },
                                             },
@@ -9992,13 +10005,22 @@ pub const Builder = struct {
                     };
                 }
             },
-            .add, .sub, .mul, .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right, .bool_and, .bool_or => block: {
+            .add, .wrapping_add, .saturated_add,
+            .sub, .wrapping_sub, .saturated_sub,
+            .mul, .wrapping_mul, .saturated_mul,
+            .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right, .bool_and, .bool_or => block: {
                 const left_node_index = node.left;
                 const right_node_index = node.right;
                 const binary_operation_id: ArithmeticLogicIntegerInstruction = switch (node.id) {
                     .add => .add,
+                    .wrapping_add => .wrapping_add,
+                    .saturated_add => .saturated_add,
                     .sub => .sub,
+                    .wrapping_sub => .wrapping_sub,
+                    .saturated_sub => .saturated_sub,
                     .mul => .mul,
+                    .wrapping_mul => .wrapping_mul,
+                    .saturated_mul => .saturated_mul,
                     .div => .div,
                     .mod => .mod,
                     .bit_and => .bit_and,
@@ -10026,11 +10048,17 @@ pub const Builder = struct {
                                 },
                                 .type => switch (binary_operation_id) {
                                     .add,
+                                    .wrapping_add,
+                                    .saturated_add,
                                     .sub,
+                                    .wrapping_sub,
+                                    .saturated_sub,
                                     .bit_and,
                                     .bit_xor,
                                     .bit_or,
                                     .mul,
+                                    .wrapping_mul,
+                                    .saturated_mul,
                                     .div,
                                     .mod,
                                     .shift_left,
@@ -10070,6 +10098,7 @@ pub const Builder = struct {
                                     .bit_xor => left ^ right,
                                     .shift_left => left << @as(u6, @intCast(right)),
                                     .shift_right => left >> @as(u6, @intCast(right)),
+                                    else => unreachable,
                                 };
 
                                 break :block switch (type_expect) {
@@ -10141,8 +10170,14 @@ pub const Builder = struct {
                                                 .bit_xor,
                                                 .shift_right,
                                                 .add,
+                                                .wrapping_add,
+                                                .saturated_add,
                                                 .sub,
+                                                .wrapping_sub,
+                                                .saturated_sub,
                                                 .mul,
+                                                .wrapping_mul,
+                                                .saturated_mul,
                                                 .div,
                                                 .mod,
                                                 => left_value.type,
@@ -10157,10 +10192,16 @@ pub const Builder = struct {
                                                 .materialized_int => b: {
                                                     const id: Instruction.IntegerBinaryOperation.Id = switch (binary_operation_id) {
                                                         .add => .add,
+                                                        .wrapping_add => .wrapping_add,
+                                                        .saturated_add => .saturated_add,
+                                                        .sub => .sub,
+                                                        .wrapping_sub => .wrapping_sub,
+                                                        .saturated_sub => .saturated_sub,
+                                                        .mul => .mul,
+                                                        .wrapping_mul => .wrapping_mul,
+                                                        .saturated_mul => .saturated_mul,
                                                         .div => .div,
                                                         .mod => .mod,
-                                                        .mul => .mul,
-                                                        .sub => .sub,
                                                         .bit_and => .bit_and,
                                                         .bit_or => .bit_or,
                                                         .bit_xor => .bit_xor,
@@ -13776,7 +13817,7 @@ pub const Builder = struct {
             try builder.insertDebugCheckPoint(unit, context, statement_node.token);
 
             switch (statement_node.id) {
-                .assign, .add_assign, .sub_assign, .div_assign => {
+                .assign, .add_assign, .sub_assign, .div_assign, .or_assign => {
                     _ = try builder.resolveAssignment(unit, context, statement_node_index);
                 },
                 .if_else => {
@@ -17349,8 +17390,14 @@ pub const Token = struct {
         // Binary
         operator_assign,
         operator_add,
+        operator_saturated_add,
+        operator_wrapping_add,
         operator_minus,
+        operator_saturated_sub,
+        operator_wrapping_sub,
         operator_asterisk,
+        operator_saturated_mul,
+        operator_wrapping_mul,
         operator_div,
         operator_mod,
         operator_bar,
@@ -17359,8 +17406,14 @@ pub const Token = struct {
         operator_shift_left,
         operator_shift_right,
         operator_add_assign,
+        operator_wrapping_add_assign,
+        operator_saturated_add_assign,
         operator_sub_assign,
+        operator_wrapping_sub_assign,
+        operator_saturated_sub_assign,
         operator_mul_assign,
+        operator_wrapping_mul_assign,
+        operator_saturated_mul_assign,
         operator_div_assign,
         operator_mod_assign,
         operator_or_assign,

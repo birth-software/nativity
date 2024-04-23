@@ -2762,14 +2762,20 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const left = try llvm.emitRightValue(unit, context, binary_operation.left);
                         const right = try llvm.emitRightValue(unit, context, binary_operation.right);
                         assert(left.getType() == right.getType());
-                        const no_signed_wrapping = binary_operation.signedness == .signed;
-                        const no_unsigned_wrapping = binary_operation.signedness == .unsigned;
+                        const no_signed_wrapping = binary_operation.signedness == .signed or switch (binary_operation.id) {
+                            .wrapping_add, .wrapping_sub, .wrapping_mul => false,
+                            else => true,
+                        };
+                        const no_unsigned_wrapping = binary_operation.signedness == .unsigned or switch (binary_operation.id) {
+                            .wrapping_add, .wrapping_sub, .wrapping_mul => false,
+                            else => true,
+                        };
                         const name = @tagName(binary_operation.id);
                         const is_exact = false;
                         const instruction = switch (binary_operation.id) {
-                            .add => llvm.builder.createAdd(left, right, name.ptr, name.len, no_unsigned_wrapping, no_signed_wrapping) orelse return LLVM.Value.Instruction.Error.add,
-                            .mul => llvm.builder.createMultiply(left, right, name.ptr, name.len, no_unsigned_wrapping, no_signed_wrapping) orelse return LLVM.Value.Instruction.Error.multiply,
-                            .sub => llvm.builder.createSub(left, right, name.ptr, name.len, no_unsigned_wrapping, no_signed_wrapping) orelse return LLVM.Value.Instruction.Error.add,
+                            .add, .wrapping_add => llvm.builder.createAdd(left, right, name.ptr, name.len, no_unsigned_wrapping, no_signed_wrapping) orelse return LLVM.Value.Instruction.Error.add,
+                            .sub, .wrapping_sub => llvm.builder.createSub(left, right, name.ptr, name.len, no_unsigned_wrapping, no_signed_wrapping) orelse return LLVM.Value.Instruction.Error.add,
+                            .mul, .wrapping_mul => llvm.builder.createMultiply(left, right, name.ptr, name.len, no_unsigned_wrapping, no_signed_wrapping) orelse return LLVM.Value.Instruction.Error.multiply,
                             .div => switch (binary_operation.signedness) {
                                 .unsigned => llvm.builder.createUDiv(left, right, name.ptr, name.len, is_exact) orelse unreachable,
                                 .signed => llvm.builder.createSDiv(left, right, name.ptr, name.len, is_exact) orelse unreachable,
@@ -2786,7 +2792,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 .unsigned => llvm.builder.createLogicalShiftRight(left, right, name.ptr, name.len, is_exact) orelse unreachable,
                                 .signed => llvm.builder.createArithmeticShiftRight(left, right, name.ptr, name.len, is_exact) orelse unreachable,
                             },
-                            //else => |t| @panic(@tagName(t)),
+                            else => unreachable,
                         };
                         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, instruction);
                     },
