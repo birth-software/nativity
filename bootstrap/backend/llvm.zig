@@ -3110,6 +3110,15 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const intrinsic_call = try llvm.callIntrinsic("llvm.sadd.with.overflow", &parameter_types, &arguments);
                         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
                     },
+                    .trailing_zeroes => |v| {
+                        const intrinsic_type = try llvm.getType(unit, context, v.type);
+                        const parameter_types = [_]*LLVM.Type{intrinsic_type};
+                        const value = try llvm.emitRightValue(unit, context, v);
+                        const is_poison = llvm.context.getConstantInt(1, 0, false) orelse unreachable;
+                        const arguments = [_]*LLVM.Value{ value, is_poison.toValue() };
+                        const intrinsic_call = try llvm.callIntrinsic("llvm.cttz", &parameter_types, &arguments);
+                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
+                    },
                     .@"switch" => |switch_expression| {
                         const condition = try llvm.emitRightValue(unit, context, switch_expression.condition);
                         const else_block: ?*LLVM.Value.BasicBlock = if (switch_expression.else_block != .null) b: {

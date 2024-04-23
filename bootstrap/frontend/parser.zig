@@ -1208,6 +1208,7 @@ const Analyzer = struct {
                 .discard,
                 .fixed_keyword_test,
                 .fixed_keyword_break,
+                .fixed_keyword_while,
                 => break,
                 .operator_compare_equal => .compare_equal,
                 .operator_compare_not_equal => .compare_not_equal,
@@ -2267,6 +2268,24 @@ const Analyzer = struct {
                     .left = left,
                     .right = try analyzer.addNode(.{
                         .id = .identifier,
+                        .token = blk: {
+                            const t = analyzer.token_i;
+                            analyzer.consumeToken();
+                            break :blk t;
+                        },
+                        .left = Node.Index.null,
+                        .right = Node.Index.null,
+                    }),
+                }),
+                .string_literal => try analyzer.addNode(.{
+                    .id = .field_access,
+                    .token = blk: {
+                        analyzer.consumeToken();
+                        break :blk token;
+                    },
+                    .left = left,
+                    .right = try analyzer.addNode(.{
+                        .id = .string_literal,
                         .token = blk: {
                             const t = analyzer.token_i;
                             analyzer.consumeToken();

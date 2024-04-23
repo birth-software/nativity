@@ -1,0 +1,8 @@
+const std = #import("std");
+const expect = std.testing.expect;
+const main = fn () *!void {
+    var a: u32 = 7;
+    try expect(#trailing_zeroes(a) == 0);
+    a = 8;
+    try expect(#trailing_zeroes(a) == 3);
+}
