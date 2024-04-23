@@ -4717,7 +4717,6 @@ pub const Builder = struct {
                                         switch (array_type.type) {
                                             .u8 => {
                                                 var value: u64 = 0;
-                                                _ = &value;
                                                 for (constant_array.values, 0..) |array_value, i| {
                                                     value |= array_value.constant_int.value << @as(u6, @intCast(i * 8));
                                                 }
@@ -5883,6 +5882,7 @@ pub const Builder = struct {
         slice_to_nullable,
         slice_coerce_to_zero_termination,
         slice_zero_to_no_termination,
+        pointer_to_array_coerce_to_slice,
         materialize_int,
         optional_wrap,
         sign_extend,
@@ -6058,7 +6058,12 @@ pub const Builder = struct {
                         },
                         .pointer => |source_pointer| if (source_pointer.type == destination_slice.child_type) {
                             unreachable;
-                        } else unreachable,
+                        } else switch (unit.types.get(source_pointer.type).*) {
+                            .array => |array| if (array.type == destination_slice.child_type) {
+                                return .pointer_to_array_coerce_to_slice;
+                            } else unreachable,
+                            else => |t| @panic(@tagName(t)),
+                        },
                         else => |t| @panic(@tagName(t)),
                     }
                 },
@@ -6584,10 +6589,6 @@ pub const Builder = struct {
                             }
                         },
                         .type_to_error_union => return try builder.resolveTypeToErrorUnion(unit, context, expected_type_index, v),
-                        .error_to_all_errors_error_union => unreachable,
-                        .error_union_to_all_error_union => unreachable,
-                        .error_union_same_error => unreachable,
-                        .error_to_all_errors => unreachable,
                         .slice_zero_to_no_termination => {
                             const cast = try unit.instructions.append(context.my_allocator, .{
                                 .cast = .{
@@ -6605,6 +6606,11 @@ pub const Builder = struct {
                                 .type = expected_type_index,
                             };
                         },
+                        .pointer_to_array_coerce_to_slice => unreachable,
+                        .error_to_all_errors_error_union => unreachable,
+                        .error_union_to_all_error_union => unreachable,
+                        .error_union_same_error => unreachable,
+                        .error_to_all_errors => unreachable,
                     }
                 },
                 .array => |expected_array_descriptor| {
@@ -9935,35 +9941,37 @@ pub const Builder = struct {
                         };
                     },
                     else => {
-                        const pointer_value = try builder.resolveRuntimeValue(unit, context, pointer_type_expect, node.left, .right);
+                        const pointer_like_value = try builder.resolveRuntimeValue(unit, context, pointer_type_expect, node.left, .right);
 
                         break :block switch (side) {
-                            .left => pointer_value,
-                            .right => right: {
-                                const load_type = switch (type_expect) {
-                                    .none => b: {
-                                        const pointer_type = unit.types.get(pointer_value.type);
-                                        const pointer_element_type = pointer_type.pointer.type;
-                                        break :b pointer_element_type;
-                                    },
-                                    .type => |type_index| type_index,
-                                    else => unreachable,
-                                };
+                            .left => pointer_like_value,
+                            .right => switch (unit.types.get(pointer_like_value.type).*) {
+                                .pointer => |pointer| right: {
+                                    const load_type = switch (type_expect) {
+                                        .none => b: {
+                                            const pointer_element_type = pointer.type;
+                                            break :b pointer_element_type;
+                                        },
+                                        .type => |type_index| type_index,
+                                        else => unreachable,
+                                    };
 
-                                const load = try unit.instructions.append(context.my_allocator, .{
-                                    .load = .{
-                                        .value = pointer_value,
-                                        .type = load_type,
-                                    },
+                                    const load = try unit.instructions.append(context.my_allocator, .{
+                                        .load = .{
+                                            .value = pointer_like_value,
+                                            .type = load_type,
+                                        },
                                     });
-                                try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, context, load);
 
-                                break :right .{
-                                    .value = .{
-                                        .runtime = load,
-                                    },
-                                    .type = load_type,
-                                };
+                                    break :right .{
+                                        .value = .{
+                                            .runtime = load,
+                                        },
+                                        .type = load_type,
+                                    };
+                                },
+                                else => |t| @panic(@tagName(t)),
                             },
                         };
                     },
@@ -10117,10 +10125,7 @@ pub const Builder = struct {
                     };
                 }
             },
-            .add, .wrapping_add, .saturated_add,
-            .sub, .wrapping_sub, .saturated_sub,
-            .mul, .wrapping_mul, .saturated_mul,
-            .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right, .bool_and, .bool_or => block: {
+            .add, .wrapping_add, .saturated_add, .sub, .wrapping_sub, .saturated_sub, .mul, .wrapping_mul, .saturated_mul, .div, .mod, .bit_and, .bit_or, .bit_xor, .shift_left, .shift_right, .bool_and, .bool_or => block: {
                 const left_node_index = node.left;
                 const right_node_index = node.right;
                 const binary_operation_id: ArithmeticLogicIntegerInstruction = switch (node.id) {
@@ -10719,167 +10724,159 @@ pub const Builder = struct {
                     }
                 };
 
-                const slice_value: V = switch (unit.types.get(expression_to_slice.type).*) {
-                    .slice => |slice| blk: {
-                        const extract_value = try unit.instructions.append(context.my_allocator, .{
-                            .extract_value = .{
-                                .expression = expression_to_slice,
-                                .index = 0,
-                            },
-                        });
-                        try builder.appendInstruction(unit, context, extract_value);
+                switch (len_expression.value) {
+                    .@"comptime" => {
+                        const pointer_value = switch (unit.types.get(expression_to_slice.type).*) {
+                            .pointer => |pointer| switch (pointer.many) {
+                                true => unreachable,
+                                false => switch (unit.types.get(pointer.type).*) {
+                                    .slice => |slice| slice: {
+                                        const load = try unit.instructions.append(context.my_allocator, .{
+                                            .load = .{
+                                                .value = expression_to_slice,
+                                                .type = slice.child_pointer_type,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, load);
 
-                        const pointer_type = slice.child_pointer_type;
-                        const pointer_gep = try unit.instructions.append(context.my_allocator, .{
-                            .get_element_pointer = .{
-                                .pointer = extract_value,
-                                .is_struct = false,
-                                .base_type = slice.child_type,
-                                .index = range_start,
-                                .name = try unit.processIdentifier(context, "slice_pointer_gep"),
-                            },
-                        });
-                        try builder.appendInstruction(unit, context, pointer_gep);
+                                        const gep = try unit.instructions.append(context.my_allocator, .{
+                                            .get_element_pointer = .{
+                                                .pointer = load,
+                                                .index = range_start,
+                                                .base_type = slice.child_type,
+                                                .name = try unit.processIdentifier(context, "slice_comptime_expression_slice"),
+                                                .is_struct = false,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, gep);
 
-                        const slice_builder = try unit.instructions.append(context.my_allocator, .{
-                            .insert_value = .{
-                                .expression = V{
-                                    .value = .{
-                                        .@"comptime" = .undefined,
+                                        break :slice V{
+                                            .value = .{
+                                                .runtime = gep,
+                                            },
+                                            .type = try unit.getPointerType(context, .{
+                                                .type = try unit.getArrayType(context, .{
+                                                    .type = slice.child_type,
+                                                    .count = len_expression.value.@"comptime".constant_int.value,
+                                                    .termination = slice.termination,
+                                                }),
+                                                .termination = .none,
+                                                .mutability = slice.mutability,
+                                                .many = true,
+                                                .nullable = false,
+                                            }),
+                                        };
                                     },
-                                    .type = expression_to_slice.type,
-                                },
-                                .index = 0,
-                                .new_value = .{
-                                    .value = .{
-                                        .runtime = pointer_gep,
+                                    .pointer => |child_pointer| switch (type_expect) {
+                                        .type => |destination_type_index| switch (unit.types.get(destination_type_index).*) {
+                                            .slice => |slice| if (slice.child_type == child_pointer.type) {
+                                                unreachable;
+                                            } else switch (unit.types.get(child_pointer.type).*) {
+                                                .array => |array| if (array.type == slice.child_type) pointer: {
+                                                    const load = try unit.instructions.append(context.my_allocator, .{
+                                                        .load = .{
+                                                            .value = expression_to_slice,
+                                                            .type = pointer.type,
+                                                        },
+                                                        });
+                                                    try builder.appendInstruction(unit, context, load);
+                                                    const gep = try unit.instructions.append(context.my_allocator, .{
+                                                        .get_element_pointer = .{
+                                                            .pointer = load,
+                                                            .index = range_start,
+                                                            .base_type = slice.child_type,
+                                                            .name = try unit.processIdentifier(context, "slice_comptime_expression_pointer"),
+                                                            .is_struct = false,
+                                                        },
+                                                    });
+                                                    try builder.appendInstruction(unit, context, gep);
+                                                    break :pointer V{
+                                                        .value = .{
+                                                            .runtime = gep,
+                                                        },
+                                                        .type = pointer.type,
+                                                    };
+                                                } else unreachable,
+                                                else => |t| @panic(@tagName(t)),
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        },
+                                        else => |t| @panic(@tagName(t)),
                                     },
-                                    .type = pointer_type,
+                                    else => |t| @panic(@tagName(t)),
                                 },
                             },
-                        });
-                        try builder.appendInstruction(unit, context, slice_builder);
-
-                        const final_slice = try unit.instructions.append(context.my_allocator, .{
-                            .insert_value = .{
-                                .expression = V{
-                                    .value = .{
-                                        .runtime = slice_builder,
-                                    },
-                                    .type = expression_to_slice.type,
-                                },
-                                .index = 1,
-                                .new_value = len_expression,
-                            },
-                        });
-
-                        try builder.appendInstruction(unit, context, final_slice);
-
-                        break :blk .{
-                            .value = .{
-                                .runtime = final_slice,
-                            },
-                            .type = expression_to_slice.type,
+                            else => |t| @panic(@tagName(t)),
                         };
+
+                        switch (type_expect) {
+                            .type => |destination_type_index| switch (try builder.typecheck(unit, context, destination_type_index, pointer_value.type)) {
+                                .pointer_to_array_coerce_to_slice => switch (pointer_value.value) {
+                                    .runtime => {
+                                        const insert_pointer = try unit.instructions.append(context.my_allocator, .{
+                                            .insert_value = .{
+                                                .expression = .{
+                                                    .value = .{
+                                                        .@"comptime" = .@"undefined",
+                                                    },
+                                                    .type = destination_type_index,
+                                                },
+                                                .index = 0,
+                                                .new_value = pointer_value,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, insert_pointer);
+
+                                        const insert_length = try unit.instructions.append(context.my_allocator, .{
+                                            .insert_value = .{
+                                                .expression = .{
+                                                    .value = .{
+                                                        .runtime = insert_pointer,
+                                                    },
+                                                    .type = destination_type_index,
+                                                },
+                                                .index = 1,
+                                                .new_value = len_expression,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, insert_length);
+
+                                        break :block V{
+                                            .value = .{
+                                                .runtime = insert_length,
+                                            },
+                                            .type = destination_type_index,
+                                        };
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
                     },
-                    .pointer => |pointer| switch (pointer.many) {
-                        true => blk: {
-                            const pointer_gep = try unit.instructions.append(context.my_allocator, .{
-                                .get_element_pointer = .{
-                                    .pointer = expression_to_slice.value.runtime,
-                                    .is_struct = false,
-                                    .base_type = pointer.type,
-                                    .index = range_start,
-                                    .name = try unit.processIdentifier(context, "pointer_many_slice"),
-                                },
-                            });
-                            try builder.appendInstruction(unit, context, pointer_gep);
-
-                            const pointer_type = try unit.getPointerType(context, .{
-                                .type = pointer.type,
-                                .termination = pointer.termination,
-                                .mutability = pointer.mutability,
-                                .many = true,
-                                .nullable = false,
-                            });
-
-                            const slice_type = try unit.getSliceType(context, .{
-                                .child_type = pointer.type,
-                                .child_pointer_type = pointer_type,
-                                .mutability = pointer.mutability,
-                                .termination = pointer.termination,
-                                .nullable = false,
-                            });
-
-                            const slice_builder = try unit.instructions.append(context.my_allocator, .{
-                                .insert_value = .{
-                                    .expression = V{
-                                        .value = .{
-                                            .@"comptime" = .undefined,
-                                        },
-                                        .type = slice_type,
+                    .runtime => {
+                        const slice_value: V = switch (unit.types.get(expression_to_slice.type).*) {
+                            .slice => |slice| blk: {
+                                const extract_value = try unit.instructions.append(context.my_allocator, .{
+                                    .extract_value = .{
+                                        .expression = expression_to_slice,
+                                        .index = 0,
                                     },
-                                    .index = 0,
-                                    .new_value = .{
-                                        .value = .{
-                                            .runtime = pointer_gep,
-                                        },
-                                        .type = pointer_type,
-                                    },
-                                },
-                            });
-                            try builder.appendInstruction(unit, context, slice_builder);
+                                });
+                                try builder.appendInstruction(unit, context, extract_value);
 
-                            const final_slice = try unit.instructions.append(context.my_allocator, .{
-                                .insert_value = .{
-                                    .expression = V{
-                                        .value = .{
-                                            .runtime = slice_builder,
-                                        },
-                                        .type = slice_type,
-                                    },
-                                    .index = 1,
-                                    .new_value = len_expression,
-                                },
-                            });
-                            try builder.appendInstruction(unit, context, final_slice);
-
-                            break :blk .{
-                                .value = .{
-                                    .runtime = final_slice,
-                                },
-                                .type = slice_type,
-                            };
-                        },
-                        false => switch (unit.types.get(pointer.type).*) {
-                            .array => |array| blk: {
-                                assert(!pointer.nullable);
+                                const pointer_type = slice.child_pointer_type;
                                 const pointer_gep = try unit.instructions.append(context.my_allocator, .{
                                     .get_element_pointer = .{
-                                        .pointer = expression_to_slice.value.runtime,
-                                        .base_type = array.type,
+                                        .pointer = extract_value,
                                         .is_struct = false,
+                                        .base_type = slice.child_type,
                                         .index = range_start,
-                                        .name = try unit.processIdentifier(context, "array_slice"),
+                                        .name = try unit.processIdentifier(context, "slice_pointer_gep"),
                                     },
                                 });
                                 try builder.appendInstruction(unit, context, pointer_gep);
-
-                                const pointer_type = try unit.getPointerType(context, .{
-                                    .type = array.type,
-                                    .termination = array.termination,
-                                    .mutability = pointer.mutability,
-                                    .many = true,
-                                    .nullable = false,
-                                });
-
-                                const slice_type = try unit.getSliceType(context, .{
-                                    .child_type = array.type,
-                                    .child_pointer_type = pointer_type,
-                                    .termination = array.termination,
-                                    .mutability = pointer.mutability,
-                                    .nullable = pointer.nullable,
-                                });
 
                                 const slice_builder = try unit.instructions.append(context.my_allocator, .{
                                     .insert_value = .{
@@ -10887,7 +10884,7 @@ pub const Builder = struct {
                                             .value = .{
                                                 .@"comptime" = .undefined,
                                             },
-                                            .type = slice_type,
+                                            .type = expression_to_slice.type,
                                         },
                                         .index = 0,
                                         .new_value = .{
@@ -10906,56 +10903,48 @@ pub const Builder = struct {
                                             .value = .{
                                                 .runtime = slice_builder,
                                             },
-                                            .type = slice_type,
+                                            .type = expression_to_slice.type,
                                         },
                                         .index = 1,
                                         .new_value = len_expression,
                                     },
                                 });
+
                                 try builder.appendInstruction(unit, context, final_slice);
 
                                 break :blk .{
                                     .value = .{
                                         .runtime = final_slice,
                                     },
-                                    .type = slice_type,
+                                    .type = expression_to_slice.type,
                                 };
                             },
-                            .pointer => |child_pointer| switch (child_pointer.many) {
+                            .pointer => |pointer| switch (pointer.many) {
                                 true => blk: {
-                                    assert(!child_pointer.nullable);
-                                    const load = try unit.instructions.append(context.my_allocator, .{
-                                        .load = .{
-                                            .value = expression_to_slice,
-                                            .type = pointer.type,
-                                        },
-                                    });
-                                    try builder.appendInstruction(unit, context, load);
-
                                     const pointer_gep = try unit.instructions.append(context.my_allocator, .{
                                         .get_element_pointer = .{
-                                            .pointer = load,
-                                            .base_type = child_pointer.type,
+                                            .pointer = expression_to_slice.value.runtime,
                                             .is_struct = false,
+                                            .base_type = pointer.type,
                                             .index = range_start,
-                                            .name = try unit.processIdentifier(context, "double_many_pointer_slice"),
+                                            .name = try unit.processIdentifier(context, "pointer_many_slice"),
                                         },
                                     });
                                     try builder.appendInstruction(unit, context, pointer_gep);
 
                                     const pointer_type = try unit.getPointerType(context, .{
-                                        .type = child_pointer.type,
-                                        .termination = child_pointer.termination,
-                                        .mutability = child_pointer.mutability,
+                                        .type = pointer.type,
+                                        .termination = pointer.termination,
+                                        .mutability = pointer.mutability,
                                         .many = true,
                                         .nullable = false,
                                     });
 
                                     const slice_type = try unit.getSliceType(context, .{
-                                        .child_type = child_pointer.type,
+                                        .child_type = pointer.type,
                                         .child_pointer_type = pointer_type,
-                                        .termination = child_pointer.termination,
-                                        .mutability = child_pointer.mutability,
+                                        .mutability = pointer.mutability,
+                                        .termination = pointer.termination,
                                         .nullable = false,
                                     });
 
@@ -10999,23 +10988,16 @@ pub const Builder = struct {
                                         .type = slice_type,
                                     };
                                 },
-                                false => switch (unit.types.get(child_pointer.type).*) {
+                                false => switch (unit.types.get(pointer.type).*) {
                                     .array => |array| blk: {
-                                        const load = try unit.instructions.append(context.my_allocator, .{
-                                            .load = .{
-                                                .value = expression_to_slice,
-                                                .type = pointer.type,
-                                            },
-                                        });
-                                        try builder.appendInstruction(unit, context, load);
-
+                                        assert(!pointer.nullable);
                                         const pointer_gep = try unit.instructions.append(context.my_allocator, .{
                                             .get_element_pointer = .{
-                                                .pointer = load,
+                                                .pointer = expression_to_slice.value.runtime,
                                                 .base_type = array.type,
                                                 .is_struct = false,
                                                 .index = range_start,
-                                                .name = try unit.processIdentifier(context, "double_array_slice"),
+                                                .name = try unit.processIdentifier(context, "array_slice"),
                                             },
                                         });
                                         try builder.appendInstruction(unit, context, pointer_gep);
@@ -11023,7 +11005,7 @@ pub const Builder = struct {
                                         const pointer_type = try unit.getPointerType(context, .{
                                             .type = array.type,
                                             .termination = array.termination,
-                                            .mutability = child_pointer.mutability,
+                                            .mutability = pointer.mutability,
                                             .many = true,
                                             .nullable = false,
                                         });
@@ -11032,8 +11014,8 @@ pub const Builder = struct {
                                             .child_type = array.type,
                                             .child_pointer_type = pointer_type,
                                             .termination = array.termination,
-                                            .mutability = child_pointer.mutability,
-                                            .nullable = false,
+                                            .mutability = pointer.mutability,
+                                            .nullable = pointer.nullable,
                                         });
 
                                         const slice_builder = try unit.instructions.append(context.my_allocator, .{
@@ -11076,133 +11058,291 @@ pub const Builder = struct {
                                             .type = slice_type,
                                         };
                                     },
+                                    .pointer => |child_pointer| switch (child_pointer.many) {
+                                        true => blk: {
+                                            assert(!child_pointer.nullable);
+                                            const load = try unit.instructions.append(context.my_allocator, .{
+                                                .load = .{
+                                                    .value = expression_to_slice,
+                                                    .type = pointer.type,
+                                                },
+                                            });
+                                            try builder.appendInstruction(unit, context, load);
+
+                                            const pointer_gep = try unit.instructions.append(context.my_allocator, .{
+                                                .get_element_pointer = .{
+                                                    .pointer = load,
+                                                    .base_type = child_pointer.type,
+                                                    .is_struct = false,
+                                                    .index = range_start,
+                                                    .name = try unit.processIdentifier(context, "double_many_pointer_slice"),
+                                                },
+                                            });
+                                            try builder.appendInstruction(unit, context, pointer_gep);
+
+                                            const pointer_type = try unit.getPointerType(context, .{
+                                                .type = child_pointer.type,
+                                                .termination = child_pointer.termination,
+                                                .mutability = child_pointer.mutability,
+                                                .many = true,
+                                                .nullable = false,
+                                            });
+
+                                            const slice_type = try unit.getSliceType(context, .{
+                                                .child_type = child_pointer.type,
+                                                .child_pointer_type = pointer_type,
+                                                .termination = child_pointer.termination,
+                                                .mutability = child_pointer.mutability,
+                                                .nullable = false,
+                                            });
+
+                                            const slice_builder = try unit.instructions.append(context.my_allocator, .{
+                                                .insert_value = .{
+                                                    .expression = V{
+                                                        .value = .{
+                                                            .@"comptime" = .undefined,
+                                                        },
+                                                        .type = slice_type,
+                                                    },
+                                                    .index = 0,
+                                                    .new_value = .{
+                                                        .value = .{
+                                                            .runtime = pointer_gep,
+                                                        },
+                                                        .type = pointer_type,
+                                                    },
+                                                },
+                                            });
+                                            try builder.appendInstruction(unit, context, slice_builder);
+
+                                            const final_slice = try unit.instructions.append(context.my_allocator, .{
+                                                .insert_value = .{
+                                                    .expression = V{
+                                                        .value = .{
+                                                            .runtime = slice_builder,
+                                                        },
+                                                        .type = slice_type,
+                                                    },
+                                                    .index = 1,
+                                                    .new_value = len_expression,
+                                                },
+                                            });
+                                            try builder.appendInstruction(unit, context, final_slice);
+
+                                            break :blk .{
+                                                .value = .{
+                                                    .runtime = final_slice,
+                                                },
+                                                .type = slice_type,
+                                            };
+                                        },
+                                        false => switch (unit.types.get(child_pointer.type).*) {
+                                            .array => |array| blk: {
+                                                const load = try unit.instructions.append(context.my_allocator, .{
+                                                    .load = .{
+                                                        .value = expression_to_slice,
+                                                        .type = pointer.type,
+                                                    },
+                                                });
+                                                try builder.appendInstruction(unit, context, load);
+
+                                                const pointer_gep = try unit.instructions.append(context.my_allocator, .{
+                                                    .get_element_pointer = .{
+                                                        .pointer = load,
+                                                        .base_type = array.type,
+                                                        .is_struct = false,
+                                                        .index = range_start,
+                                                        .name = try unit.processIdentifier(context, "double_array_slice"),
+                                                    },
+                                                });
+                                                try builder.appendInstruction(unit, context, pointer_gep);
+
+                                                const pointer_type = try unit.getPointerType(context, .{
+                                                    .type = array.type,
+                                                    .termination = array.termination,
+                                                    .mutability = child_pointer.mutability,
+                                                    .many = true,
+                                                    .nullable = false,
+                                                });
+
+                                                const slice_type = try unit.getSliceType(context, .{
+                                                    .child_type = array.type,
+                                                    .child_pointer_type = pointer_type,
+                                                    .termination = array.termination,
+                                                    .mutability = child_pointer.mutability,
+                                                    .nullable = false,
+                                                });
+
+                                                const slice_builder = try unit.instructions.append(context.my_allocator, .{
+                                                    .insert_value = .{
+                                                        .expression = V{
+                                                            .value = .{
+                                                                .@"comptime" = .undefined,
+                                                            },
+                                                            .type = slice_type,
+                                                        },
+                                                        .index = 0,
+                                                        .new_value = .{
+                                                            .value = .{
+                                                                .runtime = pointer_gep,
+                                                            },
+                                                            .type = pointer_type,
+                                                        },
+                                                    },
+                                                });
+                                                try builder.appendInstruction(unit, context, slice_builder);
+
+                                                const final_slice = try unit.instructions.append(context.my_allocator, .{
+                                                    .insert_value = .{
+                                                        .expression = V{
+                                                            .value = .{
+                                                                .runtime = slice_builder,
+                                                            },
+                                                            .type = slice_type,
+                                                        },
+                                                        .index = 1,
+                                                        .new_value = len_expression,
+                                                    },
+                                                });
+                                                try builder.appendInstruction(unit, context, final_slice);
+
+                                                break :blk .{
+                                                    .value = .{
+                                                        .runtime = final_slice,
+                                                    },
+                                                    .type = slice_type,
+                                                };
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        },
+                                    },
+                                    .slice => |slice| blk: {
+                                        const load = try unit.instructions.append(context.my_allocator, .{
+                                            .load = .{
+                                                .value = expression_to_slice,
+                                                .type = pointer.type,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, load);
+
+                                        const extract_pointer = try unit.instructions.append(context.my_allocator, .{
+                                            .extract_value = .{
+                                                .expression = .{
+                                                    .value = .{
+                                                        .runtime = load,
+                                                    },
+                                                    .type = pointer.type,
+                                                },
+                                                .index = 0,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, extract_pointer);
+
+                                        const pointer_gep = try unit.instructions.append(context.my_allocator, .{
+                                            .get_element_pointer = .{
+                                                .pointer = extract_pointer,
+                                                .base_type = slice.child_type,
+                                                .is_struct = false,
+                                                .index = range_start,
+                                                .name = try unit.processIdentifier(context, "slice_ptr_gep"),
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, pointer_gep);
+
+                                        const slice_type = pointer.type;
+
+                                        const slice_builder = try unit.instructions.append(context.my_allocator, .{
+                                            .insert_value = .{
+                                                .expression = V{
+                                                    .value = .{
+                                                        .@"comptime" = .undefined,
+                                                    },
+                                                    .type = slice_type,
+                                                },
+                                                .index = 0,
+                                                .new_value = .{
+                                                    .value = .{
+                                                        .runtime = pointer_gep,
+                                                    },
+                                                    .type = slice.child_pointer_type,
+                                                },
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, slice_builder);
+
+                                        const final_slice = try unit.instructions.append(context.my_allocator, .{
+                                            .insert_value = .{
+                                                .expression = V{
+                                                    .value = .{
+                                                        .runtime = slice_builder,
+                                                    },
+                                                    .type = slice_type,
+                                                },
+                                                .index = 1,
+                                                .new_value = len_expression,
+                                            },
+                                        });
+                                        try builder.appendInstruction(unit, context, final_slice);
+
+                                        break :blk .{
+                                            .value = .{
+                                                .runtime = final_slice,
+                                            },
+                                            .type = slice_type,
+                                        };
+                                    },
                                     else => |t| @panic(@tagName(t)),
                                 },
                             },
-                            .slice => |slice| blk: {
-                                const load = try unit.instructions.append(context.my_allocator, .{
-                                    .load = .{
-                                        .value = expression_to_slice,
-                                        .type = pointer.type,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, load);
+                            else => |t| @panic(@tagName(t)),
+                        };
 
-                                const extract_pointer = try unit.instructions.append(context.my_allocator, .{
-                                    .extract_value = .{
-                                        .expression = .{
-                                            .value = .{
-                                                .runtime = load,
-                                            },
-                                            .type = pointer.type,
+                        break :block switch (type_expect) {
+                            .none => slice_value,
+                            .type => |type_index| switch (try builder.typecheck(unit, context, type_index, slice_value.type)) {
+                                .success => slice_value,
+                                .type_to_error_union => try builder.resolveTypeToErrorUnion(unit, context, type_index, slice_value),
+                                .slice_to_nullable => b: {
+                                    const cast = try unit.instructions.append(context.my_allocator, .{
+                                        .cast = .{
+                                            .id = .slice_to_nullable,
+                                            .value = slice_value,
+                                            .type = type_index,
                                         },
-                                        .index = 0,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, extract_pointer);
+                                    });
 
-                                const pointer_gep = try unit.instructions.append(context.my_allocator, .{
-                                    .get_element_pointer = .{
-                                        .pointer = extract_pointer,
-                                        .base_type = slice.child_type,
-                                        .is_struct = false,
-                                        .index = range_start,
-                                        .name = try unit.processIdentifier(context, "slice_ptr_gep"),
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, pointer_gep);
-
-                                const slice_type = pointer.type;
-
-                                const slice_builder = try unit.instructions.append(context.my_allocator, .{
-                                    .insert_value = .{
-                                        .expression = V{
-                                            .value = .{
-                                                .@"comptime" = .undefined,
-                                            },
-                                            .type = slice_type,
+                                    try builder.appendInstruction(unit, context, cast);
+                                    break :b .{
+                                        .value = .{
+                                            .runtime = cast,
                                         },
-                                        .index = 0,
-                                        .new_value = .{
-                                            .value = .{
-                                                .runtime = pointer_gep,
-                                            },
-                                            .type = slice.child_pointer_type,
+                                        .type = type_index,
+                                    };
+                                },
+                                .slice_zero_to_no_termination => b: {
+                                    const cast = try unit.instructions.append(context.my_allocator, .{
+                                        .cast = .{
+                                            .id = .slice_zero_to_no_termination,
+                                            .value = slice_value,
+                                            .type = type_index,
                                         },
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, slice_builder);
+                                    });
 
-                                const final_slice = try unit.instructions.append(context.my_allocator, .{
-                                    .insert_value = .{
-                                        .expression = V{
-                                            .value = .{
-                                                .runtime = slice_builder,
-                                            },
-                                            .type = slice_type,
+                                    try builder.appendInstruction(unit, context, cast);
+                                    break :b V{
+                                        .value = .{
+                                            .runtime = cast,
                                         },
-                                        .index = 1,
-                                        .new_value = len_expression,
-                                    },
-                                });
-                                try builder.appendInstruction(unit, context, final_slice);
-
-                                break :blk .{
-                                    .value = .{
-                                        .runtime = final_slice,
-                                    },
-                                    .type = slice_type,
-                                };
+                                        .type = type_index,
+                                    };
+                                },
+                                else => |t| @panic(@tagName(t)),
                             },
                             else => |t| @panic(@tagName(t)),
-                        },
+                        };
                     },
-                    else => |t| @panic(@tagName(t)),
-                };
-
-                break :block switch (type_expect) {
-                    .none => slice_value,
-                    .type => |type_index| switch (try builder.typecheck(unit, context, type_index, slice_value.type)) {
-                        .success => slice_value,
-                        .type_to_error_union => try builder.resolveTypeToErrorUnion(unit, context, type_index, slice_value),
-                        .slice_to_nullable => {
-                            const cast = try unit.instructions.append(context.my_allocator, .{
-                                .cast = .{
-                                    .id = .slice_to_nullable,
-                                    .value = slice_value,
-                                    .type = type_index,
-                                },
-                            });
-
-                            try builder.appendInstruction(unit, context, cast);
-                            return .{
-                                .value = .{
-                                    .runtime = cast,
-                                },
-                                .type = type_index,
-                            };
-                        },
-                        .slice_zero_to_no_termination => {
-                            const cast = try unit.instructions.append(context.my_allocator, .{
-                                .cast = .{
-                                    .id = .slice_zero_to_no_termination,
-                                    .value = slice_value,
-                                    .type = type_index,
-                                },
-                            });
-
-                            try builder.appendInstruction(unit, context, cast);
-                            return .{
-                                .value = .{
-                                    .runtime = cast,
-                                },
-                                .type = type_index,
-                            };
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    },
-                    else => |t| @panic(@tagName(t)),
-                };
+                    else => unreachable,
+                }
             },
             .keyword_false, .keyword_true => .{
                 .value = .{
@@ -17331,11 +17471,13 @@ pub const Unit = struct {
     fn resolve_character_literal(unit: *Unit, node_index: Node.Index) !V.Comptime {
         const node = unit.getNode(node_index);
         const ch_literal = unit.getExpectedTokenBytes(node.token, .character_literal);
-        const character = switch (ch_literal.len) {
+        const character: u8 = switch (ch_literal.len) {
             3 => ch_literal[1],
             // This has a escape character
             4 => switch (ch_literal[2]) {
                 'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
                 else => unreachable,
             },
             else => unreachable,

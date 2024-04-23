@@ -6,14 +6,75 @@ const print = std.print;
 const print_usize = std.print_usize;
 const exit = std.os.exit;
 
-const lex = fn (arena: &Arena, bytes: []const u8) *!void {
+const Parser = struct{
+    text: [&]const u8,
+    index: u32 = 0,
+    length: u32,
+    current_line: u32 = 0,
+    current_line_offset: u32 = 0,
+
+    const skip_whitespace = fn (parser: &Parser) void {
+        const length = parser.length;
+
+        const pointer = parser.text;
+        while (parser.index < length) {
+            const ch = pointer[parser.index];
+            const new_line = ch == '\r';
+            const is_space = ch == ' ' or ch == '\t' or new_line or ch == '\r';
+            if (new_line) {
+                parser.current_line += 1;
+                parser.current_line_offset = parser.index + 1;
+            }
+            
+            if (!is_space) {
+                break;
+            }
+
+            parser.index += 1;
+        }
+    }
+};
+
+const parse = fn (arena: &Arena, bytes: []const u8) *!void {
     if (bytes.length >= 0xffffffff) {
         unreachable;
     }
 
     const length: u32 = #cast(bytes.length);
+    var parser = Parser{
+        .text = bytes.pointer,
+        .length = length,
+    };
 
-    const max_initial_keyword_len: u32 = 8;
+    //var index: u32 = 0;
+    //while (index < length) {
+    //    parser.skip_whitespace();
+
+    //    if (index == length) {
+    //        break;
+    //    }
+
+    //    const slice_8 = bytes[index..][0..8];
+    //    const slice_4 = bytes[index..][0..4];
+    //    const chunk_8: u64 = #cast(slice_8.@);
+    //    const chunk_4: u64 = #cast(slice_4.@);
+    //    const comptime_mask: u64 = #cast("comptime".@);
+    //    const test_mask: u32 = #cast("test").@;
+    //    const const_mask: u32 = #cast("const").@;
+    //    const var_mask: u32 = #cast("var ").@;
+    //    const is_comptime = chunk_8 == comptime_mask;
+    //    const is_test = chunk_4 == test_mask;
+    //    const is_const = chunk_4 == const_mask;
+    //    const is_var = (chunk_4 & 0xffffff) == (var_mask & 0xffffff);
+
+    //    const is_valid = is_comptime or is_test or is_const or is_var;
+
+    //    if (is_valid) {
+    //        exit(0);
+    //    } else {
+    //        exit(1);
+    //    }
+    //}
     
     //var index: u32 = 0;
     //while (index + 64 < length) {
@@ -36,13 +97,6 @@ const lex = fn (arena: &Arena, bytes: []const u8) *!void {
     //    const word_byte_count = #trailing_zeroes(space);
     //    const word = bytes[index..][0..word_byte_count];
 
-    //    if (byte_equal(word, #name(FileStartToken."comptime"))) {
-    //    } else if (byte_equal(word, #name(FileStartToken."test"))) {
-    //    } else if (byte_equal(word, #name(FileStartToken."const"))) {
-    //    } else if (byte_equal(word, #name(FileStartToken."var"))) {
-    //    } else {
-    //        print("Wrong file declaration start\n");
-    //    }
 
     //    break;
     //}
@@ -164,7 +218,7 @@ const command_exe = fn (arena: &Arena, command_arguments: []const [&:0]const u8)
     const file_buffer = try arena.new_array($u8, file_size);
     file_descriptor.read_all(file_buffer);
 
-    lex(arena, file_buffer);
+    parse(arena, file_buffer);
 }
 
 const main = fn() *!void {
