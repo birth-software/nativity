@@ -15,10 +15,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: master
       - name: Build and test
         run: sh ci/linux_gnu_runner.sh
   macos:
@@ -27,9 +23,5 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Zig
-        uses: davidgm94/setup-zig@foo
-        with:
-          version: master
       - name: Build and test
         run: sh ci/macos_runner.sh
