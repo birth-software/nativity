@@ -19,7 +19,7 @@ const Parser = struct{
         const pointer = parser.text;
         while (parser.index < length) {
             const ch = pointer[parser.index];
-            const new_line = ch == '\r';
+            const new_line = ch == '\n';
             const is_space = ch == ' ' or ch == '\t' or new_line or ch == '\r';
             if (new_line) {
                 parser.current_line += 1;
@@ -46,60 +46,67 @@ const parse = fn (arena: &Arena, bytes: []const u8) *!void {
         .length = length,
     };
 
-    //var index: u32 = 0;
-    //while (index < length) {
-    //    parser.skip_whitespace();
+    while (parser.index < length) {
+        parser.skip_whitespace();
 
-    //    if (index == length) {
-    //        break;
-    //    }
+        const current_index = parser.index;
+        if (current_index == length) {
+            break;
+        }
 
-    //    const slice_8 = bytes[index..][0..8];
-    //    const slice_4 = bytes[index..][0..4];
-    //    const chunk_8: u64 = #cast(slice_8.@);
-    //    const chunk_4: u64 = #cast(slice_4.@);
-    //    const comptime_mask: u64 = #cast("comptime".@);
-    //    const test_mask: u32 = #cast("test").@;
-    //    const const_mask: u32 = #cast("const").@;
-    //    const var_mask: u32 = #cast("var ").@;
-    //    const is_comptime = chunk_8 == comptime_mask;
-    //    const is_test = chunk_4 == test_mask;
-    //    const is_const = chunk_4 == const_mask;
-    //    const is_var = (chunk_4 & 0xffffff) == (var_mask & 0xffffff);
-
-    //    const is_valid = is_comptime or is_test or is_const or is_var;
-
-    //    if (is_valid) {
-    //        exit(0);
-    //    } else {
-    //        exit(1);
-    //    }
-    //}
-    
-    //var index: u32 = 0;
-    //while (index + 64 < length) {
-    //    var i = index;
-    //    const top = index + max_initial_keyword_len + 1;
-    //    var space: u32 = 0;
-
-    //    while (i < top) {
-    //        const is_space = bytes[i] == ' ';
-    //        const is_space_int: u32 = #cast(is_space);
-    //        const space_mask = 0 -% is_space_int;
-    //        space |= (1 << i) & space_mask;
-    //        i += 1;
-    //    }
-
-    //    if (space == 0) {
-    //        unreachable;
-    //    }
-
-    //    const word_byte_count = #trailing_zeroes(space);
-    //    const word = bytes[index..][0..word_byte_count];
-
-
-    //    break;
-    //}
+        const slice = bytes[current_index..];
+        const is_const = byte_equal(slice[0.."const".length], "const");
+        const is_var = byte_equal(slice[0.."var".length], "var");
+        const is_test = byte_equal(slice[0.."test".length], "test");
+        const is_comptime = byte_equal(slice[0.."comptime".length], "comptime");
+        if (is_const) {
+            const space_index: u32 = "const".length;
+            const ch = slice[space_index];
+            const next_ch = slice[space_index + 1];
+            const is_normal_space = (ch == ' ' or ch == '\n') or (ch == '\t' or ch == '\r');
+            const is_comment = ch == '/' and next_ch == '/';
+            const is_space = is_normal_space or is_comment;
+            if (!is_space) {
+                exit(1);
+            }
+            exit(0);
+        } else if (is_var) {
+            const space_index: u32 = "var".length;
+            const ch = slice[space_index];
+            const next_ch = slice[space_index + 1];
+            const is_normal_space = (ch == ' ' or ch == '\n') or (ch == '\t' or ch == '\r');
+            const is_comment = ch == '/' and next_ch == '/';
+            const is_space = is_normal_space or is_comment;
+            if (!is_space) {
+                exit(1);
+            }
+            exit(0);
+        } else if (is_test) {
+            const space_index: u32 = "test".length;
+            const ch = slice[space_index];
+            const next_ch = slice[space_index + 1];
+            const is_normal_space = (ch == ' ' or ch == '\n') or (ch == '\t' or ch == '\r');
+            const is_comment = ch == '/' and next_ch == '/';
+            const is_space = is_normal_space or is_comment;
+            if (!is_space) {
+                exit(1);
+            }
+            exit(0);
+        } else if (is_comptime) {
+            const space_index: u32 = "comptime".length;
+            const ch = slice[space_index];
+            const next_ch = slice[space_index + 1];
+            const is_normal_space = (ch == ' ' or ch == '\n') or (ch == '\t' or ch == '\r');
+            const is_comment = ch == '/' and next_ch == '/';
+            const is_space = is_normal_space or is_comment;
+            if (!is_space) {
+                exit(1);
+            }
+            exit(0);
+        } else {
+            exit(1);
+        }
+    }
 }
 
 const FileStartToken = enum{

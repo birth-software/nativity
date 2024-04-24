@@ -1597,7 +1597,7 @@ pub const LLVM = struct {
                     },
                     .bool => b: {
                         const flags = LLVM.DebugInfo.Node.Flags{
-                            .visibility = .none,
+                            .visibility = .private,
                             .forward_declaration = false,
                             .apple_block = false,
                             .block_by_ref_struct = false,
@@ -1616,7 +1616,7 @@ pub const LLVM = struct {
                             .introduced_virtual = false,
                             .bit_field = false,
                             .no_return = false,
-                            .type_pass_by_value = false,
+                            .type_pass_by_value = true,
                             .type_pass_by_reference = false,
                             .enum_class = false,
                             .thunk = false,
@@ -1625,7 +1625,7 @@ pub const LLVM = struct {
                             .little_endian = false,
                             .all_calls_described = false,
                         };
-                        const boolean_type = llvm.debug_info_builder.createBasicType("bool", "bool".len, 1, .boolean, flags) orelse unreachable;
+                        const boolean_type = llvm.debug_info_builder.createBasicType("bool", "bool".len, 8, .boolean, flags) orelse unreachable;
                         break :b boolean_type;
                     },
                     .@"enum" => |*enum_type| b: {
