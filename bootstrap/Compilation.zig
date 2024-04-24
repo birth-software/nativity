@@ -12585,6 +12585,15 @@ pub const Builder = struct {
                     },
                 };
             },
+            .break_expression => b: {
+                try builder.jump(unit, context, builder.loop_exit_block);
+                break :b V{
+                    .type = .noreturn,
+                    .value = .{
+                        .@"comptime" = .noreturn,
+                    },
+                };
+            },
             else => |t| @panic(@tagName(t)),
         };
 
@@ -16224,6 +16233,23 @@ pub const Builder = struct {
                     },
                     .error_to_all_errors_error_union => return try builder.resolveErrorToAllErrorUnion(unit, context, ti, result),
                     .type_to_error_union => return try builder.resolveTypeToErrorUnion(unit, context, ti, result),
+                    .zero_extend => {
+                        const zero_extend = try unit.instructions.append(context.my_allocator, .{
+                            .cast = .{
+                                .id = .zero_extend,
+                                .value = result,
+                                .type = ti,
+                            },
+                            });
+                        try builder.appendInstruction(unit, context, zero_extend);
+
+                        return .{
+                            .value = .{
+                                .runtime = zero_extend,
+                            },
+                            .type = ti,
+                        };
+                    },
                     else => |t| @panic(@tagName(t)),
                 }
             },

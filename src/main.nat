@@ -13,6 +13,20 @@ const Parser = struct{
     current_line: u32 = 0,
     current_line_offset: u32 = 0,
 
+    const expect_byte = fn(parser: &Parser, byte: u8) void {
+        const current_ch = parser.text[parser.index];
+        if (current_ch != byte) {
+            print("Expected '");
+            var a = [1]u8{byte};
+            print(a.&);
+            print("', got '");
+            a[0] = current_ch;
+            print(a.&);
+            print("'\n");
+            exit(1);
+        }
+    }
+
     const skip_whitespace = fn (parser: &Parser) void {
         const length = parser.length;
 
@@ -32,6 +46,32 @@ const Parser = struct{
 
             parser.index += 1;
         }
+    }
+
+    const raw_string = fn (parser: &Parser) u32 {
+        const start_index = parser.index;
+        const text = parser.text;
+        var index: u32 = parser.index;
+        while (index < parser.length) {
+            const ch = text[index];
+            switch (ch) {
+                'a'...'z', 'A'...'Z', '_' => index += 1,
+                else => break,
+            }
+        }
+
+        parser.index = index;
+
+        return start_index;
+    }
+
+    const identifier = fn (parser: &Parser) []const u8 {
+        const start_index = parser.raw_string();
+        const slice = parser.text[start_index.. parser.index];
+        
+        // TODO: check if the identifier matches keywords
+
+        return slice;
     }
 };
 
@@ -59,6 +99,7 @@ const parse = fn (arena: &Arena, bytes: []const u8) *!void {
         const is_var = byte_equal(slice[0.."var".length], "var");
         const is_test = byte_equal(slice[0.."test".length], "test");
         const is_comptime = byte_equal(slice[0.."comptime".length], "comptime");
+
         if (is_const) {
             const space_index: u32 = "const".length;
             const ch = slice[space_index];
@@ -69,6 +110,12 @@ const parse = fn (arena: &Arena, bytes: []const u8) *!void {
             if (!is_space) {
                 exit(1);
             }
+            parser.index += space_index;
+            parser.skip_whitespace();
+            const identifier = parser.identifier();
+            parser.skip_whitespace();
+            parser.expect_byte('=');
+            parser.skip_whitespace();
             exit(0);
         } else if (is_var) {
             const space_index: u32 = "var".length;
@@ -80,6 +127,8 @@ const parse = fn (arena: &Arena, bytes: []const u8) *!void {
             if (!is_space) {
                 exit(1);
             }
+            parser.index += space_index;
+            parser.skip_whitespace();
             exit(0);
         } else if (is_test) {
             const space_index: u32 = "test".length;
@@ -91,6 +140,8 @@ const parse = fn (arena: &Arena, bytes: []const u8) *!void {
             if (!is_space) {
                 exit(1);
             }
+            parser.index += space_index;
+            parser.skip_whitespace();
             exit(0);
         } else if (is_comptime) {
             const space_index: u32 = "comptime".length;
@@ -102,6 +153,8 @@ const parse = fn (arena: &Arena, bytes: []const u8) *!void {
             if (!is_space) {
                 exit(1);
             }
+            parser.index += space_index;
+            parser.skip_whitespace();
             exit(0);
         } else {
             exit(1);
