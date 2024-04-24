@@ -3431,6 +3431,7 @@ pub const Type = union(enum) {
             type: Type.Index,
             termination: Termination,
         },
+        cast: Type.Index,
     };
 
     const Error = struct {
@@ -4605,7 +4606,7 @@ pub const Builder = struct {
         }
     }
 
-    fn resolveIntrinsic(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index) anyerror!V {
+    fn resolveIntrinsic(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) anyerror!V {
         const node = unit.getNode(node_index);
         const intrinsic_id: IntrinsicId = @enumFromInt(Node.unwrap(node.right));
         const argument_node_list = unit.getNodeList(node.left);
@@ -4702,12 +4703,18 @@ pub const Builder = struct {
             .cast => {
                 assert(argument_node_list.len == 1);
                 const argument_node_index = argument_node_list[0];
+                const cast_type_expect = Type.Expect{
+                    .cast = switch (type_expect) {
+                        .type => |type_index| type_index,
+                        else => |t| @panic(@tagName(t)),
+                    },
+                };
                 // TODO: depends? .right is not always the right choice
-                const v = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, argument_node_index, .right);
+                const v = try builder.resolveRuntimeValue(unit, context, cast_type_expect, argument_node_index, side);
 
                 switch (type_expect) {
                     .type => |type_index| {
-                        const cast_id = try builder.resolveCast(unit, context, type_index, v);
+                        const cast_id = try builder.resolveCast(unit, context, type_index, v, side);
                         switch (cast_id) {
                             .array_bitcast_to_integer => switch (v.value) {
                                 .@"comptime" => |ct| switch (ct) {
@@ -4734,7 +4741,60 @@ pub const Builder = struct {
                                             else => unreachable,
                                         }
                                     },
+                                    .string_literal => |hash| {
+                                        const string_literal = unit.getIdentifier(hash);
+                                        var value: u64 = 0;
+                                        for (string_literal, 0..) |byte, i| {
+                                            value |= @as(u64, byte) << @as(u6, @intCast(i * 8));
+                                        }
+                                        return V{
+                                            .value = .{
+                                                .@"comptime" = .{
+                                                    .constant_int = .{
+                                                        .value = value,
+                                                    },
+                                                },
+                                            },
+                                            .type = switch (unit.types.get(type_index).*) {
+                                                .pointer => |pointer| pointer.type,
+                                                else => |t| @panic(@tagName(t)),
+                                            },
+                                        };
+                                    },
                                     else => |t| @panic(@tagName(t)),
+                                },
+                                .runtime => {
+                                    const stack = try builder.createStackVariable(unit, context, type_index, null);
+                                    const destination = V{
+                                        .value = .{ .runtime = stack },
+                                        .type = try unit.getPointerType(context, .{
+                                            .type = type_index,
+                                            .many = false,
+                                            .termination = .none,
+                                            .mutability = .@"var",
+                                            .nullable = false,
+                                        }),
+                                    };
+                                    const store = try unit.instructions.append(context.my_allocator, .{
+                                        .store = .{
+                                            .destination = destination,
+                                            .source = v,
+                                        },
+                                        });
+                                    try builder.appendInstruction(unit, context, store);
+
+                                    const load = try unit.instructions.append(context.my_allocator, .{
+                                        .load = .{
+                                            .value = destination,
+                                            .type = type_index,
+                                        },
+                                        });
+                                    try builder.appendInstruction(unit, context, load);
+
+                                    return V{
+                                        .value = .{ .runtime = load },
+                                        .type = type_index,
+                                    };
                                 },
                                 else => |t| @panic(@tagName(t)),
                             },
@@ -5287,7 +5347,7 @@ pub const Builder = struct {
         }
     }
 
-    fn resolveCast(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index, value: V) !Instruction.Cast.Id {
+    fn resolveCast(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index, value: V, side: Side) !Instruction.Cast.Id {
         _ = builder; // autofix
         _ = context; // autofix
         assert(type_index != value.type);
@@ -5327,6 +5387,20 @@ pub const Builder = struct {
                             }
                         } else {
                             return .pointer_source_type_to_destination_type;
+                        }
+                    },
+                    .array => |array| {
+                        const array_size = array.count * unit.types.get(array.type).getAbiSize(unit);
+                        switch (side) {
+                            .right => {
+                                const destination_type_size = unit.types.get(destination_pointer.type).getAbiSize(unit);
+                                if (array_size == destination_type_size) {
+                                    return .array_bitcast_to_integer;
+                                } else {
+                                    unreachable;
+                                }
+                            },
+                            .left => unreachable,
                         }
                     },
                     else => |t| @panic(@tagName(t)),
@@ -6630,6 +6704,7 @@ pub const Builder = struct {
                         else => |t| @panic(@tagName(t)),
                     }
                 },
+                .cast => return v,
                 else => |t| @panic(@tagName(t)),
             }
         } else {
@@ -9887,7 +9962,7 @@ pub const Builder = struct {
                 const result = try builder.resolveIdentifier(unit, context, type_expect, identifier, .{}, side, &.{});
                 break :block result;
             },
-            .intrinsic => try builder.resolveIntrinsic(unit, context, type_expect, node_index),
+            .intrinsic => try builder.resolveIntrinsic(unit, context, type_expect, node_index, side),
             .pointer_dereference => block: {
                 // TODO:
                 const pointer_type_expect = switch (type_expect) {
@@ -9905,6 +9980,7 @@ pub const Builder = struct {
                         };
                         break :b result;
                     },
+                    .cast => Type.Expect.none,
                     else => unreachable,
                 };
 
@@ -9948,7 +10024,7 @@ pub const Builder = struct {
                             .right => switch (unit.types.get(pointer_like_value.type).*) {
                                 .pointer => |pointer| right: {
                                     const load_type = switch (type_expect) {
-                                        .none => b: {
+                                        .none, .cast => b: {
                                             const pointer_element_type = pointer.type;
                                             break :b pointer_element_type;
                                         },
@@ -9970,6 +10046,10 @@ pub const Builder = struct {
                                         },
                                         .type = load_type,
                                     };
+                                },
+                                .integer => switch (type_expect) {
+                                    .type => |type_index| if (type_index == pointer_like_value.type) pointer_like_value else unreachable,
+                                    else => |t| @panic(@tagName(t)),
                                 },
                                 else => |t| @panic(@tagName(t)),
                             },
@@ -10157,7 +10237,7 @@ pub const Builder = struct {
                     .integer => |int| switch (int.kind) {
                         .materialized_int, .comptime_int, .bool => {
                             const right_expect_type: Type.Expect = switch (type_expect) {
-                                .none => switch (left_value.type) {
+                                .none, .cast => switch (left_value.type) {
                                     .comptime_int => type_expect,
                                     else => Type.Expect{
                                         .type = left_value.type,
@@ -10281,7 +10361,7 @@ pub const Builder = struct {
                                         assert(left_value.type == right_value.type);
 
                                         const type_index = switch (type_expect) {
-                                            .none => switch (binary_operation_id) {
+                                            .none, .cast => switch (binary_operation_id) {
                                                 .bit_and,
                                                 .bit_or,
                                                 .bit_xor,
@@ -10727,6 +10807,43 @@ pub const Builder = struct {
                 switch (len_expression.value) {
                     .@"comptime" => {
                         const pointer_value = switch (unit.types.get(expression_to_slice.type).*) {
+                            .slice => |slice| slice: {
+                                const extract_pointer = try unit.instructions.append(context.my_allocator, .{
+                                    .extract_value = .{
+                                        .expression = expression_to_slice,
+                                        .index = 0,
+                                    },
+                                    });
+                                try builder.appendInstruction(unit, context, extract_pointer);
+
+                                const gep = try unit.instructions.append(context.my_allocator, .{
+                                    .get_element_pointer = .{
+                                        .pointer = extract_pointer,
+                                        .index = range_start,
+                                        .base_type = slice.child_type,
+                                        .name = try unit.processIdentifier(context, "slice_comptime_expression_slice"),
+                                        .is_struct = false,
+                                    },
+                                    });
+                                try builder.appendInstruction(unit, context, gep);
+
+                                break :slice V{
+                                    .value = .{
+                                        .runtime = gep,
+                                    },
+                                    .type = try unit.getPointerType(context, .{
+                                        .type = try unit.getArrayType(context, .{
+                                            .type = slice.child_type,
+                                            .count = len_expression.value.@"comptime".constant_int.value,
+                                            .termination = slice.termination,
+                                        }),
+                                        .termination = .none,
+                                        .mutability = slice.mutability,
+                                        .many = true,
+                                        .nullable = false,
+                                    }),
+                                };
+                            },
                             .pointer => |pointer| switch (pointer.many) {
                                 true => unreachable,
                                 false => switch (unit.types.get(pointer.type).*) {
@@ -10852,6 +10969,7 @@ pub const Builder = struct {
                                 },
                                 else => |t| @panic(@tagName(t)),
                             },
+                            .none => break :block pointer_value,
                             else => |t| @panic(@tagName(t)),
                         }
                     },
@@ -11457,6 +11575,46 @@ pub const Builder = struct {
                         }
                     },
                     else => |t| @panic(@tagName(t)),
+                },
+                .cast => |type_index| switch (unit.types.get(type_index).*) {
+                    .pointer => switch (side) {
+                        .left => unreachable,
+                        .right => blk: {
+                            const string_literal = try unit.fixupStringLiteral(context, node.token);
+                            const hash = try unit.processIdentifier(context, string_literal);
+                            const ty = try unit.getArrayType(context, .{
+                                .type = .u8,
+                                .count = string_literal.len,
+                                .termination = .none,
+                            });
+                            break :blk V{
+                                .value = .{
+                                    .@"comptime" = .{
+                                        .string_literal = hash,
+                                    },
+                                },
+                                .type = ty,
+                            };
+                        },
+                    },
+                    else => |t| @panic(@tagName(t)),
+                },
+                .none => none: {
+                    const string_literal = try unit.fixupStringLiteral(context, node.token);
+                    const hash = try unit.processIdentifier(context, string_literal);
+                    const ty = try unit.getArrayType(context, .{
+                        .type = .u8,
+                        .count = string_literal.len,
+                        .termination = .none,
+                    });
+                    break :none V{
+                        .value = .{
+                            .@"comptime" = .{
+                                .string_literal = hash,
+                            },
+                            },
+                        .type = ty,
+                    };
                 },
                 else => |t| @panic(@tagName(t)),
             },
@@ -12450,7 +12608,7 @@ pub const Builder = struct {
             .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
                 .error_union => |error_union| {
                     switch (type_expect) {
-                        .none => {},
+                        .none, .cast => {},
                         .type => |type_index| {
                             switch (try builder.typecheck(unit, context, type_index, error_union.type)) {
                                 .success => {},
@@ -14081,7 +14239,7 @@ pub const Builder = struct {
                 .intrinsic => {
                     _ = try builder.resolveIntrinsic(unit, context, Type.Expect{
                         .type = .void,
-                    }, statement_node_index);
+                    }, statement_node_index, .right);
                 },
                 .constant_symbol_declaration,
                 .variable_symbol_declaration,
@@ -15448,6 +15606,25 @@ pub const Builder = struct {
                     } else unreachable,
                     else => |t| @panic(@tagName(t)),
                 },
+                .string_literal => |hash| if (byte_equal(identifier, length_field_name)) switch (type_expect) {
+                    .type => |type_index| switch (unit.types.get(type_index).*) {
+                        .integer => |*integer| switch (integer.kind) {
+                            .materialized_int => V{
+                                .value = .{
+                                    .@"comptime" = .{
+                                        .constant_int = .{
+                                            .value = unit.getIdentifier(hash).len,
+                                        },
+                                    },
+                                },
+                                .type = type_index,
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                } else unreachable,
                 else => |t| @panic(@tagName(t)),
             },
             .runtime => |_| b: {
@@ -15817,6 +15994,7 @@ pub const Builder = struct {
 
         switch (type_expect) {
             .none => return result,
+            .cast => return result,
             .type => |ti| {
                 const typecheck_result = try builder.typecheck(unit, context, ti, result.type);
                 switch (typecheck_result) {
