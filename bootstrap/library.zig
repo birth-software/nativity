@@ -11,6 +11,95 @@ pub fn assert(ok: bool) void {
 pub const Allocator = std.mem.Allocator;
 pub const BoundedArray = std.BoundedArray;
 
+pub const Arena = struct{
+    position: u64,
+    commit_position: u64,
+    alignment: u64,
+    size: u64,
+
+    pub const Temporary = struct{
+        arena: *Arena,
+        position: u64,
+    };
+
+    pub const commit_granularity = 2 * 1024 * 1024;
+
+    pub fn init(requested_size: u64) !*Arena {
+        var size = requested_size;
+        const size_roundup_granularity = 64 * 1024 * 1024;
+        size += size_roundup_granularity - 1;
+        size -= size % size_roundup_granularity;
+        const initial_commit_size = commit_granularity;
+        assert(initial_commit_size >= @sizeOf(Arena));
+
+        const reserved_memory = try reserve(size);
+        try commit(reserved_memory, initial_commit_size);
+
+        const arena: *Arena = @ptrCast(reserved_memory);
+        arena.* = .{
+            .position = @sizeOf(Arena),
+            .commit_position = initial_commit_size,
+            .alignment = 8,
+            .size = size,
+        };
+
+        return arena;
+    }
+
+    pub fn allocate(arena: *Arena, size: u64) ![*]u8 {
+        if (arena.position + size <= arena.size) {
+            const base: [*]u8 = @ptrCast(arena);
+            var post_alignment_position = arena.position + arena.alignment - 1;
+            post_alignment_position -= post_alignment_position % arena.alignment;
+            const alignment = post_alignment_position - arena.position;
+            const result = base + arena.position + alignment;
+            arena.position += size + alignment;
+
+            if (arena.commit_position < arena.position - arena.commit_position) {
+                var size_to_commit = arena.position - arena.commit_position;
+                size_to_commit += commit_granularity - 1;
+                size_to_commit -= size_to_commit % commit_granularity;
+
+                try commit(base + arena.commit_position, size_to_commit);
+
+                arena.commit_position += size_to_commit;
+            }
+
+            return result;
+        } else {
+            unreachable;
+        }
+    }
+
+    pub inline fn new(arena: *Arena, comptime T: type) !*T{
+        const result: *T = @ptrCast(try arena.allocate(@sizeOf(T)));
+        return result;
+    }
+
+    pub inline fn new_array(arena: *Arena, comptime T: type, count: usize) ![]T {
+        const result: [*]T = @ptrCast(try arena.allocate(@sizeOf(T) * count));
+        return result;
+    }
+};
+
+pub fn reserve(size: u64) ![*]u8{
+    return switch (os) {
+        .linux, .macos => try std.posix.mmap(null, size, std.posix.PROT.NONE, .{
+            .ANONYMOUS = true,
+            .TYPE = .PRIVATE,
+        }, -1, 0),
+        else => @compileError("OS not supported"),
+    };
+}
+
+pub fn commit(bytes: [*]u8, size: u64) !void{
+    const slice = bytes[0..size];
+    return switch (os) {
+        .linux, .macos => try std.posix.mprotect(@alignCast(slice), std.posix.PROT.WRITE | std.posix.PROT.READ),
+        else => @compileError("OS not supported"),
+    };
+}
+
 pub fn BlockList(comptime T: type, comptime E: type) type {
     const item_count = 64;
 
