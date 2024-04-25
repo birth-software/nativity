@@ -1296,7 +1296,7 @@ pub const LLVM = struct {
                         break :blk struct_type.toType();
                     },
                     .@"struct" => |*sema_struct_type| blk: {
-                        for (sema_struct_type.fields.slice()) |sema_field_index| {
+                        for (sema_struct_type.fields) |sema_field_index| {
                             const sema_field = unit.struct_fields.get(sema_field_index);
                             const llvm_type = try llvm.getType(unit, context, sema_field.type);
                             type_buffer.appendAssumeCapacity(llvm_type);
@@ -1561,7 +1561,7 @@ pub const LLVM = struct {
             const sema_type = unit.types.get(sema_type_index);
             const result = switch (sema_type.*) {
                 .integer => |*integer| switch (integer.kind) {
-                    .bitfield => |*bitfield| try llvm.getDebugStructType(unit, context, sema_type_index, &bitfield.scope.scope, bitfield.fields.slice(), name),
+                    .bitfield => |*bitfield| try llvm.getDebugStructType(unit, context, sema_type_index, &bitfield.scope.scope, bitfield.fields, name),
                     .materialized_int => b: {
                         const dwarf_encoding: LLVM.DebugInfo.AttributeType = switch (integer.signedness) {
                             .unsigned => .unsigned,
@@ -1633,9 +1633,9 @@ pub const LLVM = struct {
                         break :b boolean_type;
                     },
                     .@"enum" => |*enum_type| b: {
-                        var enumerators = try context.arena.new_array(*LLVM.DebugInfo.Type.Enumerator, enum_type.fields.length);
+                        var enumerators = try context.arena.new_array(*LLVM.DebugInfo.Type.Enumerator, enum_type.fields.len);
                         enumerators.len = 0;
-                        for (enum_type.fields.slice()) |enum_field_index| {
+                        for (enum_type.fields) |enum_field_index| {
                             const enum_field = unit.enum_fields.get(enum_field_index);
                             const enum_field_name = unit.getIdentifier(enum_field.name);
 
@@ -1693,7 +1693,7 @@ pub const LLVM = struct {
                     else => |t| @panic(@tagName(t)),
                 },
                 .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
-                    .@"struct" => |*sema_struct_type| try llvm.getDebugStructType(unit, context, sema_type_index, &sema_struct_type.scope.scope, sema_struct_type.fields.slice(), name),
+                    .@"struct" => |*sema_struct_type| try llvm.getDebugStructType(unit, context, sema_type_index, &sema_struct_type.scope.scope, sema_struct_type.fields, name),
                     else => |t| @panic(@tagName(t)),
                 },
                 .pointer => |pointer| b: {
@@ -2131,7 +2131,7 @@ pub const LLVM = struct {
 
         switch (sema_struct.kind) {
             .@"struct" => |*sema_struct_type| {
-                for (constant_struct.fields, sema_struct_type.fields.slice()) |field_value, field_index| {
+                for (constant_struct.fields, sema_struct_type.fields) |field_value, field_index| {
                     const field = unit.struct_fields.get(field_index);
                     const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field.type);
                     field_values.appendAssumeCapacity(constant);
@@ -3091,7 +3091,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     },
                     .phi => |phi| {
                         const phi_type = try llvm.getType(unit, context, phi.type);
-                        const reserved_value_count: c_uint = @intCast(phi.values.length);
+                        const reserved_value_count: c_uint = @intCast(phi.values.len);
                         const phi_name = "phi";
                         const phi_node = llvm.builder.createPhi(phi_type, reserved_value_count, phi_name, phi_name.len) orelse unreachable;
 
@@ -3148,7 +3148,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         var basic_block_array = BoundedArray(*LLVM.Value.BasicBlock, 4096){};
                         var condition_array = BoundedArray(*LLVM.Value.Constant.Int, 4096){};
 
-                        for (switch_expression.cases.pointer[0..switch_expression.cases.length]) |case| {
+                        for (switch_expression.cases) |case| {
                             const constant_value = try llvm.emitComptimeRightValue(unit, context, case.condition, switch_expression.condition.type);
                             const constant_int = constant_value.toInt() orelse unreachable;
                             const block = if (llvm.llvm_block_map.get(case.basic_block)) |bb| bb else b: {
@@ -3192,7 +3192,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         for (phis.keys(), phis.values()) |instruction_index, phi| {
             const instruction = unit.instructions.get(instruction_index);
             const sema_phi = &instruction.phi;
-            for (sema_phi.values.slice(), sema_phi.basic_blocks.slice()) |sema_value, sema_block| {
+            for (sema_phi.values.slice()) |v| {
+                const sema_value = v.value;
+                const sema_block = v.basic_block;
                 assert(sema_value.type == sema_phi.type);
                 const value_basic_block = llvm.llvm_block_map.get(sema_block).?;
                 const value = llvm.llvm_value_map.get(sema_value) orelse try llvm.emitRightValue(unit, context, sema_value);

@@ -82,6 +82,44 @@ pub const Arena = struct{
     }
 };
 
+pub fn DynamicBoundedArray(comptime T: type) type {
+    return struct{
+        pointer: [*]T = @constCast((&[_]T{}).ptr),
+        length: u32 = 0,
+        capacity: u32 = 0,
+
+        const Array = @This();
+
+        pub fn init(arena: *Arena, count: u32) !Array {
+            const array = try arena.new_array(T, count);
+            return Array{
+                .pointer = array.ptr,
+                .length = 0,
+                .capacity = count,
+            };
+        }
+
+        pub fn append(array: *Array, item: T) void {
+            const index = array.length;
+            assert(index < array.capacity);
+            array.pointer[index] = item;
+            array.length += 1;
+        }
+
+        pub fn append_slice(array: *Array, items: []const T) void {
+            const count: u32 = @intCast(items.len);
+            const index = array.length;
+            assert(index + count <= array.capacity);
+            @memcpy(array.pointer[index..][0..count], items);
+            array.length += count;
+        }
+
+        pub fn slice(array: *Array) []T{
+            return array.pointer[0..array.length];
+        }
+    };
+}
+
 const pinned_array_page_size = 2 * 1024 * 1024;
 const pinned_array_max_size = std.math.maxInt(u32) - pinned_array_page_size;
 const pinned_array_default_granularity = pinned_array_page_size;
@@ -181,20 +219,21 @@ pub fn PinnedArray(comptime T: type) type {
 }
 
 pub fn reserve(size: u64) ![*]u8{
-    const slice = switch (os) {
-        .linux, .macos => try std.posix.mmap(null, size, std.posix.PROT.NONE, .{
+    return switch (os) {
+        .linux, .macos => (try std.posix.mmap(null, size, std.posix.PROT.NONE, .{
             .ANONYMOUS = true,
             .TYPE = .PRIVATE,
-        }, -1, 0),
+        }, -1, 0)).ptr,
+        .windows => @ptrCast(try std.os.windows.VirtualAlloc(null, size, std.os.windows.MEM_RESERVE, std.os.windows.PAGE_READWRITE)),
         else => @compileError("OS not supported"),
     };
-    return slice.ptr;
 }
 
 pub fn commit(bytes: [*]u8, size: u64) !void{
     const slice = bytes[0..size];
     return switch (os) {
         .linux, .macos => try std.posix.mprotect(@alignCast(slice), std.posix.PROT.WRITE | std.posix.PROT.READ),
+        .windows => _ = try std.os.windows.VirtualAlloc(bytes, size, std.os.windows.MEM_COMMIT, std.os.windows.PAGE_READWRITE),
         else => @compileError("OS not supported"),
     };
 }
