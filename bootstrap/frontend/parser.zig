@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const library = @import("../library.zig");
+const Arena = library.Arena;
 const byte_equal = library.byte_equal;
 const BlockList = library.BlockList;
 const enumFromString = library.enumFromString;
@@ -229,10 +230,11 @@ const Analyzer = struct {
     token_i: Token.Index,
     token_buffer: *Token.Buffer,
     nodes: *PinnedArray(Node),
-    node_lists: *UnpinnedArray(UnpinnedArray(Node.Index)),
+    node_lists: *PinnedArray([]const Node.Index),
     source_file: []const u8,
     allocator: Allocator,
     my_allocator: *MyAllocator,
+    arena: *Arena,
     suffix_depth: usize = 0,
 
     fn expectToken(analyzer: *Analyzer, expected_token_id: Token.Id) !Token.Index {
@@ -356,6 +358,7 @@ const Analyzer = struct {
                                 break attribute_node;
                             }
                         } else @panic(identifier_name);
+
                         try list.append(analyzer.my_allocator, attribute_node);
 
                         switch (analyzer.peekToken()) {
@@ -365,7 +368,7 @@ const Analyzer = struct {
                         }
                     }
 
-                    break :b try analyzer.nodeList(list);
+                    break :b try analyzer.nodeList(list.slice());
                 } else .null;
 
                 break :blk try analyzer.addNode(.{
@@ -470,7 +473,7 @@ const Analyzer = struct {
             .id = .function_prototype,
             .token = token,
             .left = arguments,
-            .right = try analyzer.nodeList(attribute_and_return_type_node_list),
+            .right = try analyzer.nodeList(attribute_and_return_type_node_list.slice()),
         });
 
         return function_prototype;
@@ -514,7 +517,7 @@ const Analyzer = struct {
         _ = try analyzer.expectToken(end_token);
 
         if (list.length != 0) {
-            return try analyzer.nodeList(list);
+            return try analyzer.nodeList(list.slice());
         } else {
             return Node.Index.null;
         }
@@ -553,7 +556,7 @@ const Analyzer = struct {
         return try analyzer.addNode(.{
             .id = .block,
             .token = left_brace,
-            .left = try analyzer.nodeList(list),
+            .left = try analyzer.nodeList(list.slice()),
             .right = Node.Index.null,
         });
     }
@@ -632,7 +635,7 @@ const Analyzer = struct {
                     break :blk switch (array_list.length) {
                         0 => unreachable,
                         1 => array_list.pointer[0],
-                        else => try analyzer.nodeList(array_list),
+                        else => try analyzer.nodeList(array_list.slice()),
                     };
                 },
             };
@@ -662,7 +665,7 @@ const Analyzer = struct {
             .id = .@"switch",
             .token = switch_token,
             .left = switch_expression,
-            .right = try analyzer.nodeList(list),
+            .right = try analyzer.nodeList(list.slice()),
         });
     }
 
@@ -811,8 +814,8 @@ const Analyzer = struct {
         const for_condition_node = try analyzer.addNode(.{
             .id = .for_condition,
             .token = token,
-            .left = try analyzer.nodeList(for_expression_list),
-            .right = try analyzer.nodeList(payload_nodes),
+            .left = try analyzer.nodeList(for_expression_list.slice()),
+            .right = try analyzer.nodeList(payload_nodes.slice()),
         });
 
         const true_expression = switch (analyzer.peekToken()) {
@@ -994,7 +997,7 @@ const Analyzer = struct {
                     .id = .assembly_instruction,
                     .token = instruction_token,
                     .left = instruction_name,
-                    .right = try analyzer.nodeList(operand_list),
+                    .right = try analyzer.nodeList(operand_list.slice()),
                 });
 
                 try instruction_list.append(analyzer.my_allocator, instruction);
@@ -1006,7 +1009,7 @@ const Analyzer = struct {
             const assembly_block = try analyzer.addNode(.{
                 .id = .assembly_code_block,
                 .token = backtick,
-                .left = try analyzer.nodeList(instruction_list),
+                .left = try analyzer.nodeList(instruction_list.slice()),
                 .right = .null,
             });
             try list.append(analyzer.my_allocator, assembly_block);
@@ -1014,7 +1017,7 @@ const Analyzer = struct {
             const intrinsic = try analyzer.addNode(.{
                 .id = .intrinsic,
                 .token = intrinsic_token,
-                .left = try analyzer.nodeList(list),
+                .left = try analyzer.nodeList(list.slice()),
                 .right = @enumFromInt(@intFromEnum(intrinsic_id)),
             });
 
@@ -1038,7 +1041,7 @@ const Analyzer = struct {
         return try analyzer.addNode(.{
             .id = .intrinsic,
             .token = intrinsic_token,
-            .left = try analyzer.nodeList(list),
+            .left = try analyzer.nodeList(list.slice()),
             .right = @enumFromInt(@intFromEnum(intrinsic_id)),
         });
     }
@@ -1528,7 +1531,7 @@ const Analyzer = struct {
         assert(type_expression != .null);
         try list.append(analyzer.my_allocator, type_expression);
 
-        const node_list = try analyzer.nodeList(list);
+        const node_list = try analyzer.nodeList(list.slice());
 
         const node = Node{
             .id = expression_type,
@@ -1676,7 +1679,7 @@ const Analyzer = struct {
                         .id = .call,
                         .token = left_parenthesis,
                         .left = result,
-                        .right = try analyzer.nodeList(expression_list),
+                        .right = try analyzer.nodeList(expression_list.slice()),
                     });
                 } else {
                     return result;
@@ -1791,7 +1794,7 @@ const Analyzer = struct {
             },
             .token = token,
             .left = type_node,
-            .right = try analyzer.nodeList(list),
+            .right = try analyzer.nodeList(list.slice()),
         });
     }
 
@@ -1839,7 +1842,7 @@ const Analyzer = struct {
 
             analyzer.consumeToken();
 
-            break :b try analyzer.nodeList(list);
+            break :b try analyzer.nodeList(list.slice());
         } else Node.Index.null;
 
         if (maybe_token_id) |_| _ = try analyzer.expectToken(.operator_left_brace);
@@ -1948,7 +1951,7 @@ const Analyzer = struct {
         return try analyzer.addNode(.{
             .id = node_id,
             .token = token_i,
-            .left = try analyzer.nodeList(node_list),
+            .left = try analyzer.nodeList(node_list.slice()),
             .right = parameters_node,
         });
     }
@@ -2170,7 +2173,7 @@ const Analyzer = struct {
                 break :blk try analyzer.addNode(.{
                     .id = .error_type,
                     .token = token_i,
-                    .left = try analyzer.nodeList(list),
+                    .left = try analyzer.nodeList(list.slice()),
                     .right = backing_type,
                 });
             },
@@ -2354,9 +2357,9 @@ const Analyzer = struct {
         return node_index;
     }
 
-    fn nodeList(analyzer: *Analyzer, node_list: UnpinnedArray(Node.Index)) !Node.Index {
+    fn nodeList(analyzer: *Analyzer, node_list: []const Node.Index) !Node.Index {
         const index = analyzer.node_lists.length;
-        try analyzer.node_lists.append(analyzer.my_allocator, node_list);
+        _ = analyzer.node_lists.append(node_list);
         return try analyzer.addNode(.{
             .id = .node_list,
             .token = @enumFromInt(0),
@@ -2380,7 +2383,7 @@ const Analyzer = struct {
 };
 
 // Here it is assumed that left brace is consumed
-pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *PinnedArray(Node), node_lists: *UnpinnedArray(UnpinnedArray(Node.Index))) !Result {
+pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, arena: *Arena, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *PinnedArray(Node), node_lists: *PinnedArray([]const Node.Index)) !Result {
     const start = std.time.Instant.now() catch unreachable;
     var analyzer = Analyzer{
         .lexer = lexer_result,
@@ -2392,6 +2395,7 @@ pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, lexer_result: l
         .my_allocator = my_allocator,
         .nodes = node_list,
         .node_lists = node_lists,
+        .arena = arena,
     };
     const main_node_index = try analyzer.processContainerType(null);
 

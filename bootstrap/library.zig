@@ -35,7 +35,7 @@ pub const Arena = struct{
         const reserved_memory = try reserve(size);
         try commit(reserved_memory, initial_commit_size);
 
-        const arena: *Arena = @ptrCast(reserved_memory);
+        const arena: *Arena = @alignCast(@ptrCast(reserved_memory));
         arena.* = .{
             .position = @sizeOf(Arena),
             .commit_position = initial_commit_size,
@@ -55,7 +55,7 @@ pub const Arena = struct{
             const result = base + arena.position + alignment;
             arena.position += size + alignment;
 
-            if (arena.commit_position < arena.position - arena.commit_position) {
+            if (arena.commit_position < arena.position) {
                 var size_to_commit = arena.position - arena.commit_position;
                 size_to_commit += commit_granularity - 1;
                 size_to_commit -= size_to_commit % commit_granularity;
@@ -72,7 +72,7 @@ pub const Arena = struct{
     }
 
     pub inline fn new(arena: *Arena, comptime T: type) !*T{
-        const result: *T = @ptrCast(try arena.allocate(@sizeOf(T)));
+        const result: *T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T))));
         return result;
     }
 

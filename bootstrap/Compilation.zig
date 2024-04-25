@@ -2,19 +2,25 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
-const data_structures = @import("library.zig");
-const assert = data_structures.assert;
-const byte_equal = data_structures.byte_equal;
-const byte_equal_terminated = data_structures.byte_equal_terminated;
-const first_slice = data_structures.first_slice;
-const starts_with_slice = data_structures.starts_with_slice;
-const PinnedArray = data_structures.PinnedArray;
-const UnpinnedArray = data_structures.UnpinnedArray;
-const BlockList = data_structures.BlockList;
-const MyAllocator = data_structures.MyAllocator;
-const MyHashMap = data_structures.MyHashMap;
-const span = data_structures.span;
-const format_int = data_structures.format_int;
+const library = @import("library.zig");
+const assert = library.assert;
+const align_forward = library.align_forward;
+const Arena = library.Arena;
+const byte_equal = library.byte_equal;
+const enumFromString = library.enumFromString;
+const byte_equal_terminated = library.byte_equal_terminated;
+const last_byte = library.last_byte;
+const first_byte = library.first_byte;
+const first_slice = library.first_slice;
+const starts_with_slice = library.starts_with_slice;
+const PinnedArray = library.PinnedArray;
+const UnpinnedArray = library.UnpinnedArray;
+const BlockList = library.BlockList;
+const MyAllocator = library.MyAllocator;
+const MyHashMap = library.MyHashMap;
+const span = library.span;
+const format_int = library.format_int;
+const my_hash = library.my_hash;
 
 const lexer = @import("frontend/lexer.zig");
 const parser = @import("frontend/parser.zig");
@@ -73,6 +79,7 @@ pub fn createContext(allocator: Allocator, my_allocator: *MyAllocator) !*const C
         .executable_absolute_path = self_exe_path,
         .directory_absolute_path = self_exe_dir_path,
         .build_directory = try std.fs.cwd().makeOpenPath("nat", .{}),
+        .arena = try Arena.init(4 * 1024 * 1024),
     };
 
     try context.build_directory.makePath(cache_dir_name);
@@ -119,6 +126,7 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
             .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
         },
         .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
+        .node_lists = try PinnedArray([]const Node.Index).init_with_default_granularity(),
     };
 
     try unit.compile(context);
@@ -226,7 +234,7 @@ fn compileMusl(context: *const Context) MuslContext {
             const basename = std.fs.path.basename(src_file_relative_path);
             const target = try context.allocator.dupe(u8, basename);
             target[target.len - 1] = 'o';
-            const hash = data_structures.my_hash(src_file_relative_path);
+            const hash = my_hash(src_file_relative_path);
             const hash_string = format_int(&buffer, hash, 16, false);
             const target_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, hash_string, target });
             try musl.compileFileWithClang(context, src_file_relative_path, target_path);
@@ -238,7 +246,7 @@ fn compileMusl(context: *const Context) MuslContext {
             const basename = std.fs.path.basename(src_file_relative_path);
             const target = try context.allocator.dupe(u8, basename);
             target[target.len - 1] = 'o';
-            const hash = data_structures.my_hash(src_file_relative_path);
+            const hash = my_hash(src_file_relative_path);
             const hash_string = format_int(&buffer, hash, 16, false);
             const target_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, hash_string, target });
 
@@ -336,7 +344,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
         const argument = arguments[argument_index];
 
         if (argument[0] != '-') {
-            if (data_structures.last_byte(argument, '.')) |dot_index| {
+            if (last_byte(argument, '.')) |dot_index| {
                 const extension_string = argument[dot_index..];
                 const extension: Extension =
                     if (byte_equal(extension_string, ".c")) .c else if (byte_equal(extension_string, ".cpp") or byte_equal(extension_string, ".cxx") or byte_equal(extension_string, ".cc")) .cpp else if (byte_equal(extension_string, ".S")) .assembly else if (byte_equal(extension_string, ".o")) .object else if (byte_equal(extension_string, ".a")) .static_library else if (byte_equal(extension_string, ".so") or
@@ -480,7 +488,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
             try ld_argv.append(context.my_allocator, "-dylib");
         } else if (starts_with_slice(argument, "-Wl,")) {
             const wl_arg = argument["-Wl,".len..];
-            if (data_structures.first_byte(wl_arg, ',')) |comma_index| {
+            if (first_byte(wl_arg, ',')) |comma_index| {
                 const key = wl_arg[0..comma_index];
                 const value = wl_arg[comma_index + 1 ..];
                 try ld_argv.append(context.my_allocator, key);
@@ -2943,7 +2951,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
                 i += 1;
 
                 const optimize_string = arguments[i];
-                optimization = data_structures.enumFromString(Optimization, optimize_string) orelse unreachable;
+                optimization = enumFromString(Optimization, optimize_string) orelse unreachable;
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
@@ -3016,6 +3024,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
         },
         .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
+        .node_lists = try PinnedArray([]const Node.Index).init_with_default_granularity(),
     };
 
     try unit.compile(context);
@@ -3154,11 +3163,11 @@ fn getTypeAbiSize(ty: *Type, unit: *Unit) u32 {
                     const field_type = unit.types.get(field.type);
                     const field_size = getTypeAbiSize(field_type, unit);
                     const field_alignment = getTypeAbiAlignment(field_type, unit);
-                    total_byte_size = @intCast(data_structures.align_forward(total_byte_size, field_alignment));
+                    total_byte_size = @intCast(align_forward(total_byte_size, field_alignment));
                     total_byte_size += field_size;
                 }
 
-                total_byte_size = @intCast(data_structures.align_forward(total_byte_size, struct_alignment));
+                total_byte_size = @intCast(align_forward(total_byte_size, struct_alignment));
 
                 break :b total_byte_size;
             },
@@ -3169,11 +3178,11 @@ fn getTypeAbiSize(ty: *Type, unit: *Unit) u32 {
                     const field_type = unit.types.get(type_index);
                     const field_size = getTypeAbiSize(field_type, unit);
                     const field_alignment = getTypeAbiAlignment(field_type, unit);
-                    total_byte_size = @intCast(data_structures.align_forward(total_byte_size, field_alignment));
+                    total_byte_size = @intCast(align_forward(total_byte_size, field_alignment));
                     total_byte_size += field_size;
                 }
 
-                total_byte_size = @intCast(data_structures.align_forward(total_byte_size, struct_alignment));
+                total_byte_size = @intCast(align_forward(total_byte_size, struct_alignment));
 
                 break :b total_byte_size;
             },
@@ -3384,7 +3393,7 @@ pub const Type = union(enum) {
         }
 
         fn hash(types: []const V.Comptime) u32 {
-            const result = data_structures.my_hash(std.mem.sliceAsBytes(types));
+            const result = my_hash(std.mem.sliceAsBytes(types));
             return result;
         }
     };
@@ -4063,6 +4072,7 @@ pub const Struct = struct {
 pub const Context = struct {
     allocator: Allocator,
     my_allocator: *MyAllocator,
+    arena: *Arena,
     cwd_absolute_path: []const u8,
     directory_absolute_path: []const u8,
     executable_absolute_path: []const u8,
@@ -4128,7 +4138,7 @@ pub const PolymorphicFunction = struct {
     }
 
     fn hash(parameters: []const V.Comptime) u32 {
-        const result = data_structures.my_hash(std.mem.sliceAsBytes(parameters));
+        const result = my_hash(std.mem.sliceAsBytes(parameters));
         return result;
     }
 };
@@ -7353,7 +7363,7 @@ pub const Builder = struct {
                             const enum_field = unit.enum_fields.get(enum_field_index);
                             const enum_name = unit.getIdentifier(enum_field.name);
 
-                            function_prototype.calling_convention = data_structures.enumFromString(Function.CallingConvention, enum_name) orelse unreachable;
+                            function_prototype.calling_convention = enumFromString(Function.CallingConvention, enum_name) orelse unreachable;
                         },
                         else => |t| @panic(@tagName(t)),
                     }
@@ -7580,7 +7590,7 @@ pub const Builder = struct {
                 };
                 assert(alignment == 8 or alignment == 16);
 
-                const aligned_size = data_structures.align_forward(size, alignment);
+                const aligned_size = align_forward(size, alignment);
                 if (alignment == 16) {
                     unreachable;
                 } else {
@@ -7687,7 +7697,7 @@ pub const Builder = struct {
                     };
                 } else {
                     const alignment = ty.getAbiAlignment(unit);
-                    const aligned_size: u16 = @intCast(data_structures.align_forward(size, 8));
+                    const aligned_size: u16 = @intCast(align_forward(size, 8));
                     if (alignment < 16 and aligned_size == 16) {
                         const array_type = unit.getArrayType(context, .{
                             .count = 2,
@@ -7928,7 +7938,7 @@ pub const Builder = struct {
                                 const offset = base_offset + member_offset;
                                 const member_size = field_type.getAbiSize(unit);
                                 const member_alignment = field_type.getAbiAlignment(unit);
-                                member_offset = @intCast(data_structures.align_forward(member_offset + member_size, alignment));
+                                member_offset = @intCast(align_forward(member_offset + member_size, alignment));
                                 // TODO:
                                 const native_vector_size = 16;
                                 if (size > 16 and ((!is_union and size != member_size) or size > native_vector_size)) {
@@ -8033,7 +8043,7 @@ pub const Builder = struct {
                 .type = field.type,
                 .offset = offset_it,
             };
-            offset_it = @intCast(data_structures.align_forward(offset_it + unit.types.get(field.type).getAbiSize(unit), struct_alignment));
+            offset_it = @intCast(align_forward(offset_it + unit.types.get(field.type).getAbiSize(unit), struct_alignment));
         }
 
         assert(last_match != null);
@@ -8270,7 +8280,7 @@ pub const Builder = struct {
     fn get_argument_pair(unit: *Unit, types: [2]Type.Index) Function.AbiInfo {
         const low_size = unit.types.get(types[0]).getAbiSize(unit);
         const high_alignment = unit.types.get(types[1]).getAbiAlignment(unit);
-        const high_start = data_structures.align_forward(low_size, high_alignment);
+        const high_start = align_forward(low_size, high_alignment);
         assert(high_start == 8);
         return .{
             .kind = .{
@@ -8436,7 +8446,7 @@ pub const Builder = struct {
                                 for (struct_options_struct.kind.@"struct".fields.slice(), constant_struct.fields) |field_index, field_value| {
                                     const field = unit.struct_fields.get(field_index);
                                     const name = unit.getIdentifier(field.name);
-                                    const option_id = data_structures.enumFromString(Struct.Options.Id, name) orelse unreachable;
+                                    const option_id = enumFromString(Struct.Options.Id, name) orelse unreachable;
                                     switch (option_id) {
                                         .sliceable => switch (field_value.bool) {
                                             true => struct_options.sliceable = .{
@@ -9225,9 +9235,9 @@ pub const Builder = struct {
                                 const sizes = [2]u32{ types[0].getAbiSize(unit), types[1].getAbiSize(unit) };
                                 const alignment = @max(alignments[0], alignments[1]);
                                 _ = alignment; // autofix
-                                const high_aligned_size: u32 = @intCast(data_structures.align_forward(sizes[1], alignments[1]));
+                                const high_aligned_size: u32 = @intCast(align_forward(sizes[1], alignments[1]));
                                 _ = high_aligned_size; // autofix
-                                const high_offset: u32 = @intCast(data_structures.align_forward(sizes[0], alignments[1]));
+                                const high_offset: u32 = @intCast(align_forward(sizes[0], alignments[1]));
                                 assert(high_offset + sizes[1] <= argument_type.getAbiSize(unit));
                                 const stack = try builder.createStackVariable(unit, context, argument_type_index, null);
 
@@ -16806,6 +16816,7 @@ pub const Enum = struct {
 pub const Unit = struct {
     node_buffer: PinnedArray(Node),
     token_buffer: Token.Buffer,
+    node_lists: PinnedArray([]const Node.Index),
     files: Debug.File.List = .{},
     types: Type.List = .{},
     structs: Struct.List = .{},
@@ -16827,7 +16838,6 @@ pub const Unit = struct {
     constant_arrays: V.Comptime.ConstantArray.List = .{},
     constant_slices: V.Comptime.ConstantSlice.List = .{},
     error_fields: Type.Error.Field.List = .{},
-    node_lists: UnpinnedArray(UnpinnedArray(Node.Index)) = .{},
     file_token_offsets: MyHashMap(Token.Range, Debug.File.Index) = .{},
     file_map: MyHashMap([]const u8, Debug.File.Index) = .{},
     identifiers: MyHashMap(u32, []const u8) = .{},
@@ -17155,8 +17165,8 @@ pub const Unit = struct {
     fn getNodeListFromNode(unit: *Unit, node: *const Node) []const Node.Index {
         assert(node.id == .node_list);
         const list_index = node.left;
-        const node_list = unit.node_lists.slice()[@intFromEnum(list_index)];
-        return node_list.pointer[0..node_list.length];
+        const node_list = unit.node_lists.get_unchecked(@intFromEnum(list_index)).*;
+        return node_list;
     }
 
     // TODO: make this fast
@@ -17277,7 +17287,7 @@ pub const Unit = struct {
     }
 
     fn processIdentifier(unit: *Unit, context: *const Context, string: []const u8) !u32 {
-        const hash = data_structures.my_hash(string);
+        const hash = my_hash(string);
         if (unit.identifiers.get_pointer(hash) == null) {
             try unit.identifiers.put_no_clobber(context.my_allocator, hash, string);
         }
@@ -17388,7 +17398,7 @@ pub const Unit = struct {
         }, file_index);
 
         // logln(.parser, .file, "[START PARSING FILE #{} {s}]", .{ file_index, file.package.source_path });
-        file.parser = try parser.analyze(context.allocator, context.my_allocator, file.lexer, file.source_code, &unit.token_buffer, &unit.node_buffer, &unit.node_lists);
+        file.parser = try parser.analyze(context.allocator, context.my_allocator, context.arena, file.lexer, file.source_code, &unit.token_buffer, &unit.node_buffer, &unit.node_lists);
         // logln(.parser, .file, "[END PARSING FILE #{} {s}]", .{ file_index, file.package.source_path });
         assert(file.status == .lexed);
         file.status = .parsed;
@@ -17592,7 +17602,7 @@ pub const Unit = struct {
             });
 
             for (unit.descriptor.c_source_files) |c_source_file| {
-                const dot_index = data_structures.last_byte(c_source_file, '.') orelse unreachable;
+                const dot_index = last_byte(c_source_file, '.') orelse unreachable;
                 const path_without_extension = c_source_file[0..dot_index];
                 const basename = std.fs.path.basename(path_without_extension);
                 const o_file = try std.mem.concat(context.allocator, u8, &.{ basename, ".o" });

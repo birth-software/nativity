@@ -141,7 +141,7 @@ const Arena = struct{
             const result = base + arena.position + alignment;
             arena.position += size + alignment;
 
-            if (arena.commit_position < arena.position - arena.commit_position) {
+            if (arena.commit_position < arena.position) {
                 var size_to_commit = arena.position - arena.commit_position;
                 size_to_commit += commit_granularity - 1;
                 size_to_commit -= size_to_commit % commit_granularity;
