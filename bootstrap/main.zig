@@ -9,6 +9,7 @@ const library = @import("library.zig");
 const byte_equal = library.byte_equal;
 const MyAllocator = library.MyAllocator;
 const PageAllocator = library.PageAllocator;
+const UnpinnedArray = library.UnpinnedArray;
 
 const env_detecting_libc_paths = "NATIVITY_IS_DETECTING_LIBC_PATHS";
 
@@ -38,13 +39,13 @@ pub fn main() !void {
         assert(arguments.len > 0);
         const home_dir = std.posix.getenv("HOME") orelse unreachable;
         const timestamp = std.time.milliTimestamp();
-        var argument_list = std.ArrayList(u8).init(std.heap.page_allocator);
+        var argument_list = UnpinnedArray(u8){};
         for (arguments) |arg| {
-            argument_list.appendSlice(arg) catch {};
-            argument_list.append(' ') catch {};
+            argument_list.append_slice(context.my_allocator, arg) catch {};
+            argument_list.append(context.my_allocator, ' ') catch {};
         }
-        argument_list.append('\n') catch {};
-        std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{ home_dir, timestamp }) catch unreachable, argument_list.items) catch {};
+        argument_list.append(context.my_allocator, '\n') catch {};
+        std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{ home_dir, timestamp }) catch unreachable, argument_list.slice()) catch {};
     }
 
     if (arguments.len <= 1) {
