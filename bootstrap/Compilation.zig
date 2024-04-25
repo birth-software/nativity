@@ -8,6 +8,7 @@ const byte_equal = data_structures.byte_equal;
 const byte_equal_terminated = data_structures.byte_equal_terminated;
 const first_slice = data_structures.first_slice;
 const starts_with_slice = data_structures.starts_with_slice;
+const PinnedArray = data_structures.PinnedArray;
 const UnpinnedArray = data_structures.UnpinnedArray;
 const BlockList = data_structures.BlockList;
 const MyAllocator = data_structures.MyAllocator;
@@ -112,6 +113,10 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
             .name = "build",
             .is_test = false,
             .c_source_files = &.{},
+        },
+        .token_buffer = Token.Buffer{
+            .tokens = try PinnedArray(Token).init_with_default_granularity(),
+            .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
         },
     };
 
@@ -3005,6 +3010,10 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             .is_test = options.is_test,
             .c_source_files = c_source_files.slice(),
         },
+        .token_buffer = Token.Buffer{
+            .tokens = try PinnedArray(Token).init_with_default_granularity(),
+            .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
+        },
     };
 
     try unit.compile(context);
@@ -5617,16 +5626,12 @@ pub const Builder = struct {
         column: u32,
     };
 
-    fn getTokenDebugInfo(builder: *Builder, unit: *Unit, token: Token.Index) TokenDebugInfo {
+    fn getTokenDebugInfo(builder: *Builder, unit: *Unit, token_index: Token.Index) TokenDebugInfo {
         const file = unit.files.get(builder.current_file);
-        const index = Token.unwrap(token);
-        assert(index < unit.token_buffer.length);
-        const line_offset_index = unit.token_buffer.lines[index];
-        const line = line_offset_index - file.lexer.line_offset;
-        const offset = unit.token_buffer.offsets[index];
-        assert(line_offset_index < unit.token_buffer.line_offsets.length);
-        const line_offset = unit.token_buffer.line_offsets.pointer[line_offset_index];
-        const column = offset - line_offset;
+        const token = unit.token_buffer.tokens.get(token_index);
+        const line = token.line - file.lexer.line_offset;
+        const line_offset = unit.token_buffer.line_offsets.get_unchecked(token.line).*;
+        const column = token.offset - line_offset;
 
         return .{
             .line = line,
@@ -6708,33 +6713,6 @@ pub const Builder = struct {
                 else => |t| @panic(@tagName(t)),
             }
         } else {
-            // var scope_it: ?*Debug.Scope = builder.current_scope;
-            // const indentation_size = 4;
-            // var indentation: u32 = 0;
-            //
-            // var file_path: []const u8 = "";
-            // while (scope_it) |scope| : (scope_it = scope.parent) {
-            //     for (0..indentation * indentation_size) |_| {
-            //         std.debug.print(" ", .{});
-            //     }
-            //     std.debug.print("> Scope {s} ", .{@tagName(scope.kind)});
-            //     switch (scope.kind) {
-            //         .compilation_unit => {},
-            //         .file_container, .container => {},
-            //         .function => {},
-            //         .file => {
-            //             const global_scope = @fieldParentPtr(Debug.Scope.Global, "scope", scope);
-            //             const file = @fieldParentPtr(Debug.File, "scope", global_scope);
-            //             std.debug.print("{s}", .{file.relative_path});
-            //             file_path = file.relative_path;
-            //         },
-            //         .block => {},
-            //     }
-            //
-            //     std.debug.print("\n", .{});
-            //     indentation += 1;
-            // }
-
             try write(.panic, "identifier '");
             try write(.panic, identifier);
             try write(.panic, "' not found\n");
@@ -7425,7 +7403,7 @@ pub const Builder = struct {
                         .comptime_argument_declaration => switch (polymorphic_call_argument_node.id) {
                             .comptime_expression => {
                                 const comptime_argument = try builder.resolveComptimeValue(unit, context, Type.Expect{ .type = argument_type }, .{}, polymorphic_call_argument_node.left, null, .right, &.{}, null, &.{});
-                                const name = unit.getExpectedTokenBytes(Token.addInt(argument_declaration_node.token, 1), .identifier);
+                                const name = unit.getExpectedTokenBytes(@enumFromInt(@intFromEnum(argument_declaration_node.token) + 1), .identifier);
                                 const name_hash = try unit.processIdentifier(context, name);
                                 const debug_info = builder.getTokenDebugInfo(unit, argument_declaration_node.token);
                                 try comptime_parameter_declarations.append(context.my_allocator, .{
@@ -7505,7 +7483,7 @@ pub const Builder = struct {
     }
 
     fn put_argument_in_scope(builder: *Builder, unit: *Unit, context: *const Context, argument_node: *const Node, argument_index: usize, argument_type_index: Type.Index) !void {
-        const argument_name = switch (unit.getTokenId(argument_node.token)) {
+        const argument_name = switch (unit.token_buffer.tokens.get(argument_node.token).id) {
             .identifier => b: {
                 const argument_name = unit.getExpectedTokenBytes(argument_node.token, .identifier);
 
@@ -8707,7 +8685,7 @@ pub const Builder = struct {
                     .constant_symbol_declaration,
                     .variable_symbol_declaration,
                     => {
-                        const expected_identifier_token_index = Token.addInt(declaration_node.token, 1);
+                        const expected_identifier_token_index: Token.Index = @enumFromInt(@intFromEnum(declaration_node.token) + 1);
                         const identifier = unit.getExpectedTokenBytes(expected_identifier_token_index, .identifier);
                         // logln(.compilation, .identifier, "Analyzing global declaration {s}", .{identifier});
                         const identifier_hash = try unit.processIdentifier(context, identifier);
@@ -8823,7 +8801,7 @@ pub const Builder = struct {
 
             for (field_nodes.slice(), 0..) |field_node_index, index| {
                 const field_node = unit.getNode(field_node_index);
-                const identifier = switch (unit.getTokenId(field_node.token)) {
+                const identifier = switch (unit.token_buffer.tokens.get(field_node.token).id) {
                     .identifier => unit.getExpectedTokenBytes(field_node.token, .identifier),
                     .string_literal => try unit.fixupStringLiteral(context, field_node.token),
                     .discard => try std.mem.concat(context.allocator, u8, &.{ "_", &.{'0' + b: {
@@ -9875,7 +9853,7 @@ pub const Builder = struct {
                 switch (type_expect) {
                     .type => |type_index| {
                         const expected_type = unit.types.get(type_index);
-                        const identifier = unit.getExpectedTokenBytes(Token.addInt(node.token, 1), .identifier);
+                        const identifier = unit.getExpectedTokenBytes(@enumFromInt(@intFromEnum(node.token) + 1), .identifier);
                         const hash = try unit.processIdentifier(context, identifier);
                         switch (expected_type.*) {
                             .integer => |*integer| switch (integer.kind) {
@@ -10587,7 +10565,7 @@ pub const Builder = struct {
                         switch (expected_type.*) {
                             .integer => |*integer| switch (integer.kind) {
                                 .@"enum" => |*enum_type| {
-                                    const identifier = unit.getExpectedTokenBytes(Token.addInt(node.token, 1), .identifier);
+                                    const identifier = unit.getExpectedTokenBytes(@enumFromInt(@intFromEnum(node.token) + 1), .identifier);
                                     const hash = try unit.processIdentifier(context, identifier);
                                     for (enum_type.fields.slice()) |field_index| {
                                         const field = unit.enum_fields.get(field_index);
@@ -13045,7 +13023,7 @@ pub const Builder = struct {
                 assert(initialization_node.id == .container_field_initialization);
                 assert(initialization_node.left != .null);
                 assert(initialization_node.right == .null);
-                const field_name = unit.getExpectedTokenBytes(Token.addInt(initialization_node.token, 1), .identifier);
+                const field_name = unit.getExpectedTokenBytes(@enumFromInt(@intFromEnum(initialization_node.token) + 1), .identifier);
                 const field_name_hash = try unit.processIdentifier(context, field_name);
 
                 if (field_name_hash == field.name) {
@@ -14124,12 +14102,11 @@ pub const Builder = struct {
         }
     }
 
-    fn emitLocalVariableDeclaration(builder: *Builder, unit: *Unit, context: *const Context, token: Token.Index, mutability: Mutability, declaration_type: Type.Index, initialization: V, emit: bool, maybe_name: ?[]const u8) !Instruction.Index {
+    fn emitLocalVariableDeclaration(builder: *Builder, unit: *Unit, context: *const Context, token_index: Token.Index, mutability: Mutability, declaration_type: Type.Index, initialization: V, emit: bool, maybe_name: ?[]const u8) !Instruction.Index {
         assert(builder.current_scope.local);
-        const index = Token.unwrap(token);
-        const id = unit.token_buffer.ids[index];
-        const identifier = if (maybe_name) |name| name else switch (id) {
-            .identifier => unit.getExpectedTokenBytes(token, .identifier),
+        const token = unit.token_buffer.tokens.get(token_index);
+        const identifier = if (maybe_name) |name| name else switch (token.id) {
+            .identifier => unit.getExpectedTokenBytes(token_index, .identifier),
             .discard => blk: {
                 const name = try join_name(context, "_", unit.discard_identifiers, 10);
                 unit.discard_identifiers += 1;
@@ -14139,7 +14116,7 @@ pub const Builder = struct {
         };
         // logln(.compilation, .identifier, "Analyzing local declaration {s}", .{identifier});
         const identifier_hash = try unit.processIdentifier(context, identifier);
-        const token_debug_info = builder.getTokenDebugInfo(unit, token);
+        const token_debug_info = builder.getTokenDebugInfo(unit, token_index);
 
         const look_in_parent_scopes = true;
         if (builder.current_scope.lookupDeclaration(identifier_hash, look_in_parent_scopes)) |lookup| {
@@ -14255,7 +14232,7 @@ pub const Builder = struct {
                 => {
                     // All variables here are local
                     assert(builder.current_scope.local);
-                    const expected_identifier_token_index = Token.addInt(statement_node.token, 1);
+                    const expected_identifier_token_index: Token.Index = @enumFromInt(@intFromEnum(statement_node.token) + 1);
 
                     const mutability: Mutability = switch (statement_node.id) {
                         .constant_symbol_declaration => .@"const",
@@ -16826,6 +16803,7 @@ pub const Enum = struct {
 
 pub const Unit = struct {
     node_buffer: Node.List = .{},
+    token_buffer: Token.Buffer,
     files: Debug.File.List = .{},
     types: Type.List = .{},
     structs: Struct.List = .{},
@@ -16847,7 +16825,6 @@ pub const Unit = struct {
     constant_arrays: V.Comptime.ConstantArray.List = .{},
     constant_slices: V.Comptime.ConstantSlice.List = .{},
     error_fields: Type.Error.Field.List = .{},
-    token_buffer: Token.Buffer = .{},
     node_lists: UnpinnedArray(UnpinnedArray(Node.Index)) = .{},
     file_token_offsets: MyHashMap(Token.Range, Debug.File.Index) = .{},
     file_map: MyHashMap([]const u8, Debug.File.Index) = .{},
@@ -17095,7 +17072,7 @@ pub const Unit = struct {
 
                     switch (switch_case_condition_node.id) {
                         .dot_literal => {
-                            if (try unit.typeCheckEnumLiteral(context, Token.addInt(switch_case_condition_node.token, 1), enum_type)) |enum_field_index| {
+                            if (try unit.typeCheckEnumLiteral(context, @enumFromInt(@intFromEnum(switch_case_condition_node.token) + 1), enum_type)) |enum_field_index| {
                                 for (existing_enums.slice()) |existing| {
                                     if (enum_field_index == existing) {
                                         // Duplicate case
@@ -17117,7 +17094,7 @@ pub const Unit = struct {
                                 const case_condition_node = unit.getNode(case_condition_node_index);
                                 switch (case_condition_node.id) {
                                     .dot_literal => {
-                                        if (try unit.typeCheckEnumLiteral(context, Token.addInt(case_condition_node.token, 1), enum_type)) |enum_field_index| {
+                                        if (try unit.typeCheckEnumLiteral(context, @enumFromInt(@intFromEnum(case_condition_node.token) + 1), enum_type)) |enum_field_index| {
                                             for (existing_enums.slice()) |existing| {
                                                 if (enum_field_index == existing) {
                                                     // Duplicate case
@@ -17193,23 +17170,12 @@ pub const Unit = struct {
         unreachable;
     }
 
-    fn getTokenId(unit: *Unit, token_index: Token.Index) Token.Id {
-        const index = Token.unwrap(token_index);
-        assert(index < unit.token_buffer.length);
-        const id = unit.token_buffer.ids[index];
-        return id;
-    }
-
     fn getExpectedTokenBytes(unit: *Unit, token_index: Token.Index, expected_id: Token.Id) []const u8 {
-        const id = unit.getTokenId(token_index);
-        // logln(.compilation, .token_bytes, "trying to get {s} from token of id {s}", .{ @tagName(expected_id), @tagName(id) });
-        if (id != expected_id) @panic("Unexpected token");
-        const index = Token.unwrap(token_index);
-        const offset = unit.token_buffer.offsets[index];
-        const len = unit.token_buffer.lengths[index];
+        const token = unit.token_buffer.tokens.get(token_index);
         const file_index = unit.findTokenFile(token_index);
         const file = unit.files.get(file_index);
-        const bytes = file.source_code[offset..][0..len];
+        if (token.id != expected_id) @panic("Unexpected token");
+        const bytes = file.source_code[token.offset..][0..token.length];
         return bytes;
     }
 
@@ -17411,7 +17377,7 @@ pub const Unit = struct {
         file.status = .loaded_into_memory;
 
         assert(file.status == .loaded_into_memory);
-        file.lexer = try lexer.analyze(context.my_allocator, file.source_code, &unit.token_buffer);
+        file.lexer = try lexer.analyze(file.source_code, &unit.token_buffer);
         assert(file.status == .loaded_into_memory);
         file.status = .lexed;
         try unit.file_token_offsets.put_no_clobber(context.my_allocator, .{
@@ -17741,84 +17707,11 @@ pub const Token = struct {
     length: u32,
     id: Token.Id,
 
-    pub const Buffer = struct {
-        lines: [*]u32 = undefined,
-        offsets: [*]u32 = undefined,
-        lengths: [*]u32 = undefined,
-        ids: [*]Token.Id = undefined,
-        line_offsets: UnpinnedArray(u32) = .{},
-        length: data_structures.IndexType = 0,
-        capacity: data_structures.IndexType = 0,
-
-        const factor = 2;
-        const initial_item_count = 16;
-
-        pub fn append_with_capacity(buffer: *Buffer, token: Token) void {
-            const index = buffer.length;
-            assert(index < buffer.capacity);
-
-            buffer.lines[index] = token.line;
-            buffer.offsets[index] = token.offset;
-            buffer.lengths[index] = token.length;
-            buffer.ids[index] = token.id;
-
-            buffer.length += 1;
-        }
-
-        pub fn ensure_with_capacity(buffer: *Buffer, allocator: *MyAllocator, unused_capacity: data_structures.IndexType) !void {
-            const desired_capacity = buffer.length + unused_capacity;
-            var new_capacity = @max(buffer.capacity, initial_item_count);
-            while (new_capacity < desired_capacity) {
-                new_capacity *= factor;
-            }
-
-            if (new_capacity > buffer.capacity) {
-                {
-                    const line_byte_ptr: [*]u8 = @ptrCast(buffer.lines);
-                    const line_bytes = line_byte_ptr[0 .. buffer.length * @sizeOf(u32)];
-                    const new_line_bytes = try allocator.reallocate(line_bytes, new_capacity * @sizeOf(u32), @alignOf(u32));
-                    buffer.lines = @ptrCast(@alignCast(new_line_bytes));
-                }
-
-                {
-                    const offset_byte_ptr: [*]u8 = @ptrCast(buffer.offsets);
-                    const offset_bytes = offset_byte_ptr[0 .. buffer.length * @sizeOf(u32)];
-                    const new_offset_bytes = try allocator.reallocate(offset_bytes, new_capacity * @sizeOf(u32), @alignOf(u32));
-                    buffer.offsets = @ptrCast(@alignCast(new_offset_bytes));
-                }
-
-                {
-                    const length_byte_ptr: [*]u8 = @ptrCast(buffer.lengths);
-                    const length_bytes = length_byte_ptr[0 .. buffer.length * @sizeOf(u32)];
-                    const new_length_bytes = try allocator.reallocate(length_bytes, new_capacity * @sizeOf(u32), @alignOf(u32));
-                    buffer.lengths = @ptrCast(@alignCast(new_length_bytes));
-                }
-
-                {
-                    const id_byte_ptr: [*]u8 = @ptrCast(buffer.ids);
-                    const id_bytes = id_byte_ptr[0 .. buffer.length * @sizeOf(Token.Id)];
-                    const new_id_bytes = try allocator.reallocate(id_bytes, new_capacity * @sizeOf(Token.Id), @alignOf(Token.Id));
-                    buffer.ids = @ptrCast(@alignCast(new_id_bytes));
-                }
-
-                buffer.capacity = new_capacity;
-            }
-        }
-
-        pub fn getOffset(buffer: *const Buffer) Token.Index {
-            return @enumFromInt(buffer.length);
-        }
-
-        pub fn getLineOffset(buffer: *const Buffer) u32 {
-            return @intCast(buffer.line_offsets.length);
-        }
+    pub const Buffer = struct{
+        line_offsets: PinnedArray(u32) = .{},
+        tokens: PinnedArray(Token) = .{},
     };
-
-    pub const Range = struct {
-        start: Token.Index,
-        count: u32,
-    };
-
+    
     pub const Id = enum {
         keyword_unsigned_integer,
         keyword_signed_integer,
@@ -17992,7 +17885,12 @@ pub const Token = struct {
         }
     };
 
-    pub usingnamespace data_structures.getIndexForType(@This(), enum {});
+    pub const Index = PinnedArray(Token).Index;
+
+    pub const Range = struct {
+        start: Token.Index,
+        count: u32,
+    };
 };
 
 pub const InlineAssembly = struct {

@@ -26,7 +26,7 @@ pub const Arena = struct{
 
     pub fn init(requested_size: u64) !*Arena {
         var size = requested_size;
-        const size_roundup_granularity = 64 * 1024 * 1024;
+        const size_roundup_granularity = commit_granularity;
         size += size_roundup_granularity - 1;
         size -= size % size_roundup_granularity;
         const initial_commit_size = commit_granularity;
@@ -82,14 +82,82 @@ pub const Arena = struct{
     }
 };
 
+const pinned_array_page_size = 2 * 1024 * 1024;
+const pinned_array_max_size = std.math.maxInt(u32) - pinned_array_page_size;
+const pinned_array_default_granularity = pinned_array_page_size;
+/// This must be used with big arrays
+pub fn PinnedArray(comptime T: type) type {
+    return struct{
+        pointer: [*]T = @constCast((&[_]T{}).ptr),
+        length: u32 = 0,
+        granularity: u32 = 0,
+
+        pub const Index = enum(u32){
+            null = 0xffff_ffff,
+            _,
+        };
+
+        const Array = @This();
+
+        pub fn get_unchecked(array: *Array, index: u32) *T {
+            const slice = array.pointer[0..array.length];
+            return &slice[index];
+        }
+
+        pub fn get(array: *Array, index: Index) *T {
+            assert(index != .null);
+            const i = @intFromEnum(index);
+            return array.get_unchecked(i);
+        }
+
+        pub fn get_index(array: *Array, item: *const T) Index{
+            assert(item - array.pointer > (@divExact(pinned_array_max_size, @sizeOf(T))));
+            return @enumFromInt(item - array.pointer);
+        }
+
+        pub fn init(granularity: u32) !Array{
+            const raw_ptr = try reserve(pinned_array_max_size);
+            try commit(raw_ptr, granularity);
+            return Array{
+                .pointer = @alignCast(@ptrCast(raw_ptr)),
+                .length = 0,
+                .granularity = granularity,
+            };
+        }
+
+        pub fn init_with_default_granularity() !Array{
+            return try Array.init(pinned_array_default_granularity);
+        }
+
+        pub fn append(array: *Array, item: T) void {
+            if (((array.length + 1) * @sizeOf(T)) & (array.granularity - 1) == 0) {
+                const length: u64 = array.length;
+                assert((length + 1) * @sizeOf(T) <= pinned_array_max_size);
+                const ptr: [*]u8 = @ptrCast(array.pointer);
+                commit(ptr + ((length + 1) * @sizeOf(T)), array.granularity) catch unreachable;
+            }
+
+            array.append_with_capacity(item);
+        }
+
+        pub fn append_with_capacity(array: *Array, item: T) void {
+            const index = array.length;
+            assert(index * @sizeOf(T) < pinned_array_max_size);
+            array.length += 1;
+            array.pointer[index] = item;
+        }
+    };
+}
+
 pub fn reserve(size: u64) ![*]u8{
-    return switch (os) {
+    const slice = switch (os) {
         .linux, .macos => try std.posix.mmap(null, size, std.posix.PROT.NONE, .{
             .ANONYMOUS = true,
             .TYPE = .PRIVATE,
         }, -1, 0),
         else => @compileError("OS not supported"),
     };
+    return slice.ptr;
 }
 
 pub fn commit(bytes: [*]u8, size: u64) !void{

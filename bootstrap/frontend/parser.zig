@@ -259,18 +259,14 @@ const Analyzer = struct {
     }
 
     fn getTokenOffset(analyzer: *Analyzer, token_index: Token.Index) u32 {
-        const index = Token.unwrap(token_index);
-        assert(index < analyzer.token_buffer.length);
-        const offset = analyzer.token_buffer.offsets[index];
-        return offset;
+        const token = analyzer.token_buffer.tokens.get(token_index);
+        return token.offset;
     }
 
     fn peekTokenAhead(analyzer: *Analyzer, ahead_offset: u32) Token.Id {
-        const token_index = Token.addInt(analyzer.token_i, ahead_offset);
-        const index = Token.unwrap(token_index);
-        assert(index < analyzer.token_buffer.length);
-        const token = analyzer.token_buffer.ids[index];
-        return token;
+        const index = @intFromEnum(analyzer.token_i) + ahead_offset;
+        const token = analyzer.token_buffer.tokens.get_unchecked(index);
+        return token.id;
     }
 
     fn peekToken(analyzer: *Analyzer) Token.Id {
@@ -280,11 +276,11 @@ const Analyzer = struct {
 
     fn hasTokens(analyzer: *Analyzer) bool {
         const token_end = analyzer.getTokenEnd();
-        return Token.unwrap(analyzer.token_i) < token_end;
+        return @intFromEnum(analyzer.token_i) < token_end;
     }
 
     fn getTokenEnd(analyzer: *const Analyzer) u32 {
-        return @intFromEnum(Token.addInt(analyzer.lexer.offset, analyzer.lexer.count));
+        return @intFromEnum(analyzer.lexer.offset) + analyzer.lexer.count;
     }
 
     fn consumeToken(analyzer: *Analyzer) void {
@@ -292,29 +288,26 @@ const Analyzer = struct {
     }
 
     fn consumeTokens(analyzer: *Analyzer, token_count: u32) void {
-        assert(Token.unwrap(Token.addInt(analyzer.token_i, token_count)) <= analyzer.getTokenEnd());
+        assert((@intFromEnum(analyzer.token_i) + token_count) <= analyzer.getTokenEnd());
         // log(.parser, .consume_token, "Consuming {} {s}: ", .{ token_count, if (token_count == 1) "token" else "tokens" });
 
-        for (0..token_count) |i_usize| {
-            const i: u32 = @intCast(i_usize);
-            const token_id = analyzer.peekTokenAhead(i);
-            _ = token_id; // autofix
-            const token_index = Token.addInt(analyzer.token_i, i);
-            const token_bytes = analyzer.bytes(token_index);
-            _ = token_bytes; // autofix
-            // log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token_id), token_bytes });
-        }
+        // for (0..token_count) |i_usize| {
+        //     const i: u32 = @intCast(i_usize);
+        //     const token_id = analyzer.peekTokenAhead(i);
+        //     _ = token_id; // autofix
+        //     const token_index = @intFromEnum(analyzer.token_i) + i;
+        //     const token_bytes = analyzer.bytes(token_index);
+        //     _ = token_bytes; // autofix
+        //     // log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token_id), token_bytes });
+        // }
 
         // log(.parser, .consume_token, "\n", .{});
-        analyzer.token_i = Token.addInt(analyzer.token_i, token_count);
+        analyzer.token_i = @enumFromInt(@intFromEnum(analyzer.token_i) + token_count);
     }
 
     fn bytes(analyzer: *const Analyzer, token_index: Token.Index) []const u8 {
-        const index = Token.unwrap(token_index);
-        assert(index < analyzer.token_buffer.length);
-        const offset = analyzer.token_buffer.offsets[index];
-        const len = analyzer.token_buffer.lengths[index];
-        const slice = analyzer.source_file[offset..][0..len];
+        const token = analyzer.token_buffer.tokens.get(token_index);
+        const slice = analyzer.source_file[token.offset..][0..token.length];
         return slice;
     }
 
@@ -1814,7 +1807,7 @@ const Analyzer = struct {
 
     fn processContainerType(analyzer: *Analyzer, maybe_token_id: ?Token.Id) !Node.Index {
         const token_i = if (maybe_token_id) |tid| try analyzer.expectToken(tid) else analyzer.token_i;
-        assert(Token.unwrap(analyzer.token_i) < analyzer.token_buffer.length);
+        assert(@intFromEnum(analyzer.token_i) < analyzer.token_buffer.tokens.length);
         const token_id = maybe_token_id orelse .fixed_keyword_struct;
         const container_type: Compilation.ContainerType = switch (token_id) {
             .fixed_keyword_struct => .@"struct",
@@ -2323,7 +2316,7 @@ const Analyzer = struct {
                     .right = blk: {
                         const t = analyzer.token_i;
                         analyzer.consumeToken();
-                        break :blk Node.wrap(Token.unwrap(t));
+                        break :blk Node.wrap(@intFromEnum(t));
                     },
                 }),
                 else => |t| @panic(@tagName(t)),
@@ -2363,7 +2356,7 @@ const Analyzer = struct {
         try analyzer.node_lists.append(analyzer.my_allocator, node_list);
         return try analyzer.addNode(.{
             .id = .node_list,
-            .token = Token.wrap(0),
+            .token = @enumFromInt(0),
             .left = @enumFromInt(index),
             .right = Node.Index.null,
         });
