@@ -8671,10 +8671,14 @@ pub const Builder = struct {
             break :blk result;
         };
 
-        var declaration_nodes = try UnpinnedArray(Node.Index).initialize_with_capacity(context.my_allocator, count.declarations);
-        var field_nodes = try UnpinnedArray(Node.Index).initialize_with_capacity(context.my_allocator, count.fields);
-        var comptime_block_nodes = try UnpinnedArray(Node.Index).initialize_with_capacity(context.my_allocator, count.comptime_blocks);
-        var test_declarations = try UnpinnedArray(Node.Index).initialize_with_capacity(context.my_allocator, count.test_declarations);
+        var declaration_nodes = try context.arena.new_array(Node.Index, count.declarations);
+        var field_nodes = try context.arena.new_array(Node.Index, count.fields);
+        var comptime_block_nodes = try context.arena.new_array(Node.Index, count.comptime_blocks);
+        var test_declarations = try context.arena.new_array(Node.Index, count.test_declarations);
+        declaration_nodes.len = 0;
+        field_nodes.len = 0;
+        comptime_block_nodes.len = 0;
+        test_declarations.len = 0;
 
         for (container_nodes) |member_index| {
             const member_node = unit.getNode(member_index);
@@ -8685,12 +8689,14 @@ pub const Builder = struct {
                 .field => &field_nodes,
                 .test_declaration => &test_declarations,
             };
-            array_list.append_with_capacity(member_index);
+            const index = array_list.len;
+            array_list.len += 1;
+            array_list.*[index] = member_index;
         }
 
         var export_declarations = UnpinnedArray(*Debug.Declaration.Global){};
         if (count.declarations > 0) {
-            for (declaration_nodes.slice()) |declaration_node_index| {
+            for (declaration_nodes) |declaration_node_index| {
                 const declaration_node = unit.getNode(declaration_node_index);
 
                 switch (declaration_node.id) {
@@ -8786,7 +8792,7 @@ pub const Builder = struct {
 
         if (count.fields > 0) {
             const ty = unit.types.get(data.plain);
-            const field_count = field_nodes.length;
+            const field_count: u32 = @intCast(field_nodes.len);
             switch (container_type) {
                 .@"enum" => {
                     const integer_type = &ty.integer;
@@ -8794,7 +8800,7 @@ pub const Builder = struct {
                     try enum_type.fields.ensure_capacity(context.my_allocator, field_count);
 
                     if (integer_type.bit_count == 0) {
-                        integer_type.bit_count = @bitSizeOf(@TypeOf(field_nodes.length)) - @clz(field_nodes.length);
+                        integer_type.bit_count = @bitSizeOf(@TypeOf(field_nodes.len)) - @clz(field_nodes.len);
                     }
                     assert(integer_type.bit_count > 0);
                 },
@@ -8811,7 +8817,7 @@ pub const Builder = struct {
             var sliceable_length_index: ?u32 = null;
             var ignore_field_count: u8 = 0;
 
-            for (field_nodes.slice(), 0..) |field_node_index, index| {
+            for (field_nodes, 0..) |field_node_index, index| {
                 const field_node = unit.getNode(field_node_index);
                 const identifier = switch (unit.token_buffer.tokens.get(field_node.token).id) {
                     .identifier => unit.getExpectedTokenBytes(field_node.token, .identifier),
@@ -8920,7 +8926,7 @@ pub const Builder = struct {
             builder.emit_ir = false;
             defer builder.emit_ir = emit_ir;
 
-            for (comptime_block_nodes.slice()) |comptime_node_index| {
+            for (comptime_block_nodes) |comptime_node_index| {
                 const comptime_node = unit.getNode(comptime_node_index);
                 assert(comptime_node.id == .@"comptime");
 
@@ -8965,7 +8971,7 @@ pub const Builder = struct {
                 break :b function_type;
             };
 
-            for (test_declarations.slice()) |test_declaration_node_index| {
+            for (test_declarations) |test_declaration_node_index| {
                 const test_node = unit.getNode(test_declaration_node_index);
                 assert(test_node.id == .test_declaration);
 

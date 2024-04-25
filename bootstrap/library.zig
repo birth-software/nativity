@@ -77,8 +77,8 @@ pub const Arena = struct{
     }
 
     pub inline fn new_array(arena: *Arena, comptime T: type, count: usize) ![]T {
-        const result: [*]T = @ptrCast(try arena.allocate(@sizeOf(T) * count));
-        return result;
+        const result: [*]T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T) * count)));
+        return result[0..count];
     }
 };
 
