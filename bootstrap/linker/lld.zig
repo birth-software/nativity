@@ -3,97 +3,97 @@ const assert = std.debug.assert;
 const linker = @import("linker.zig");
 
 const library = @import("../library.zig");
-const UnpinnedArray = library.UnpinnedArray;
+const PinnedArray = library.PinnedArray;
 
 const Compilation = @import("../Compilation.zig");
 const write = Compilation.write;
 
 pub fn link(context: *const Compilation.Context, options: linker.Options) !void {
     assert(options.backend == .lld);
-    var argv = UnpinnedArray([]const u8){};
+    var argv = try PinnedArray([]const u8).init_with_default_granularity();
     const driver_program = switch (@import("builtin").os.tag) {
         .windows => "lld-link",
         .linux => "ld.lld",
         .macos => "ld64.lld",
         else => @compileError("OS not supported"),
     };
-    try argv.append(context.my_allocator, driver_program);
-    try argv.append(context.my_allocator, "--error-limit=0");
+    _ = argv.append(driver_program);
+    _ = argv.append("--error-limit=0");
 
     // const output_path = out_path orelse "a.out";
-    try argv.append(context.my_allocator, "-o");
-    try argv.append(context.my_allocator, options.output_file_path);
+    _ = argv.append("-o");
+    _ = argv.append(options.output_file_path);
 
-    try argv.append_slice(context.my_allocator, options.extra_arguments);
+    argv.append_slice(options.extra_arguments);
 
     for (options.objects) |object| {
-        try argv.append(context.my_allocator, object.path);
+        _ = argv.append(object.path);
     }
 
     const ci = @import("configuration").ci;
     switch (@import("builtin").os.tag) {
         .macos => {
-            try argv.append(context.my_allocator, "-dynamic");
-            try argv.append_slice(context.my_allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
-            try argv.append(context.my_allocator, "-arch");
-            try argv.append(context.my_allocator, switch (@import("builtin").cpu.arch) {
+            _ = argv.append("-dynamic");
+            argv.append_slice(context.my_allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
+            _ = argv.append("-arch");
+            _ = argv.append(switch (@import("builtin").cpu.arch) {
                 .aarch64 => "arm64",
                 else => |t| @panic(@tagName(t)),
             });
 
-            try argv.append_slice(context.my_allocator, &.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
+            argv.append_slice(&.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
 
             if (!library.ends_with_slice(options.output_file_path, ".dylib")) {
-                try argv.append_slice(context.my_allocator, &.{ "-e", "_main" });
+                argv.append_slice(&.{ "-e", "_main" });
             }
 
-            try argv.append(context.my_allocator, "-lSystem");
+            _ = argv.append("-lSystem");
 
             if (options.link_libcpp) {
-                try argv.append(context.my_allocator, "-L/Library/Developer/CommandLineTools/SDKs/MacOSX13.3.sdk/usr/lib");
-                try argv.append(context.my_allocator, "-lc++");
+                _ = argv.append("-L/Library/Developer/CommandLineTools/SDKs/MacOSX13.3.sdk/usr/lib");
+                _ = argv.append("-lc++");
             }
         },
         .linux => {
             if (ci) {
                 if (options.link_libcpp) {
                     assert(options.link_libc);
-                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/libstdc++.so.6");
+                    _ = argv.append("/lib/x86_64-linux-gnu/libstdc++.so.6");
                 }
 
                 if (options.link_libc) {
-                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/crt1.o");
-                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/crti.o");
-                    try argv.append_slice(context.my_allocator, &.{ "-L", "/lib/x86_64-linux-gnu" });
-                    try argv.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
-                    try argv.append(context.my_allocator, "--as-needed");
-                    try argv.append(context.my_allocator, "-lm");
-                    try argv.append(context.my_allocator, "-lpthread");
-                    try argv.append(context.my_allocator, "-lc");
-                    try argv.append(context.my_allocator, "-ldl");
-                    try argv.append(context.my_allocator, "-lrt");
-                    try argv.append(context.my_allocator, "-lutil");
-                    try argv.append(context.my_allocator, "/lib/x86_64-linux-gnu/crtn.o");
+                    _ = argv.append("/lib/x86_64-linux-gnu/crt1.o");
+                    _ = argv.append("/lib/x86_64-linux-gnu/crti.o");
+                    argv.append_slice(&.{ "-L", "/lib/x86_64-linux-gnu" });
+                    argv.append_slice(&.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                    _ = argv.append("--as-needed");
+                    _ = argv.append("-lm");
+                    _ = argv.append("-lpthread");
+                    _ = argv.append("-lc");
+                    _ = argv.append("-ldl");
+                    _ = argv.append("-lrt");
+                    _ = argv.append("-lutil");
+                    _ = argv.append("/lib/x86_64-linux-gnu/crtn.o");
                 }
             } else {
                 if (options.link_libcpp) {
                     assert(options.link_libc);
-                    try argv.append(context.my_allocator, "/usr/lib/libstdc++.so");
+                    _ = argv.append("/usr/lib/libstdc++.so");
                 }
 
                 if (options.link_libc) {
-                    try argv.append(context.my_allocator, "/usr/lib/crt1.o");
-                    try argv.append(context.my_allocator, "/usr/lib/crti.o");
-                    try argv.append_slice(context.my_allocator, &.{ "-L", "/usr/lib" });
-                    try argv.append_slice(context.my_allocator, &.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
-                    try argv.append(context.my_allocator, "--as-needed");
-                    try argv.append(context.my_allocator, "-lm");
-                    try argv.append(context.my_allocator, "-lpthread");
-                    try argv.append(context.my_allocator, "-lc");
-                    try argv.append(context.my_allocator, "-ldl");
-                    try argv.append(context.my_allocator, "-lrt");
-                    try argv.append(context.my_allocator, "-lutil");
-                    try argv.append(context.my_allocator, "/usr/lib/crtn.o");
+                    _ = argv.append("/usr/lib/crt1.o");
+                    _ = argv.append("/usr/lib/crti.o");
+                    argv.append_slice(&.{ "-L", "/usr/lib" });
+                    argv.append_slice(&.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                    _ = argv.append("--as-needed");
+                    _ = argv.append("-lm");
+                    _ = argv.append("-lpthread");
+                    _ = argv.append("-lc");
+                    _ = argv.append("-ldl");
+                    _ = argv.append("-lrt");
+                    _ = argv.append("-lutil");
+                    _ = argv.append("/usr/lib/crtn.o");
                 }
             }
         },
@@ -102,10 +102,10 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     }
 
     for (options.libraries) |lib| {
-        try argv.append(context.my_allocator, try std.mem.concat(context.allocator, u8, &.{ "-l", lib.path }));
+        _ = argv.append(try std.mem.concat(context.allocator, u8, &.{ "-l", lib.path }));
     }
 
-    const argv_zero_terminated = try Compilation.argsCopyZ(context.allocator, argv.slice());
+    const argv_zero_terminated = try Compilation.argsCopyZ(context.allocator, argv.const_slice());
 
     var stdout_ptr: [*]const u8 = undefined;
     var stdout_len: usize = 0;
@@ -121,7 +121,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     if (!result) {
         const stdout = stdout_ptr[0..stdout_len];
         const stderr = stderr_ptr[0..stderr_len];
-        for (argv.slice()) |arg| {
+        for (argv.const_slice()) |arg| {
             try write(.panic, arg);
             try write(.panic, " ");
         }

@@ -363,7 +363,7 @@ const Analyzer = struct {
                             }
                         } else @panic(identifier_name);
 
-                        try stack_list.append(attribute_node);
+                        stack_list.appendAssumeCapacity(attribute_node);
 
                         switch (analyzer.peekToken()) {
                             .operator_assign => {},
@@ -462,7 +462,7 @@ const Analyzer = struct {
                 }
             } else @panic(identifier_name);
 
-            try attribute_and_return_type_node_list.append(attribute_node);
+            attribute_and_return_type_node_list.appendAssumeCapacity(attribute_node);
 
             if (analyzer.peekToken() == .operator_comma) analyzer.consumeToken();
         }
@@ -471,7 +471,7 @@ const Analyzer = struct {
 
         const arguments = try analyzer.argumentList(.operator_left_parenthesis, .operator_right_parenthesis);
         const return_type = try analyzer.typeExpression();
-        try attribute_and_return_type_node_list.append(return_type);
+        attribute_and_return_type_node_list.appendAssumeCapacity(return_type);
 
         const function_prototype = try analyzer.addNode(.{
             .id = .function_prototype,
@@ -510,7 +510,7 @@ const Analyzer = struct {
                 analyzer.consumeToken();
             }
 
-            try list.append(try analyzer.addNode(.{
+            list.appendAssumeCapacity(try analyzer.addNode(.{
                 .id = id,
                 .token = identifier_token,
                 .left = type_expression,
@@ -552,7 +552,7 @@ const Analyzer = struct {
                 => try analyzer.symbolDeclaration(),
             };
 
-            try list.append(statement_index);
+            list.appendAssumeCapacity(statement_index);
         }
 
         _ = try analyzer.expectToken(.operator_right_brace);
@@ -627,7 +627,7 @@ const Analyzer = struct {
                             else => left,
                         };
 
-                        try array_list.append(switch_case_node);
+                        array_list.appendAssumeCapacity(switch_case_node);
 
                         switch (analyzer.peekToken()) {
                             .operator_comma => analyzer.consumeToken(),
@@ -660,7 +660,7 @@ const Analyzer = struct {
                 .right = expr,
             });
 
-            try list.append(node);
+            list.appendAssumeCapacity(node);
         }
 
         _ = try analyzer.expectToken(.operator_right_brace);
@@ -770,7 +770,7 @@ const Analyzer = struct {
                 else => |t| @panic(@tagName(t)),
             };
 
-            try for_expression_list.append(node_index);
+            for_expression_list.appendAssumeCapacity(node_index);
 
             switch (analyzer.peekToken()) {
                 .operator_comma => analyzer.consumeToken(),
@@ -801,7 +801,7 @@ const Analyzer = struct {
                 else => |t| @panic(@tagName(t)),
             }
 
-            try payload_nodes.append(try analyzer.addNode(.{
+            payload_nodes.appendAssumeCapacity(try analyzer.addNode(.{
                 .id = id,
                 .token = payload_token,
                 .left = Node.Index.null,
@@ -992,7 +992,7 @@ const Analyzer = struct {
                         .operator_semicolon => {},
                         else => |t| @panic(@tagName(t)),
                     }
-                    try operand_list.append(node);
+                    operand_list.appendAssumeCapacity(node);
                 }
 
                 analyzer.consumeToken();
@@ -1004,7 +1004,7 @@ const Analyzer = struct {
                     .right = try analyzer.nodeList(&operand_list),
                 });
 
-                try instruction_list.append(instruction);
+                instruction_list.appendAssumeCapacity(instruction);
             }
 
             _ = try analyzer.expectToken(.operator_backtick);
@@ -1016,7 +1016,7 @@ const Analyzer = struct {
                 .left = try analyzer.nodeList(&instruction_list),
                 .right = .null,
             });
-            try list.append(assembly_block);
+            list.appendAssumeCapacity(assembly_block);
 
             const intrinsic = try analyzer.addNode(.{
                 .id = .intrinsic,
@@ -1029,7 +1029,7 @@ const Analyzer = struct {
         } else {
             while (analyzer.peekToken() != .operator_right_parenthesis) {
                 const parameter = try analyzer.expression();
-                try list.append(parameter);
+                list.appendAssumeCapacity(parameter);
 
                 switch (analyzer.peekToken()) {
                     .operator_comma => analyzer.consumeToken(),
@@ -1465,7 +1465,7 @@ const Analyzer = struct {
                 break :blk .pointer_type;
             },
             .many_pointer_type => blk: {
-                try list.append(try analyzer.addNode(.{
+                list.appendAssumeCapacity(try analyzer.addNode(.{
                     .id = .many_pointer_expression,
                     .token = analyzer.token_i,
                     .left = Node.Index.null,
@@ -1475,7 +1475,7 @@ const Analyzer = struct {
                 _ = try analyzer.expectToken(.operator_ampersand);
                 switch (analyzer.peekToken()) {
                     .operator_right_bracket => {},
-                    .operator_colon => try list.append(try analyzer.parseTermination()),
+                    .operator_colon => list.appendAssumeCapacity(try analyzer.parseTermination()),
                     else => |t| @panic(@tagName(t)),
                 }
                 _ = try analyzer.expectToken(.operator_right_bracket);
@@ -1490,17 +1490,17 @@ const Analyzer = struct {
                         break :blk .slice_type;
                     },
                     .operator_colon => {
-                        try list.append(try analyzer.parseTermination());
+                        list.appendAssumeCapacity(try analyzer.parseTermination());
                         _ = try analyzer.expectToken(.operator_right_bracket);
                         break :blk .slice_type;
                     },
                     else => {
                         const length_expression = try analyzer.expression();
-                        try list.append(length_expression);
+                        list.appendAssumeCapacity(length_expression);
 
                         switch (analyzer.peekToken()) {
                             .operator_right_bracket => {},
-                            .operator_colon => try list.append(try analyzer.parseTermination()),
+                            .operator_colon => list.appendAssumeCapacity(try analyzer.parseTermination()),
                             else => |t| @panic(@tagName(t)),
                         }
 
@@ -1525,7 +1525,7 @@ const Analyzer = struct {
             analyzer.consumeTokens(@intFromBool(analyzer.peekToken() == .fixed_keyword_const));
 
             if (const_node != .null) {
-                try list.append(const_node);
+                list.appendAssumeCapacity(const_node);
             }
         } else {
             assert(list.len > 0);
@@ -1533,7 +1533,7 @@ const Analyzer = struct {
 
         const type_expression = try analyzer.typeExpression();
         assert(type_expression != .null);
-        try list.append(type_expression);
+        list.appendAssumeCapacity(type_expression);
 
         const node_list = try analyzer.nodeList(&list);
 
@@ -1544,15 +1544,7 @@ const Analyzer = struct {
             .right = Node.Index.null,
         };
 
-        // logln(.parser, .pointer_like_type_expression, "ARRAY START\n===========", .{});
-        // for (list.slice()) |ni| {
-        // const n = analyzer.nodes.get(ni);
-        // logln(.parser, .pointer_like_type_expression, "{s} node element: {s}", .{ @tagName(expression_type), @tagName(n.id) });
-        // }
-        // logln(.parser, .pointer_like_type_expression, "ARRAY END\n=========", .{});
-
         const node_index = try analyzer.addNode(node);
-        // logln(.parser, .pointer_like_type_expression, "Pointer end", .{});
 
         switch (analyzer.peekToken()) {
             .operator_comma,
@@ -1663,7 +1655,7 @@ const Analyzer = struct {
                             });
                         }
 
-                        try expression_list.append(parameter);
+                        expression_list.appendAssumeCapacity(parameter);
 
                         switch (analyzer.peekToken()) {
                             .operator_right_parenthesis => {},
@@ -1726,7 +1718,7 @@ const Analyzer = struct {
                                 .right = Node.Index.null,
                             });
 
-                            try list.append(field_initialization);
+                            list.appendAssumeCapacity(field_initialization);
                             switch (analyzer.peekToken()) {
                                 .operator_comma => analyzer.consumeToken(),
                                 else => {},
@@ -1737,7 +1729,7 @@ const Analyzer = struct {
                         else => |t| @panic(@tagName(t)),
                     },
                     else => blk: {
-                        try list.append(try analyzer.anonymousExpression());
+                        list.appendAssumeCapacity(try analyzer.anonymousExpression());
                         _ = try analyzer.expectToken(.operator_comma);
                         break :blk .anonymous;
                     },
@@ -1754,7 +1746,7 @@ const Analyzer = struct {
                         else => {},
                     }
 
-                    try list.append(field_expression_initializer);
+                    list.appendAssumeCapacity(field_expression_initializer);
                     break :blk .anonymous;
                 },
                 else => |t| @panic(@tagName(t)),
@@ -1837,7 +1829,7 @@ const Analyzer = struct {
             var list = Node.StackList{};
             while (analyzer.peekToken() != .operator_right_parenthesis) {
                 const parameter_node = try analyzer.expression();
-                try list.append(parameter_node);
+                list.appendAssumeCapacity(parameter_node);
                 switch (analyzer.peekToken()) {
                     .operator_comma => analyzer.consumeToken(),
                     else => {},
@@ -1935,7 +1927,7 @@ const Analyzer = struct {
             // logln(.parser, .container_members, "Container member {s}", .{@tagName(member_node.id)});
             assert(member_node.id != .identifier);
 
-            try list.append(member_node_index);
+            list.appendAssumeCapacity(member_node_index);
         }
 
         if (maybe_token_id) |_| _ = try analyzer.expectToken(.operator_right_brace);
@@ -2169,7 +2161,7 @@ const Analyzer = struct {
                         .right = value_associated,
                     });
 
-                    try list.append(error_field_node);
+                    list.appendAssumeCapacity(error_field_node);
                 }
 
                 analyzer.consumeToken();

@@ -99,9 +99,16 @@ pub fn PinnedArray(comptime T: type) type {
 
         const Array = @This();
 
+        pub fn const_slice(array: *const Array) []const T{
+            return array.pointer[0..array.length];
+        }
+        pub fn slice(array: *Array) []T{
+            return array.pointer[0..array.length];
+        }
+
         pub fn get_unchecked(array: *Array, index: u32) *T {
-            const slice = array.pointer[0..array.length];
-            return &slice[index];
+            const array_slice = array.slice();
+            return &array_slice[index];
         }
 
         pub fn get(array: *Array, index: Index) *T {
@@ -142,6 +149,18 @@ pub fn PinnedArray(comptime T: type) type {
             return array.append_with_capacity(item);
         }
 
+        pub fn append_slice(array: *Array, items: []const T) void {
+            const count: u32 = @intCast(items.len);
+            if (((array.length + count) * @sizeOf(T)) & (array.granularity - 1) == 0) {
+                const length: u64 = array.length;
+                assert((length + count) * @sizeOf(T) <= pinned_array_max_size);
+                const ptr: [*]u8 = @ptrCast(array.pointer);
+                commit(ptr + ((length + count) * @sizeOf(T)), array.granularity) catch unreachable;
+            }
+
+            array.append_slice_with_capacity(items);
+        }
+
         pub fn append_with_capacity(array: *Array, item: T) *T {
             const index = array.length;
             assert(index * @sizeOf(T) < pinned_array_max_size);
@@ -149,6 +168,14 @@ pub fn PinnedArray(comptime T: type) type {
             const ptr = &array.pointer[index];
             ptr.* = item;
             return ptr;
+        }
+
+        pub fn append_slice_with_capacity(array: *Array, items: []const T) void {
+            const index = array.length;
+            const count: u32 = @intCast(items.len);
+            assert((index + count - 1) * @sizeOf(T) < pinned_array_max_size);
+            array.length += count;
+            @memcpy(array.pointer[index..][0..count], items);
         }
     };
 }
@@ -709,41 +736,6 @@ fn copy_backwards(comptime T: type, destination: []T, source: []const T) void {
         i -= 1;
         destination[i] = source[i];
     }
-}
-
-test {
-    var page_allocator = PageAllocator{};
-    const allocator = &page_allocator.allocator;
-    var foo = UnpinnedArray(u32){};
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
-    try foo.append(allocator, 1);
 }
 
 pub fn equal(a: anytype, b: @TypeOf(a)) bool {

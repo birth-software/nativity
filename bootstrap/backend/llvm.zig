@@ -7,8 +7,9 @@ const write = Compilation.write;
 // const logln = Compilation.logln;
 const Module = Compilation.Module;
 const data_structures = @import("../library.zig");
+const BoundedArray = data_structures.BoundedArray;
 const MyHashMap = data_structures.MyHashMap;
-const UnpinnedArray = data_structures.UnpinnedArray;
+const PinnedArray = data_structures.PinnedArray;
 
 pub const bindings = @import("llvm_bindings.zig");
 
@@ -1221,19 +1222,20 @@ pub const LLVM = struct {
             return llvm_type;
         } else {
             const sema_type = unit.types.get(type_index);
+            var type_buffer = BoundedArray(*LLVM.Type, 512){};
 
             const llvm_type: *LLVM.Type = switch (sema_type.*) {
                 .function => |function_prototype_index| blk: {
                     const sema_function_prototype = unit.function_prototypes.get(function_prototype_index);
                     const llvm_return_type = try llvm.getType(unit, context, sema_function_prototype.abi.return_type);
-                    var parameter_types = try UnpinnedArray(*LLVM.Type).initialize_with_capacity(context.my_allocator, @intCast(sema_function_prototype.abi.parameter_types.len));
+                    var parameter_types = BoundedArray(*LLVM.Type, 512){};
 
                     for (sema_function_prototype.abi.parameter_types) |argument_type_index| {
-                        parameter_types.append_with_capacity(try llvm.getType(unit, context, argument_type_index));
+                        parameter_types.appendAssumeCapacity(try llvm.getType(unit, context, argument_type_index));
                     }
 
                     const is_var_args = false;
-                    const llvm_function_type = LLVM.Context.getFunctionType(llvm_return_type, parameter_types.pointer, parameter_types.length, is_var_args) orelse return Type.Error.function;
+                    const llvm_function_type = LLVM.Context.getFunctionType(llvm_return_type, &parameter_types.buffer, parameter_types.len, is_var_args) orelse return Type.Error.function;
                     break :blk llvm_function_type.toType();
                 },
                 .integer => |integer| switch (integer.kind) {
@@ -1294,16 +1296,15 @@ pub const LLVM = struct {
                         break :blk struct_type.toType();
                     },
                     .@"struct" => |*sema_struct_type| blk: {
-                        var field_type_list = try UnpinnedArray(*LLVM.Type).initialize_with_capacity(context.my_allocator, sema_struct_type.fields.length);
                         for (sema_struct_type.fields.slice()) |sema_field_index| {
                             const sema_field = unit.struct_fields.get(sema_field_index);
                             const llvm_type = try llvm.getType(unit, context, sema_field.type);
-                            field_type_list.append_with_capacity(llvm_type);
+                            type_buffer.appendAssumeCapacity(llvm_type);
                         }
 
                         // TODO:
                         const is_packed = false;
-                        const struct_type = llvm.context.getStructType(field_type_list.pointer, field_type_list.length, is_packed) orelse return Type.Error.@"struct";
+                        const struct_type = llvm.context.getStructType(&type_buffer.buffer, type_buffer.len, is_packed) orelse return Type.Error.@"struct";
 
                         break :blk struct_type.toType();
                     },
@@ -1363,6 +1364,7 @@ pub const LLVM = struct {
                 return result;
             } else {
                 const sema_type = unit.types.get(sema_type_index);
+                var name = BoundedArray(u8, 4096){};
                 const result: []const u8 = switch (sema_type.*) {
                     .integer => |integer| switch (integer.kind) {
                         .materialized_int => b: {
@@ -1382,14 +1384,13 @@ pub const LLVM = struct {
                     },
                     // .bool => "bool",
                     .pointer => |pointer| b: {
-                        var name = UnpinnedArray(u8){};
-                        try name.append(context.my_allocator, '&');
+                        name.appendAssumeCapacity('&');
                         if (pointer.mutability == .@"const") {
-                            try name.append_slice(context.my_allocator, "const");
+                            name.appendSliceAssumeCapacity("const");
                         }
-                        try name.append(context.my_allocator, ' ');
+                        name.appendAssumeCapacity(' ');
                         const element_type_name = try llvm.renderTypeName(unit, context, pointer.type);
-                        try name.append_slice(context.my_allocator, element_type_name);
+                        name.appendSliceAssumeCapacity(element_type_name);
                         break :b name.slice();
                     },
                     .@"struct" => |struct_index| switch (unit.structs.get(struct_index).kind) {
@@ -1398,24 +1399,22 @@ pub const LLVM = struct {
                     },
                     // TODO: termination
                     .slice => |slice| b: {
-                        var name = UnpinnedArray(u8){};
-                        try name.append_slice(context.my_allocator, "[] ");
+                        name.appendSliceAssumeCapacity("[] ");
                         if (slice.mutability == .@"const") {
-                            try name.append_slice(context.my_allocator, "const ");
+                            name.appendSliceAssumeCapacity("const ");
                         }
                         const element_type_name = try llvm.renderTypeName(unit, context, slice.child_type);
-                        try name.append_slice(context.my_allocator, element_type_name);
+                        name.appendSliceAssumeCapacity(element_type_name);
                         break :b name.slice();
                     },
                     .array => |array| b: {
-                        var name = UnpinnedArray(u8){};
-                        try name.append(context.my_allocator, '[');
+                        name.appendAssumeCapacity('[');
                         var buffer: [65]u8 = undefined;
                         const array_count = data_structures.format_int(&buffer, array.count, 10, false);
-                        try name.append_slice(context.my_allocator, array_count);
-                        try name.append(context.my_allocator, ']');
+                        name.appendSliceAssumeCapacity(array_count);
+                        name.appendAssumeCapacity(']');
                         const element_type_name = try llvm.renderTypeName(unit, context, array.type);
-                        try name.append_slice(context.my_allocator, element_type_name);
+                        name.appendSliceAssumeCapacity(element_type_name);
 
                         break :b name.slice();
                     },
@@ -1425,7 +1424,12 @@ pub const LLVM = struct {
                     else => |t| @panic(@tagName(t)),
                 };
 
-                try llvm.type_name_map.put(context.my_allocator, sema_type_index, result);
+
+                try llvm.type_name_map.put(context.my_allocator, sema_type_index, if (name.len > 0) b: {
+                    const new_name = try context.arena.new_array(u8, name.len);
+                    @memcpy(new_name, result);
+                    break :b new_name;
+                } else result);
 
                 return result;
             }
@@ -1530,7 +1534,7 @@ pub const LLVM = struct {
         });
 
         try llvm.debug_type_map.put_no_clobber(context.my_allocator, sema_type_index, struct_type.toType());
-        var field_types = try UnpinnedArray(*LLVM.DebugInfo.Type).initialize_with_capacity(context.my_allocator, @intCast(fields.len));
+        var field_types = BoundedArray(*LLVM.DebugInfo.Type, 512){};
         bit_size = 0;
 
         for (fields) |struct_field_index| {
@@ -1541,11 +1545,11 @@ pub const LLVM = struct {
             const field_name = unit.getIdentifier(struct_field.name);
             const alignment = struct_field_bit_size;
             const member_type = llvm.debug_info_builder.createMemberType(null, field_name.ptr, field_name.len, file, 0, struct_field_bit_size, alignment, bit_size, flags, field_type).toType();
-            field_types.append_with_capacity(member_type);
+            field_types.appendAssumeCapacity(member_type);
             bit_size += struct_field_bit_size;
         }
 
-        llvm.debug_info_builder.replaceCompositeTypes(struct_type, field_types.pointer, field_types.length);
+        llvm.debug_info_builder.replaceCompositeTypes(struct_type, &field_types.buffer, field_types.len);
         return struct_type.toType();
     }
 
@@ -1629,14 +1633,17 @@ pub const LLVM = struct {
                         break :b boolean_type;
                     },
                     .@"enum" => |*enum_type| b: {
-                        var enumerators = try UnpinnedArray(*LLVM.DebugInfo.Type.Enumerator).initialize_with_capacity(context.my_allocator, enum_type.fields.length);
+                        var enumerators = try context.arena.new_array(*LLVM.DebugInfo.Type.Enumerator, enum_type.fields.length);
+                        enumerators.len = 0;
                         for (enum_type.fields.slice()) |enum_field_index| {
                             const enum_field = unit.enum_fields.get(enum_field_index);
                             const enum_field_name = unit.getIdentifier(enum_field.name);
 
                             const is_unsigned = true;
                             const enumerator = llvm.debug_info_builder.createEnumerator(enum_field_name.ptr, enum_field_name.len, enum_field.value, is_unsigned) orelse unreachable;
-                            enumerators.append_with_capacity(enumerator);
+                            const index = enumerators.len;
+                            enumerators.len += 1;
+                            enumerators[index] = enumerator;
                         }
 
                         const type_declaration = unit.type_declarations.get(sema_type_index).?;
@@ -1651,18 +1658,21 @@ pub const LLVM = struct {
                         const alignment = 0;
                         const line = type_declaration.declaration.line + 1;
                         const scope = try llvm.getScope(unit, context, enum_type.scope.scope.parent.?);
-                        const enumeration_type = llvm.debug_info_builder.createEnumerationType(scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.pointer, enumerators.length, backing_type) orelse unreachable;
+                        const enumeration_type = llvm.debug_info_builder.createEnumerationType(scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.ptr, enumerators.len, backing_type) orelse unreachable;
                         break :b enumeration_type.toType();
                     },
                     .@"error" => |*error_type| b: {
-                        var enumerators = try UnpinnedArray(*LLVM.DebugInfo.Type.Enumerator).initialize_with_capacity(context.my_allocator, error_type.fields.length);
+                        var enumerators = try context.arena.new_array(*LLVM.DebugInfo.Type.Enumerator, error_type.fields.length);
+                        enumerators.len = 0;
                         for (error_type.fields.slice()) |error_field_index| {
                             const error_field = unit.error_fields.get(error_field_index);
                             const error_field_name = unit.getIdentifier(error_field.name);
 
                             const is_unsigned = true;
                             const enumerator = llvm.debug_info_builder.createEnumerator(error_field_name.ptr, error_field_name.len, error_field.value, is_unsigned) orelse unreachable;
-                            enumerators.append_with_capacity(enumerator);
+                            const index = enumerators.len;
+                            enumerators.len += 1;
+                            enumerators[index] = enumerator;
                         }
 
                         const type_declaration = unit.type_declarations.get(sema_type_index).?;
@@ -1677,7 +1687,7 @@ pub const LLVM = struct {
                         const alignment = 0;
                         const line = type_declaration.declaration.line + 1;
                         const scope = try llvm.getScope(unit, context, error_type.scope.scope.parent.?);
-                        const enumeration_type = llvm.debug_info_builder.createEnumerationType(scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.pointer, enumerators.length, backing_type) orelse unreachable;
+                        const enumeration_type = llvm.debug_info_builder.createEnumerationType(scope, name.ptr, name.len, file, line, bit_size, alignment, enumerators.ptr, enumerators.len, backing_type) orelse unreachable;
                         break :b enumeration_type.toType();
                     },
                     else => |t| @panic(@tagName(t)),
@@ -1791,10 +1801,10 @@ pub const LLVM = struct {
                 },
                 .function => |function_prototype_index| b: {
                     const function_prototype = unit.function_prototypes.get(function_prototype_index);
-                    var parameter_types = try UnpinnedArray(*LLVM.DebugInfo.Type).initialize_with_capacity(context.my_allocator, @intCast(function_prototype.argument_types.len));
+                    var parameter_types = BoundedArray(*LLVM.DebugInfo.Type, 512){};
                     for (function_prototype.argument_types) |argument_type_index| {
                         const argument_type = try llvm.getDebugType(unit, context, argument_type_index);
-                        parameter_types.append_with_capacity(argument_type);
+                        parameter_types.appendAssumeCapacity(argument_type);
                     }
                     const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
                         .visibility = .none,
@@ -1826,7 +1836,7 @@ pub const LLVM = struct {
                         .all_calls_described = false,
                     };
                     const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
-                    const subroutine_type = llvm.debug_info_builder.createSubroutineType(parameter_types.pointer, parameter_types.length, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
+                    const subroutine_type = llvm.debug_info_builder.createSubroutineType(&parameter_types.buffer, parameter_types.len, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
                     break :b subroutine_type.toType();
                 },
                 else => |t| @panic(@tagName(t)),
@@ -2072,7 +2082,9 @@ pub const LLVM = struct {
         const sema_array_type = unit.types.get(constant_array.type).array;
         const constant_type = try llvm.getType(unit, context, constant_array.type);
         const array_type = constant_type.toArray() orelse unreachable;
-        var list = try UnpinnedArray(*LLVM.Value.Constant).initialize_with_capacity(context.my_allocator, @intCast(constant_array.values.len));
+
+        var list = try context.arena.new_array(*LLVM.Value.Constant, constant_array.values.len);
+        list.len = 0;
         for (constant_array.values) |sema_value| {
             const value = switch (sema_value) {
                 .constant_int => |const_int| b: {
@@ -2099,16 +2111,19 @@ pub const LLVM = struct {
                 },
                 else => |t| @panic(@tagName(t)),
             };
-            list.append_with_capacity(value);
+
+            const index = list.len;
+            list.len += 1;
+            list[index] = value;
         }
 
-        const result = array_type.getConstant(list.pointer, list.length) orelse unreachable;
+        const result = array_type.getConstant(list.ptr, list.len) orelse unreachable;
         return result;
     }
 
     fn getConstantStruct(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, constant_struct_index: Compilation.V.Comptime.ConstantStruct.Index) !*LLVM.Value.Constant {
         const constant_struct = unit.constant_structs.get(constant_struct_index);
-        var field_values = try UnpinnedArray(*LLVM.Value.Constant).initialize_with_capacity(context.my_allocator, @intCast(constant_struct.fields.len));
+        var field_values = BoundedArray(*LLVM.Value.Constant, 512){};
         const sema_struct_index = unit.types.get(constant_struct.type).@"struct";
         const sema_struct = unit.structs.get(sema_struct_index);
         const llvm_type = try llvm.getType(unit, context, constant_struct.type);
@@ -2119,7 +2134,7 @@ pub const LLVM = struct {
                 for (constant_struct.fields, sema_struct_type.fields.slice()) |field_value, field_index| {
                     const field = unit.struct_fields.get(field_index);
                     const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field.type);
-                    field_values.append_with_capacity(constant);
+                    field_values.appendAssumeCapacity(constant);
                 }
             },
             .error_union => |error_union| {
@@ -2130,7 +2145,7 @@ pub const LLVM = struct {
                             const field_types = [2]Compilation.Type.Index{ err_union_base_type, .bool };
                             for (field_types, constant_struct.fields) |field_type_index, field_value| {
                                 const constant = try llvm.emitComptimeRightValue(unit, context, field_value, field_type_index);
-                                field_values.append_with_capacity(constant);
+                                field_values.appendAssumeCapacity(constant);
                             }
                         },
                         else => |t| @panic(@tagName(t)),
@@ -2141,7 +2156,7 @@ pub const LLVM = struct {
             else => |t| @panic(@tagName(t)),
         }
 
-        const const_struct = struct_type.getConstant(field_values.pointer, field_values.length) orelse unreachable;
+        const const_struct = struct_type.getConstant(&field_values.buffer, field_values.len) orelse unreachable;
         return const_struct;
     }
 
@@ -2162,9 +2177,9 @@ pub const LLVM = struct {
     }
 
     fn emitParameterAttributes(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, abi: Compilation.Function.AbiInfo, is_return: bool) !*const LLVM.Attribute.Set {
-        var attributes = UnpinnedArray(*LLVM.Attribute){};
+        var attributes = BoundedArray(*LLVM.Attribute, 256){};
         if (abi.attributes.by_reg) {
-            try attributes.append(context.my_allocator, llvm.attributes.inreg);
+            attributes.appendAssumeCapacity(llvm.attributes.inreg);
         }
         switch (abi.kind) {
             .ignore => {
@@ -2175,39 +2190,39 @@ pub const LLVM = struct {
                 const indirect_type = try llvm.getType(unit, context, indirect.type);
                 if (is_return) {
                     const sret = llvm.context.getAttributeFromType(.StructRet, indirect_type);
-                    try attributes.append(context.my_allocator, sret);
-                    try attributes.append(context.my_allocator, llvm.attributes.@"noalias");
+                    attributes.appendAssumeCapacity(sret);
+                    attributes.appendAssumeCapacity(llvm.attributes.@"noalias");
                     // TODO: alignment
                 } else {
                     if (abi.attributes.by_value) {
                         const byval = llvm.context.getAttributeFromType(.ByVal, indirect_type);
-                        try attributes.append(context.my_allocator, byval);
+                        attributes.appendAssumeCapacity(byval);
                     }
                     //TODO: alignment
                 }
             },
             else => |t| @panic(@tagName(t)),
         }
-        const attribute_set = llvm.context.getAttributeSet(attributes.pointer, attributes.length);
+        const attribute_set = llvm.context.getAttributeSet(&attributes.buffer, attributes.len);
         return attribute_set;
     }
 
-    fn getFunctionAttributes(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, function_prototype: *Compilation.Function.Prototype) !*const LLVM.Attribute.Set {
-        var function_attributes = UnpinnedArray(*LLVM.Attribute){};
-        try function_attributes.append(context.my_allocator, llvm.attributes.nounwind);
+    fn getFunctionAttributes(llvm: *LLVM, unit: *Compilation.Unit, function_prototype: *Compilation.Function.Prototype) *const LLVM.Attribute.Set {
+        var function_attributes = BoundedArray(*LLVM.Attribute, 256){};
+        function_attributes.appendAssumeCapacity(llvm.attributes.nounwind);
 
         switch (unit.types.get(function_prototype.return_type).*) {
             .noreturn => {
-                try function_attributes.append(context.my_allocator, llvm.attributes.noreturn);
+                function_attributes.appendAssumeCapacity(llvm.attributes.noreturn);
             },
             else => {},
         }
 
         if (function_prototype.attributes.naked) {
-            try function_attributes.append(context.my_allocator, llvm.attributes.naked);
+            function_attributes.appendAssumeCapacity(llvm.attributes.naked);
         }
 
-        const function_attribute_set = llvm.context.getAttributeSet(function_attributes.pointer, function_attributes.length);
+        const function_attribute_set = llvm.context.getAttributeSet(&function_attributes.buffer, function_attributes.len);
         return function_attribute_set;
     }
 
@@ -2217,14 +2232,14 @@ pub const LLVM = struct {
     };
 
     fn setCallOrFunctionAttributes(llvm: *LLVM, unit: *Compilation.Unit, context: *const Compilation.Context, function_prototype: *Compilation.Function.Prototype, call_or_function: CallOrFunction) !void {
-        const function_attribute_set = try llvm.getFunctionAttributes(unit, context, function_prototype);
+        const function_attribute_set = llvm.getFunctionAttributes(unit, function_prototype);
 
-        var parameter_attribute_sets = try UnpinnedArray(*const LLVM.Attribute.Set).initialize_with_capacity(context.my_allocator, @intCast(function_prototype.abi.parameter_types_abi.len + @intFromBool(function_prototype.abi.return_type_abi.kind == .indirect)));
+        var parameter_attribute_sets = BoundedArray(*const LLVM.Attribute.Set, 512){};
         const return_attribute_set = blk: {
             const attribute_set = try llvm.emitParameterAttributes(unit, context, function_prototype.abi.return_type_abi, true);
             break :blk switch (function_prototype.abi.return_type_abi.kind) {
                 .indirect => b: {
-                    parameter_attribute_sets.append_with_capacity(attribute_set);
+                    parameter_attribute_sets.appendAssumeCapacity(attribute_set);
                     break :b llvm.context.getAttributeSet(null, 0);
                 },
                 else => attribute_set,
@@ -2233,18 +2248,18 @@ pub const LLVM = struct {
 
         for (function_prototype.abi.parameter_types_abi) |parameter_type_abi| {
             const parameter_attribute_set = try llvm.emitParameterAttributes(unit, context, parameter_type_abi, false);
-            parameter_attribute_sets.append_with_capacity(parameter_attribute_set);
+            parameter_attribute_sets.appendAssumeCapacity(parameter_attribute_set);
         }
 
         const calling_convention = getCallingConvention(function_prototype.calling_convention);
 
         switch (call_or_function) {
             .call => |call| {
-                call.setAttributes(llvm.context, function_attribute_set, return_attribute_set, parameter_attribute_sets.pointer, parameter_attribute_sets.length);
+                call.setAttributes(llvm.context, function_attribute_set, return_attribute_set, &parameter_attribute_sets.buffer, parameter_attribute_sets.len);
                 call.setCallingConvention(calling_convention);
             },
             .function => |function| {
-                function.setAttributes(llvm.context, function_attribute_set, return_attribute_set, parameter_attribute_sets.pointer, parameter_attribute_sets.length);
+                function.setAttributes(llvm.context, function_attribute_set, return_attribute_set, &parameter_attribute_sets.buffer, parameter_attribute_sets.len);
                 function.setCallingConvention(calling_convention);
             },
         }
@@ -2286,10 +2301,10 @@ pub const LLVM = struct {
         if (generate_debug_information) {
             // if (data_structures.byte_equal(name, "nat_split_struct_ints")) @breakpoint();
             const debug_file = try llvm.getDebugInfoFile(unit, context, declaration.declaration.scope.file);
-            var parameter_types = try UnpinnedArray(*LLVM.DebugInfo.Type).initialize_with_capacity(context.my_allocator, @intCast(function_prototype.argument_types.len));
+            var parameter_types = BoundedArray(*LLVM.DebugInfo.Type, 512){};
             for (function_prototype.argument_types) |argument_type_index| {
                 const argument_type = try llvm.getDebugType(unit, context, argument_type_index);
-                parameter_types.append_with_capacity(argument_type);
+                parameter_types.appendAssumeCapacity(argument_type);
             }
 
             const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
@@ -2322,7 +2337,7 @@ pub const LLVM = struct {
                 .all_calls_described = false,
             };
             const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
-            const subroutine_type = llvm.debug_info_builder.createSubroutineType(parameter_types.pointer, parameter_types.length, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
+            const subroutine_type = llvm.debug_info_builder.createSubroutineType(&parameter_types.buffer, parameter_types.len, subroutine_type_flags, subroutine_type_calling_convention) orelse unreachable;
             const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
                 .virtuality = .none,
                 .local_to_unit = !export_or_extern,
@@ -2570,10 +2585,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                     .inline_assembly => |inline_assembly_index| {
                         const assembly_block = unit.inline_assembly.get(inline_assembly_index);
 
-                        var assembly_statements = UnpinnedArray(u8){};
-                        var constraints = UnpinnedArray(u8){};
-                        var operand_values = UnpinnedArray(*LLVM.Value){};
-                        var operand_types = UnpinnedArray(*LLVM.Type){};
+                        var assembly_statements = BoundedArray(u8, 4096){};
+                        var constraints = BoundedArray(u8, 4096){};
+                        var operand_values = BoundedArray(*LLVM.Value, 256){};
+                        var operand_types = BoundedArray(*LLVM.Type, 256){};
 
                         switch (unit.descriptor.arch) {
                             .x86_64 => {
@@ -2581,13 +2596,13 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                     const instruction = unit.assembly_instructions.get(assembly_instruction_index);
                                     const instruction_id: Compilation.InlineAssembly.x86_64.Instruction = @enumFromInt(instruction.id);
 
-                                    try assembly_statements.append_slice(context.my_allocator, switch (instruction_id) {
+                                    assembly_statements.appendSliceAssumeCapacity(switch (instruction_id) {
                                         .xor => "xorl",
                                         .mov => "movq",
                                         .@"and" => "andq",
                                         .call => "callq",
                                     });
-                                    try assembly_statements.append(context.my_allocator, ' ');
+                                    assembly_statements.appendAssumeCapacity(' ');
 
                                     if (instruction.operands.len > 0) {
                                         var reverse_operand_iterator = std.mem.reverseIterator(instruction.operands);
@@ -2596,8 +2611,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                             switch (operand) {
                                                 .register => |register_value| {
                                                     const register: Compilation.InlineAssembly.x86_64.Register = @enumFromInt(register_value);
-                                                    try assembly_statements.append(context.my_allocator, '%');
-                                                    try assembly_statements.append_slice(context.my_allocator, @tagName(register));
+                                                    assembly_statements.appendAssumeCapacity('%');
+                                                    assembly_statements.appendSliceAssumeCapacity(@tagName(register));
                                                 },
                                                 .number_literal => |literal| {
                                                     var buffer: [65]u8 = undefined;
@@ -2608,7 +2623,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                     literal_slice[1] = '$';
                                                     literal_slice[2] = '0';
                                                     literal_slice[3] = 'x';
-                                                    try assembly_statements.append_slice(context.my_allocator, try context.my_allocator.duplicate_bytes(literal_slice));
+                                                    assembly_statements.appendSliceAssumeCapacity(try context.my_allocator.duplicate_bytes(literal_slice));
                                                 },
                                                 .value => |sema_value| {
                                                     if (llvm.llvm_value_map.get(sema_value)) |v| {
@@ -2617,7 +2632,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                     } else {
                                                         const value = try llvm.emitLeftValue(unit, context, sema_value);
                                                         var buffer: [65]u8 = undefined;
-                                                        const operand_number = data_structures.format_int(&buffer, operand_values.length, 16, false);
+                                                        const operand_number = data_structures.format_int(&buffer, operand_values.len, 16, false);
                                                         const slice_ptr = operand_number.ptr - 2;
                                                         const operand_slice = slice_ptr[0 .. operand_number.len + 2];
                                                         operand_slice[0] = '$';
@@ -2628,23 +2643,23 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                         new_buffer[operand_slice.len + 1] = 'P';
                                                         new_buffer[operand_slice.len + 2] = '}';
                                                         const new_slice = try context.my_allocator.duplicate_bytes(new_buffer[0 .. operand_slice.len + 3]);
-                                                        try assembly_statements.append_slice(context.my_allocator, new_slice);
-                                                        try operand_values.append(context.my_allocator, value);
+                                                        assembly_statements.appendSliceAssumeCapacity(new_slice);
+                                                        operand_values.appendAssumeCapacity(value);
                                                         const value_type = value.getType();
-                                                        try operand_types.append(context.my_allocator, value_type);
-                                                        try constraints.append(context.my_allocator, 'X');
+                                                        operand_types.appendAssumeCapacity(value_type);
+                                                        constraints.appendAssumeCapacity('X');
                                                     }
                                                 },
                                             }
 
-                                            try assembly_statements.append_slice(context.my_allocator, ", ");
+                                            assembly_statements.appendSliceAssumeCapacity(", ");
                                         }
 
                                         _ = assembly_statements.pop();
                                         _ = assembly_statements.pop();
                                     }
 
-                                    try assembly_statements.append_slice(context.my_allocator, "\n\t");
+                                    assembly_statements.appendSliceAssumeCapacity("\n\t");
                                 }
 
                                 // try constraints.append_slice(context.allocator, ",~{dirflag},~{fpsr},~{flags}");
@@ -2653,14 +2668,14 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         }
 
                         const is_var_args = false;
-                        const function_type = LLVM.Context.getFunctionType(try llvm.getType(unit, context, Compilation.Type.Index.void), operand_types.pointer, operand_types.length, is_var_args) orelse unreachable;
+                        const function_type = LLVM.Context.getFunctionType(try llvm.getType(unit, context, Compilation.Type.Index.void), &operand_types.buffer, operand_types.len, is_var_args) orelse unreachable;
                         const has_side_effects = true;
                         const is_align_stack = true;
                         const dialect = LLVM.Value.InlineAssembly.Dialect.@"at&t";
                         const can_throw = false;
 
-                        const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, assembly_statements.pointer, assembly_statements.length, constraints.pointer, constraints.length, has_side_effects, is_align_stack, dialect, can_throw) orelse return LLVM.Value.Error.inline_assembly;
-                        const call = llvm.builder.createCall(function_type, inline_assembly.toValue(), operand_values.pointer, operand_values.length, "", "".len, null) orelse return LLVM.Value.Instruction.Error.call;
+                        const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, &assembly_statements.buffer, assembly_statements.len, &constraints.buffer, constraints.len, has_side_effects, is_align_stack, dialect, can_throw) orelse return LLVM.Value.Error.inline_assembly;
+                        const call = llvm.builder.createCall(function_type, inline_assembly.toValue(), &operand_values.buffer, operand_values.len, "", "".len, null) orelse return LLVM.Value.Instruction.Error.call;
                         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, call.toValue());
                     },
                     .stack_slot => |stack_slot| {
@@ -2876,27 +2891,27 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const return_type = try llvm.getType(unit, context, Compilation.Type.usize);
                         const is_var_args = false;
                         const function_type = LLVM.Context.getFunctionType(return_type, syscall_argument_types.ptr, syscall_argument_types.len, is_var_args) orelse unreachable;
-                        var constraints = UnpinnedArray(u8){};
+                        var constraints = BoundedArray(u8, 4096){};
 
                         const inline_asm = switch (unit.descriptor.arch) {
                             .x86_64 => blk: {
-                                try constraints.append_slice(context.my_allocator, "={rax}");
+                                constraints.appendSliceAssumeCapacity("={rax}");
 
                                 const syscall_registers = [7][]const u8{ "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" };
                                 for (syscall_registers[0..syscall_argument_count]) |syscall_register| {
-                                    try constraints.append(context.my_allocator, ',');
-                                    try constraints.append(context.my_allocator, '{');
-                                    try constraints.append_slice(context.my_allocator, syscall_register);
-                                    try constraints.append(context.my_allocator, '}');
+                                    constraints.appendAssumeCapacity(',');
+                                    constraints.appendAssumeCapacity('{');
+                                    constraints.appendSliceAssumeCapacity(syscall_register);
+                                    constraints.appendAssumeCapacity('}');
                                 }
 
-                                try constraints.append_slice(context.my_allocator, ",~{rcx},~{r11},~{memory}");
+                                constraints.appendSliceAssumeCapacity(",~{rcx},~{r11},~{memory}");
 
                                 const assembly = "syscall";
                                 const has_side_effects = true;
                                 const is_align_stack = true;
                                 const can_throw = false;
-                                const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, assembly, assembly.len, constraints.pointer, constraints.length, has_side_effects, is_align_stack, LLVM.Value.InlineAssembly.Dialect.@"at&t", can_throw) orelse return LLVM.Value.Error.inline_assembly;
+                                const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, assembly, assembly.len, &constraints.buffer, constraints.len, has_side_effects, is_align_stack, LLVM.Value.InlineAssembly.Dialect.@"at&t", can_throw) orelse return LLVM.Value.Error.inline_assembly;
                                 break :blk inline_assembly;
                             },
                             else => |t| @panic(@tagName(t)),
@@ -3129,8 +3144,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             last_block = else_block_node;
                             break :b bb;
                         } else null;
-                        var basic_block_array = try UnpinnedArray(*LLVM.Value.BasicBlock).initialize_with_capacity(context.my_allocator, switch_expression.cases.length);
-                        var condition_array = try UnpinnedArray(*LLVM.Value.Constant.Int).initialize_with_capacity(context.my_allocator, switch_expression.cases.length);
+
+                        var basic_block_array = BoundedArray(*LLVM.Value.BasicBlock, 4096){};
+                        var condition_array = BoundedArray(*LLVM.Value.Constant.Int, 4096){};
+
                         for (switch_expression.cases.pointer[0..switch_expression.cases.length]) |case| {
                             const constant_value = try llvm.emitComptimeRightValue(unit, context, case.condition, switch_expression.condition.type);
                             const constant_int = constant_value.toInt() orelse unreachable;
@@ -3141,13 +3158,13 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 const block = llvm.llvm_block_map.get(case.basic_block).?;
                                 break :b block;
                             };
-                            condition_array.append_with_capacity(constant_int);
-                            basic_block_array.append_with_capacity(block);
+                            condition_array.appendAssumeCapacity(constant_int);
+                            basic_block_array.appendAssumeCapacity(block);
                         }
 
                         const branch_weights = null;
                         const unpredictable = null;
-                        const switch_instruction = llvm.builder.createSwitch(condition, else_block, condition_array.pointer, basic_block_array.pointer, condition_array.length, branch_weights, unpredictable);
+                        const switch_instruction = llvm.builder.createSwitch(condition, else_block, &condition_array.buffer, &basic_block_array.buffer, condition_array.len, branch_weights, unpredictable);
                         try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, switch_instruction.toValue());
                     },
                     .memcpy => |memcpy| {
@@ -3207,8 +3224,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             const result = llvm.function.verify(&message_ptr, &message_len);
 
             if (!result) {
-                // std.debug.print("PANIC: Failed to verify function:\n{s}\n", .{error_message});
-
                 var module_len: usize = 0;
                 const module_ptr = llvm.module.toString(&module_len);
                 const module_dump = module_ptr[0..module_len];
@@ -3269,25 +3284,34 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         .windows => "x86_64-windows-gnu",
     };
     const cpu = "generic";
-    const temp_use_native_features = true;
-    const features = if (temp_use_native_features) blk: {
-        var buffer = UnpinnedArray(u8){};
-        for (@import("builtin").cpu.arch.allFeaturesList(), 0..) |feature, index_usize| {
-            const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
-            const is_enabled = @import("builtin").cpu.features.isEnabled(index);
 
-            if (feature.llvm_name) |llvm_name| {
-                const plus_or_minus = "-+"[@intFromBool(is_enabled)];
-                try buffer.append(context.my_allocator, plus_or_minus);
-                try buffer.append_slice(context.my_allocator, llvm_name);
-                try buffer.append_slice(context.my_allocator, ",");
+    var features = PinnedArray(u8){
+        .pointer = @constCast(@ptrCast("")),
+        .length = 0,
+        .granularity = 0,
+    };
+
+    const temp_use_native_features = true;
+    if (temp_use_native_features) {
+        const feature_list = @import("builtin").cpu.arch.allFeaturesList();
+        if (feature_list.len > 0) {
+            features = try PinnedArray(u8).init_with_default_granularity();
+            for (feature_list, 0..) |feature, index_usize| {
+                const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+                const is_enabled = @import("builtin").cpu.features.isEnabled(index);
+
+                if (feature.llvm_name) |llvm_name| {
+                    const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+                    _ = features.append(plus_or_minus);
+                    features.append_slice(llvm_name);
+                    features.append_slice(",");
+                }
             }
+
+            assert(std.mem.endsWith(u8, features.slice(), ","));
+            features.length -= 1;
         }
-        if (buffer.length == 0) break :blk "";
-        assert(std.mem.endsWith(u8, buffer.slice(), ","));
-        buffer.slice()[buffer.length - 1] = 0;
-        break :blk buffer.slice()[0 .. buffer.length - 1 :0];
-    } else "";
+    }
 
     const target = blk: {
         var error_message: [*]const u8 = undefined;
@@ -3306,7 +3330,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         .optimize_for_speed, .optimize_for_size => .default,
         .aggressively_optimize_for_speed, .aggressively_optimize_for_size => .aggressive,
     };
-    const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features.ptr, features.len, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit) orelse unreachable;
+    const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features.pointer, features.length, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit) orelse unreachable;
     llvm.module.setTargetMachineDataLayout(target_machine);
     llvm.module.setTargetTriple(target_triple.ptr, target_triple.len);
     const file_path = unit.descriptor.executable_path;

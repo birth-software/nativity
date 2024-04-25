@@ -8,7 +8,6 @@ const byte_equal = library.byte_equal;
 const enumFromString = library.enumFromString;
 const MyAllocator = library.MyAllocator;
 const PinnedArray = library.PinnedArray;
-const UnpinnedArray = library.UnpinnedArray;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
