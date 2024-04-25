@@ -58,11 +58,11 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
 
     const time_start = std.time.Instant.now() catch unreachable;
 
-    token_buffer.line_offsets.append(0);
+    _ = token_buffer.line_offsets.append(0);
 
     for (text, 0..) |byte, index| {
         if (byte == '\n') {
-            token_buffer.line_offsets.append(@intCast(index + 1));
+            _ = token_buffer.line_offsets.append(@intCast(index + 1));
         }
     }
 
@@ -483,7 +483,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
             },
             // Asm statement (special treatment)
             '`' => {
-                token_buffer.tokens.append(.{
+                _ = token_buffer.tokens.append(.{
                     .id = .operator_backtick,
                     .line = line_index,
                     .offset = start_index,
@@ -510,7 +510,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                                 }
                             }
 
-                            token_buffer.tokens.append(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .identifier,
                                 .offset = start_i,
                                 .length = index - start_i,
@@ -518,7 +518,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                             });
                         },
                         ',' => {
-                            token_buffer.tokens.append(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_comma,
                                 .line = line_index,
                                 .offset = start_i,
@@ -527,7 +527,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                             index += 1;
                         },
                         ';' => {
-                            token_buffer.tokens.append(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_semicolon,
                                 .line = line_index,
                                 .offset = start_i,
@@ -536,7 +536,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                             index += 1;
                         },
                         '{' => {
-                            token_buffer.tokens.append(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_left_brace,
                                 .line = line_index,
                                 .offset = start_i,
@@ -545,7 +545,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                             index += 1;
                         },
                         '}' => {
-                            token_buffer.tokens.append(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_right_brace,
                                 .line = line_index,
                                 .offset = start_i,
@@ -574,7 +574,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                                         }
                                     }
 
-                                    token_buffer.tokens.append(.{
+                                    _ = token_buffer.tokens.append(.{
                                         .id = .number_literal,
                                         .line = line_index,
                                         .offset = start_i,
@@ -588,7 +588,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                     }
                 }
 
-                token_buffer.tokens.append(.{
+                _ = token_buffer.tokens.append(.{
                     .id = .operator_backtick,
                     .line = line_index,
                     .length = 1,
@@ -608,18 +608,13 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
         const end_index = index;
         const token_length = end_index - start_index;
 
-        token_buffer.tokens.append(.{
+        _ = token_buffer.tokens.append(.{
             .id = token_id,
             .offset = start_index,
             .length = token_length,
             .line = line_index,
         });
-        // const line_offset = token_buffer.line_offsets.pointer[line_index];
-        // const column = start_index - line_offset;
-        // logln(.lexer, .new_token, "T at line {}, column {}, byte offset {}, with length {} -line offset: {}- ({s})", .{ line_index, column, start_index, token_length, line_offset, @tagName(token_id) });
     }
-
-    // logln(.lexer, .end, "END LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
     lexer.count = token_buffer.tokens.length - @intFromEnum(lexer.offset);
     lexer.line_count = token_buffer.line_offsets.length - lexer.line_offset;

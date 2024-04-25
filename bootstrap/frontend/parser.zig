@@ -2,10 +2,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const data_structures = @import("../library.zig");
-const UnpinnedArray = data_structures.UnpinnedArray;
-const BlockList = data_structures.BlockList;
-const enumFromString = data_structures.enumFromString;
+const library = @import("../library.zig");
+const byte_equal = library.byte_equal;
+const BlockList = library.BlockList;
+const enumFromString = library.enumFromString;
+const PinnedArray = library.PinnedArray;
+const MyAllocator = library.MyAllocator;
+const UnpinnedArray = library.UnpinnedArray;
 
 const lexer = @import("lexer.zig");
 
@@ -62,8 +65,7 @@ pub const Node = struct {
     token: Token.Index,
     id: Id,
 
-    pub const List = BlockList(@This(), enum {});
-    pub usingnamespace List.Index;
+    pub const Index = PinnedArray(Node).Index;
 
     pub const Range = struct {
         start: u32,
@@ -226,11 +228,11 @@ const Analyzer = struct {
     lexer: lexer.Result,
     token_i: Token.Index,
     token_buffer: *Token.Buffer,
-    nodes: *Node.List,
+    nodes: *PinnedArray(Node),
     node_lists: *UnpinnedArray(UnpinnedArray(Node.Index)),
     source_file: []const u8,
     allocator: Allocator,
-    my_allocator: *data_structures.MyAllocator,
+    my_allocator: *MyAllocator,
     suffix_depth: usize = 0,
 
     fn expectToken(analyzer: *Analyzer, expected_token_id: Token.Id) !Token.Index {
@@ -339,7 +341,7 @@ const Analyzer = struct {
                         const identifier_name = analyzer.bytes(identifier);
 
                         const attribute_node = inline for (@typeInfo(Compilation.Debug.Declaration.Global.Attribute).Enum.fields) |enum_field| {
-                            if (data_structures.byte_equal(identifier_name, enum_field.name)) {
+                            if (byte_equal(identifier_name, enum_field.name)) {
                                 const attribute = @field(Compilation.Debug.Declaration.Global.Attribute, enum_field.name);
                                 const attribute_node = switch (attribute) {
                                     .@"export",
@@ -427,7 +429,7 @@ const Analyzer = struct {
             const identifier_name = analyzer.bytes(identifier);
 
             const attribute_node = inline for (@typeInfo(Compilation.Function.Attribute).Enum.fields) |enum_field| {
-                if (data_structures.byte_equal(identifier_name, enum_field.name)) {
+                if (byte_equal(identifier_name, enum_field.name)) {
                     const attribute = @field(Compilation.Function.Attribute, enum_field.name);
                     const attribute_node = switch (attribute) {
                         .naked => try analyzer.addNode(.{
@@ -926,7 +928,7 @@ const Analyzer = struct {
         const intrinsic_name = analyzer.bytes(intrinsic_token)[1..];
 
         const intrinsic_id = inline for (@typeInfo(Compilation.IntrinsicId).Enum.fields) |enum_field| {
-            if (data_structures.byte_equal(enum_field.name, intrinsic_name)) {
+            if (byte_equal(enum_field.name, intrinsic_name)) {
                 break @field(Compilation.IntrinsicId, enum_field.name);
             }
         } else @panic(intrinsic_name);
@@ -2316,7 +2318,7 @@ const Analyzer = struct {
                     .right = blk: {
                         const t = analyzer.token_i;
                         analyzer.consumeToken();
-                        break :blk Node.wrap(@intFromEnum(t));
+                        break :blk @enumFromInt(@intFromEnum(t));
                     },
                 }),
                 else => |t| @panic(@tagName(t)),
@@ -2328,7 +2330,8 @@ const Analyzer = struct {
     }
 
     fn addNode(analyzer: *Analyzer, node: Node) !Node.Index {
-        const node_index = try analyzer.nodes.append(analyzer.my_allocator, node);
+        const node_pointer = analyzer.nodes.append(node);
+        const node_index = analyzer.nodes.get_index(node_pointer);
         // logln(.parser, .node_creation, "Adding node #{} {s} to file #{} (left: {}, right: {})", .{ Node.unwrap(node_index), @tagName(node.id), File.unwrap(analyzer.file_index), switch (node.left) {
         //     .null => 0xffff_ffff,
         //     else => Node.unwrap(node.left),
@@ -2377,7 +2380,7 @@ const Analyzer = struct {
 };
 
 // Here it is assumed that left brace is consumed
-pub fn analyze(allocator: Allocator, my_allocator: *data_structures.MyAllocator, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *Node.List, node_lists: *UnpinnedArray(UnpinnedArray(Node.Index))) !Result {
+pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *PinnedArray(Node), node_lists: *UnpinnedArray(UnpinnedArray(Node.Index))) !Result {
     const start = std.time.Instant.now() catch unreachable;
     var analyzer = Analyzer{
         .lexer = lexer_result,

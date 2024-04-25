@@ -118,6 +118,7 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
             .tokens = try PinnedArray(Token).init_with_default_granularity(),
             .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
         },
+        .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
     };
 
     try unit.compile(context);
@@ -3014,6 +3015,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             .tokens = try PinnedArray(Token).init_with_default_granularity(),
             .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
         },
+        .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
     };
 
     try unit.compile(context);
@@ -4617,7 +4619,7 @@ pub const Builder = struct {
 
     fn resolveIntrinsic(builder: *Builder, unit: *Unit, context: *const Context, type_expect: Type.Expect, node_index: Node.Index, side: Side) anyerror!V {
         const node = unit.getNode(node_index);
-        const intrinsic_id: IntrinsicId = @enumFromInt(Node.unwrap(node.right));
+        const intrinsic_id: IntrinsicId = @enumFromInt(@intFromEnum(node.right));
         const argument_node_list = unit.getNodeList(node.left);
 
         switch (intrinsic_id) {
@@ -9604,7 +9606,7 @@ pub const Builder = struct {
         switch (node.id) {
             .intrinsic => {
                 const argument_node_list = unit.getNodeList(node.left);
-                const intrinsic_id: IntrinsicId = @enumFromInt(Node.unwrap(node.right));
+                const intrinsic_id: IntrinsicId = @enumFromInt(@intFromEnum(node.right));
                 switch (intrinsic_id) {
                     .import => {
                         assert(argument_node_list.len == 1);
@@ -16802,7 +16804,7 @@ pub const Enum = struct {
 };
 
 pub const Unit = struct {
-    node_buffer: Node.List = .{},
+    node_buffer: PinnedArray(Node),
     token_buffer: Token.Buffer,
     files: Debug.File.List = .{},
     types: Type.List = .{},
@@ -17153,7 +17155,7 @@ pub const Unit = struct {
     fn getNodeListFromNode(unit: *Unit, node: *const Node) []const Node.Index {
         assert(node.id == .node_list);
         const list_index = node.left;
-        const node_list = unit.node_lists.slice()[Node.unwrap(list_index)];
+        const node_list = unit.node_lists.slice()[@intFromEnum(list_index)];
         return node_list.pointer[0..node_list.length];
     }
 

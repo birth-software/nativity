@@ -110,9 +110,11 @@ pub fn PinnedArray(comptime T: type) type {
             return array.get_unchecked(i);
         }
 
-        pub fn get_index(array: *Array, item: *const T) Index{
-            assert(item - array.pointer > (@divExact(pinned_array_max_size, @sizeOf(T))));
-            return @enumFromInt(item - array.pointer);
+        pub fn get_index(array: *Array, item: *T) Index{
+            const many_item: [*]T = @ptrCast(item);
+            const result = @intFromPtr(many_item) - @intFromPtr(array.pointer);
+            assert(result < pinned_array_max_size);
+            return @enumFromInt(@divExact(result, @sizeOf(T)));
         }
 
         pub fn init(granularity: u32) !Array{
@@ -129,7 +131,7 @@ pub fn PinnedArray(comptime T: type) type {
             return try Array.init(pinned_array_default_granularity);
         }
 
-        pub fn append(array: *Array, item: T) void {
+        pub fn append(array: *Array, item: T) *T {
             if (((array.length + 1) * @sizeOf(T)) & (array.granularity - 1) == 0) {
                 const length: u64 = array.length;
                 assert((length + 1) * @sizeOf(T) <= pinned_array_max_size);
@@ -137,14 +139,16 @@ pub fn PinnedArray(comptime T: type) type {
                 commit(ptr + ((length + 1) * @sizeOf(T)), array.granularity) catch unreachable;
             }
 
-            array.append_with_capacity(item);
+            return array.append_with_capacity(item);
         }
 
-        pub fn append_with_capacity(array: *Array, item: T) void {
+        pub fn append_with_capacity(array: *Array, item: T) *T {
             const index = array.length;
             assert(index * @sizeOf(T) < pinned_array_max_size);
             array.length += 1;
-            array.pointer[index] = item;
+            const ptr = &array.pointer[index];
+            ptr.* = item;
+            return ptr;
         }
     };
 }
