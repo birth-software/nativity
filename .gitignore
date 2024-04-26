@@ -6,3 +6,4 @@ nat/
 *.obj
 Nativity/
 perf.data
+*.old
