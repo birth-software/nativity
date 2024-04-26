@@ -91,85 +91,34 @@ pub fn createContext(allocator: Allocator, my_allocator: *MyAllocator) !*const C
 
 pub fn compileBuildExecutable(context: *const Context, arguments: []const []const u8) !void {
     _ = arguments; // autofix
-    const unit = try context.my_allocator.allocate_one(Unit);
-    unit.* = .{
-        .descriptor = .{
-            .main_package_path = "build.nat",
-            .arch = switch (@import("builtin").cpu.arch) {
-                .x86_64 => .x86_64,
-                .aarch64 => .aarch64,
-                else => |t| @panic(@tagName(t)),
-            },
-            .os = switch (@import("builtin").os.tag) {
-                .linux => .linux,
-                .macos => .macos,
-                else => |t| @panic(@tagName(t)),
-            },
-            .abi = switch (@import("builtin").abi) {
-                .none => .none,
-                .gnu => .gnu,
-                .musl => .musl,
-                else => |t| @panic(@tagName(t)),
-            },
-            .only_parse = false,
-            .executable_path = "nat/build",
-            .object_path = "nat/build.o",
-            .link_libc = @import("builtin").os.tag == .macos,
-            .link_libcpp = false,
-            .optimization = .none,
-            .generate_debug_information = true,
-            .name = "build",
-            .is_test = false,
-            .c_source_files = &.{},
+    const unit = try createUnit(context, .{
+        .main_package_path = "build.nat",
+        .object_path = "nat/build.o",
+        .executable_path = "nat/build",
+        .only_parse = false,
+        .arch = switch (@import("builtin").cpu.arch) {
+            .x86_64 => .x86_64,
+            .aarch64 => .aarch64,
+            else => @compileError("Architecture not supported"),
         },
-        .token_buffer = Token.Buffer{
-            .tokens = try PinnedArray(Token).init_with_default_granularity(),
-            .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
+        .os = switch (@import("builtin").os.tag) {
+            .linux => .linux,
+            .macos => .macos,
+            else => |t| @panic(@tagName(t)),
         },
-        // pinned hashmaps
-        .file_token_offsets = try PinnedHashMap(Token.Range, Debug.File.Index).init(std.mem.page_size),
-        .file_map = try PinnedHashMap([]const u8, Debug.File.Index).init(std.mem.page_size),
-        .identifiers = try PinnedHashMap(u32, []const u8).init(std.mem.page_size),
-        .string_literal_values = try PinnedHashMap(u32, [:0]const u8).init(std.mem.page_size),
-        .string_literal_globals = try PinnedHashMap(u32, *Debug.Declaration.Global).init(std.mem.page_size),
-        .optionals = try PinnedHashMap(Type.Index, Type.Index).init(std.mem.page_size),
-        .pointers = try PinnedHashMap(Type.Pointer, Type.Index).init(std.mem.page_size),
-        .slices = try PinnedHashMap(Type.Slice, Type.Index).init(std.mem.page_size),
-        .arrays = try PinnedHashMap(Type.Array, Type.Index).init(std.mem.page_size),
-        .integers = try PinnedHashMap(Type.Integer, Type.Index).init(std.mem.page_size),
-        .error_unions = try PinnedHashMap(Type.Error.Union.Descriptor, Type.Index).init(std.mem.page_size),
-        .two_structs = try PinnedHashMap([2]Type.Index, Type.Index).init(std.mem.page_size),
-        .fields_array = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-        .name_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-        .external_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-        .type_declarations = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-        .test_functions = try PinnedHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global).init(std.mem.page_size),
-        .code_to_emit = try PinnedHashMap(Function.Definition.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-        // special pinned arrays
-        .types = try Type.List.init_with_default_granularity(),
-        // pinned arrays
-        .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
-        .node_lists = try PinnedArray([]const Node.Index).init_with_default_granularity(),
-        .data_to_emit = try PinnedArray(*Debug.Declaration.Global).init_with_default_granularity(),
-        .files = try PinnedArray(Debug.File).init_with_default_granularity(),
-        .structs = try PinnedArray(Struct).init_with_default_granularity(),
-        .struct_fields = try PinnedArray(Struct.Field).init_with_default_granularity(),
-        .enum_fields = try PinnedArray(Enum.Field).init_with_default_granularity(),
-        .function_definitions = try PinnedArray(Function.Definition).init_with_default_granularity(),
-        .blocks = try PinnedArray(Debug.Block).init_with_default_granularity(),
-        .global_declarations = try PinnedArray(Debug.Declaration.Global).init_with_default_granularity(),
-        .local_declarations = try PinnedArray(Debug.Declaration.Local).init_with_default_granularity(),
-        .argument_declarations = try PinnedArray(Debug.Declaration.Argument).init_with_default_granularity(),
-        .assembly_instructions = try PinnedArray(InlineAssembly.Instruction).init_with_default_granularity(),
-        .function_prototypes = try PinnedArray(Function.Prototype).init_with_default_granularity(),
-        .inline_assembly = try PinnedArray(InlineAssembly).init_with_default_granularity(),
-        .instructions = try PinnedArray(Instruction).init_with_default_granularity(),
-        .basic_blocks = try PinnedArray(BasicBlock).init_with_default_granularity(),
-        .constant_structs = try PinnedArray(V.Comptime.ConstantStruct).init_with_default_granularity(),
-        .constant_arrays = try PinnedArray(V.Comptime.ConstantArray).init_with_default_granularity(),
-        .constant_slices = try PinnedArray(V.Comptime.ConstantSlice).init_with_default_granularity(),
-        .error_fields = try PinnedArray(Type.Error.Field).init_with_default_granularity(),
-    };
+        .abi = switch (@import("builtin").abi) {
+            .none => .none,
+            .gnu => .gnu,
+            .musl => .musl,
+            else => |t| @panic(@tagName(t)),
+        },
+        .optimization = .none,
+        .link_libc = false,
+        .generate_debug_information = true,
+        .name = "build",
+        .is_test = false,
+        .c_source_files = &.{},
+    });
 
     try unit.compile(context);
     const argv: []const []const u8 = &.{ "nat/build", "-compiler_path", context.executable_absolute_path };
@@ -3033,57 +2982,6 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
         slice[executable_path.len + 1] = 'o';
         break :blk slice;
     };
-
-    // const unit = try context.allocator.create(Unit);
-    // unit.* = .{
-    //     .descriptor = .{
-    //         .main_package_path = main_package_path,
-    //         .executable_path = executable_path,
-    //         .object_path = object_file_path,
-    //         .only_parse = only_parse,
-    //         .arch = arch,
-    //         .os = os,
-    //         .abi = abi,
-    //         .optimization = optimization,
-    //         .link_libc = switch (os) {
-    //             .linux => link_libc,
-    //             .macos => true,
-    //             .windows => link_libc,
-    //             // .windows => link_libc,
-    //             // else => unreachable,
-    //         },
-    //         .link_libcpp = false,
-    //         .generate_debug_information = generate_debug_information,
-    //         .name = executable_name,
-    //         .is_test = options.is_test,
-    //         .c_source_files = c_source_files.slice(),
-    //     },
-    //     .token_buffer = Token.Buffer{
-    //         .tokens = try PinnedArray(Token).init_with_default_granularity(),
-    //         .line_offsets = try PinnedArray(u32).init_with_default_granularity(),
-    //     },
-    //     .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
-    //     .node_lists = try PinnedArray([]const Node.Index).init_with_default_granularity(),
-    //     .data_to_emit = try PinnedArray(*Debug.Declaration.Global).init_with_default_granularity(),
-    //     .file_token_offsets = try PinnedHashMap(Token.Range, Debug.File.Index).init(std.mem.page_size),
-    //     .file_map = try PinnedHashMap([]const u8, Debug.File.Index).init(std.mem.page_size),
-    //     .identifiers = try PinnedHashMap(u32, []const u8).init(std.mem.page_size),
-    //     .string_literal_values = try PinnedHashMap(u32, [:0]const u8).init(std.mem.page_size),
-    //     .string_literal_globals = try PinnedHashMap(u32, *Debug.Declaration.Global).init(std.mem.page_size),
-    //     .optionals = try PinnedHashMap(Type.Index, Type.Index).init(std.mem.page_size),
-    //     .pointers = try PinnedHashMap(Type.Pointer, Type.Index).init(std.mem.page_size),
-    //     .slices = try PinnedHashMap(Type.Slice, Type.Index).init(std.mem.page_size),
-    //     .arrays = try PinnedHashMap(Type.Array, Type.Index).init(std.mem.page_size),
-    //     .integers = try PinnedHashMap(Type.Integer, Type.Index).init(std.mem.page_size),
-    //     .error_unions = try PinnedHashMap(Type.Error.Union.Descriptor, Type.Index).init(std.mem.page_size),
-    //     .two_structs = try PinnedHashMap([2]Type.Index, Type.Index).init(std.mem.page_size),
-    //     .fields_array = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-    //     .name_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-    //     .external_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-    //     .type_declarations = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-    //     .test_functions = try PinnedHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global).init(std.mem.page_size),
-    //     .code_to_emit = try PinnedHashMap(Function.Definition.Index, *Debug.Declaration.Global).init(std.mem.page_size),
-    // };
 
     const unit = try createUnit(context, .{
         .main_package_path = main_package_path,
