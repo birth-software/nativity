@@ -3255,7 +3255,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         }
     }
 
-    llvm.debug_info_builder.finalize();
+    if (unit.descriptor.generate_debug_information) {
+        llvm.debug_info_builder.finalize();
+    }
 
     var module_len: usize = 0;
     const module_ptr = llvm.module.toString(&module_len);
