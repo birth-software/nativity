@@ -33,7 +33,7 @@ pub fn main() !void {
     //     assert(arguments.len > 0);
     //     const home_dir = std.posix.getenv("HOME") orelse unreachable;
     //     const timestamp = std.time.milliTimestamp();
-    //     var argument_list = UnpinnedArray(u8){};
+    //     var argument_list = PinnedArray(u8){};
     //     for (arguments) |arg| {
     //         argument_list.append_slice(context.my_allocator, arg) catch {};
     //         argument_list.append(context.my_allocator, ' ') catch {};

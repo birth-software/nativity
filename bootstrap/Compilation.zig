@@ -16,7 +16,6 @@ const first_byte = library.first_byte;
 const first_slice = library.first_slice;
 const starts_with_slice = library.starts_with_slice;
 const PinnedArray = library.PinnedArray;
-const UnpinnedArray = library.UnpinnedArray;
 const BlockList = library.BlockList;
 const MyAllocator = library.MyAllocator;
 const PinnedHashMap = library.PinnedHashMap;
@@ -3966,7 +3965,7 @@ pub const Instruction = union(enum) {
 };
 
 pub const BasicBlock = struct {
-    instructions: UnpinnedArray(Instruction.Index) = .{},
+    instructions: PinnedArray(Instruction.Index),
     predecessors: PinnedArray(BasicBlock.Index) = .{
         .pointer = undefined,
         .length = 0,
@@ -4001,7 +4000,7 @@ pub const Function = struct {
 
     pub const Definition = struct {
         scope: Debug.Scope.Function,
-        basic_blocks: UnpinnedArray(BasicBlock.Index) = .{},
+        basic_blocks: PinnedArray(BasicBlock.Index),
         // TODO: make this more efficient
         type: Type.Index,
         body: Debug.Block.Index,
@@ -4772,7 +4771,7 @@ pub const Builder = struct {
                 const inline_asm = try unit.instructions.append(context.my_allocator, .{
                     .inline_assembly = inline_assembly,
                 });
-                try builder.appendInstruction(unit, context, inline_asm);
+                try builder.appendInstruction(unit, inline_asm);
 
                 return .{
                     .value = .{
@@ -4863,7 +4862,7 @@ pub const Builder = struct {
                                             .source = v,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, store);
+                                    try builder.appendInstruction(unit, store);
 
                                     const load = try unit.instructions.append(context.my_allocator, .{
                                         .load = .{
@@ -4871,7 +4870,7 @@ pub const Builder = struct {
                                             .type = type_index,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
 
                                     return V{
                                         .value = .{ .runtime = load },
@@ -4889,7 +4888,7 @@ pub const Builder = struct {
                                     },
                                 });
 
-                                try builder.appendInstruction(unit, context, instruction);
+                                try builder.appendInstruction(unit, instruction);
 
                                 return .{
                                     .value = .{
@@ -4953,7 +4952,7 @@ pub const Builder = struct {
                         },
                     });
 
-                    try builder.appendInstruction(unit, context, syscall);
+                    try builder.appendInstruction(unit, syscall);
 
                     return .{
                         .value = .{
@@ -4988,7 +4987,7 @@ pub const Builder = struct {
                                         },
                                     };
                                     const min = try unit.instructions.append(context.my_allocator, instruction);
-                                    try builder.appendInstruction(unit, context, min);
+                                    try builder.appendInstruction(unit, min);
 
                                     return .{
                                         .value = .{
@@ -5090,7 +5089,7 @@ pub const Builder = struct {
                                         .arguments = args,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, call);
+                                try builder.appendInstruction(unit, call);
 
                                 return V{
                                     .value = .{
@@ -5147,7 +5146,7 @@ pub const Builder = struct {
                 const trailing_zeroes = try unit.instructions.append(context.my_allocator, .{
                     .trailing_zeroes = argument,
                 });
-                try builder.appendInstruction(unit, context, trailing_zeroes);
+                try builder.appendInstruction(unit, trailing_zeroes);
 
                 return V{
                     .type = argument.type,
@@ -5162,7 +5161,7 @@ pub const Builder = struct {
                 const leading_zeroes = try unit.instructions.append(context.my_allocator, .{
                     .leading_zeroes = argument,
                 });
-                try builder.appendInstruction(unit, context, leading_zeroes);
+                try builder.appendInstruction(unit, leading_zeroes);
 
                 return V{
                     .type = argument.type,
@@ -5221,6 +5220,7 @@ pub const Builder = struct {
                 .type = function_type_index,
                 .body = .null,
                 .has_debug_info = false,
+                .basic_blocks = try PinnedArray(BasicBlock.Index).init(std.mem.page_size),
             });
 
             const function_definition = unit.function_definitions.get(function_definition_index);
@@ -5260,7 +5260,7 @@ pub const Builder = struct {
             const argument_instruction = try unit.instructions.append(context.my_allocator, .{
                 .abi_argument = 0,
             });
-            try builder.appendInstruction(unit, context, argument_instruction);
+            try builder.appendInstruction(unit, argument_instruction);
             const switch_instruction_index = try unit.instructions.append(context.my_allocator, .{
                 .@"switch" = .{
                     .condition = .{
@@ -5272,7 +5272,7 @@ pub const Builder = struct {
                     .block_type = return_type_index,
                 },
             });
-            try builder.appendInstruction(unit, context, switch_instruction_index);
+            try builder.appendInstruction(unit, switch_instruction_index);
             const switch_instruction = &unit.instructions.get(switch_instruction_index).@"switch";
 
             const phi_instruction_index = try unit.instructions.append(context.my_allocator, .{
@@ -5335,7 +5335,7 @@ pub const Builder = struct {
             switch_instruction.else_block = try builder.create_unreachable_block(unit, context);
 
             builder.current_basic_block = exit_block;
-            try builder.appendInstruction(unit, context, phi_instruction_index);
+            try builder.appendInstruction(unit, phi_instruction_index);
 
             const ret = try unit.instructions.append(context.my_allocator, .{
                 .ret = .{
@@ -5345,7 +5345,7 @@ pub const Builder = struct {
                     },
                 },
             });
-            try builder.appendInstruction(unit, context, ret);
+            try builder.appendInstruction(unit, ret);
 
             const global_index = try unit.global_declarations.append(context.my_allocator, .{
                 .declaration = .{
@@ -5608,7 +5608,7 @@ pub const Builder = struct {
                         .new = new_scope,
                     },
                 });
-                try builder.appendInstruction(unit, context, instruction);
+                try builder.appendInstruction(unit, instruction);
             }
         }
 
@@ -5629,7 +5629,7 @@ pub const Builder = struct {
                     .new = new_scope,
                 },
             });
-            try builder.appendInstruction(unit, context, instruction);
+            try builder.appendInstruction(unit, instruction);
         }
 
         builder.setCurrentScope(new_scope);
@@ -5731,7 +5731,8 @@ pub const Builder = struct {
                         .column = debug_info.column,
                     },
                 });
-                try basic_block.instructions.append(context.my_allocator, instruction);
+
+                _ = basic_block.instructions.append(instruction);
 
                 builder.last_check_point = .{
                     .scope = builder.current_scope,
@@ -5753,14 +5754,14 @@ pub const Builder = struct {
 
         const basic_block_index = function_definition.basic_blocks.slice()[0];
         const basic_block = unit.basic_blocks.get(basic_block_index);
-        try basic_block.instructions.insert(context.my_allocator, function_definition.alloca_index, stack);
+        basic_block.instructions.insert(function_definition.alloca_index, stack);
 
         function_definition.alloca_index += 1;
 
         return stack;
     }
 
-    fn appendInstruction(builder: *Builder, unit: *Unit, context: *const Context, instruction_index: Instruction.Index) !void {
+    fn appendInstruction(builder: *Builder, unit: *Unit, instruction_index: Instruction.Index) !void {
         switch (unit.instructions.get(instruction_index).*) {
             .extract_value => |extract_value| switch (unit.types.get(extract_value.expression.type).*) {
                 .pointer => unreachable,
@@ -5773,11 +5774,11 @@ pub const Builder = struct {
         }
         const basic_block = unit.basic_blocks.get(builder.current_basic_block);
         if (!basic_block.terminated) {
-            try basic_block.instructions.append(context.my_allocator, instruction_index);
+            _ = basic_block.instructions.append(instruction_index);
         } else {
             const instruction = unit.instructions.get(instruction_index);
             assert(instruction.* == .pop_scope);
-            try basic_block.instructions.insert(context.my_allocator, basic_block.instructions.length - 1, instruction_index);
+            basic_block.instructions.insert(basic_block.instructions.length - 1, instruction_index);
         }
     }
 
@@ -6370,7 +6371,7 @@ pub const Builder = struct {
                                     },
                                 });
 
-                                try builder.appendInstruction(unit, context, load);
+                                try builder.appendInstruction(unit, load);
 
                                 break :blk .{
                                     .value = .{
@@ -6413,7 +6414,7 @@ pub const Builder = struct {
                                     },
                                 });
 
-                                try builder.appendInstruction(unit, context, instruction);
+                                try builder.appendInstruction(unit, instruction);
 
                                 break :b .{
                                     .value = .{
@@ -6446,7 +6447,7 @@ pub const Builder = struct {
                                     .type = expected_type_index,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, zero_extend);
+                            try builder.appendInstruction(unit, zero_extend);
 
                             return .{
                                 .value = .{
@@ -6463,7 +6464,7 @@ pub const Builder = struct {
                                     .type = expected_type_index,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, sign_extend);
+                            try builder.appendInstruction(unit, sign_extend);
                             return .{
                                 .value = .{
                                     .runtime = sign_extend,
@@ -6480,7 +6481,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, cast_to_const);
+                            try builder.appendInstruction(unit, cast_to_const);
                             return .{
                                 .value = .{
                                     .runtime = cast_to_const,
@@ -6496,7 +6497,7 @@ pub const Builder = struct {
                                     .type = expected_type_index,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, cast_to_zero_termination);
+                            try builder.appendInstruction(unit, cast_to_zero_termination);
 
                             return .{
                                 .value = .{
@@ -6514,7 +6515,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, cast_to_const);
+                            try builder.appendInstruction(unit, cast_to_const);
                             return .{
                                 .value = .{
                                     .runtime = cast_to_const,
@@ -6531,7 +6532,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, cast);
+                            try builder.appendInstruction(unit, cast);
                             return .{
                                 .value = .{
                                     .runtime = cast,
@@ -6548,7 +6549,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, cast);
+                            try builder.appendInstruction(unit, cast);
                             return .{
                                 .value = .{
                                     .runtime = cast,
@@ -6621,7 +6622,7 @@ pub const Builder = struct {
                                         .new_value = v,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, error_union_builder);
+                                try builder.appendInstruction(unit, error_union_builder);
 
                                 const final_error_union = try unit.instructions.append(context.my_allocator, .{
                                     .insert_value = .{
@@ -6642,7 +6643,7 @@ pub const Builder = struct {
                                         },
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, final_error_union);
+                                try builder.appendInstruction(unit, final_error_union);
 
                                 const value = V{
                                     .value = .{
@@ -6673,7 +6674,7 @@ pub const Builder = struct {
                                         .new_value = v,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, error_union_builder);
+                                try builder.appendInstruction(unit, error_union_builder);
 
                                 const final_error_union = try unit.instructions.append(context.my_allocator, .{
                                     .insert_value = .{
@@ -6694,7 +6695,7 @@ pub const Builder = struct {
                                         },
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, final_error_union);
+                                try builder.appendInstruction(unit, final_error_union);
 
                                 const support_alloca = try builder.createStackVariable(unit, context, error_union.union_for_error, null);
 
@@ -6722,7 +6723,7 @@ pub const Builder = struct {
                                         },
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, support_store);
+                                try builder.appendInstruction(unit, support_store);
 
                                 const support_load = try unit.instructions.append(context.my_allocator, .{
                                     .load = .{
@@ -6735,7 +6736,7 @@ pub const Builder = struct {
                                         .type = expected_type_index,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, support_load);
+                                try builder.appendInstruction(unit, support_load);
                                 return .{
                                     .value = .{
                                         .runtime = support_load,
@@ -6754,7 +6755,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, cast);
+                            try builder.appendInstruction(unit, cast);
                             return .{
                                 .value = .{
                                     .runtime = cast,
@@ -6820,7 +6821,7 @@ pub const Builder = struct {
                     .new_value = value,
                 },
             });
-            try builder.appendInstruction(unit, context, error_union_builder);
+            try builder.appendInstruction(unit, error_union_builder);
 
             const final_error_union = try unit.instructions.append(context.my_allocator, .{
                 .insert_value = .{
@@ -6841,7 +6842,7 @@ pub const Builder = struct {
                     },
                 },
             });
-            try builder.appendInstruction(unit, context, final_error_union);
+            try builder.appendInstruction(unit, final_error_union);
 
             const result = V{
                 .value = .{
@@ -6872,7 +6873,7 @@ pub const Builder = struct {
                 .type = .u64,
             },
         });
-        try builder.appendInstruction(unit, context, zero_extend);
+        try builder.appendInstruction(unit, zero_extend);
 
         const or_value = try unit.instructions.append(context.my_allocator, .{
             .integer_binary_operation = .{
@@ -6896,7 +6897,7 @@ pub const Builder = struct {
                 .signedness = .unsigned,
             },
         });
-        try builder.appendInstruction(unit, context, or_value);
+        try builder.appendInstruction(unit, or_value);
 
         if (destination_error_union.union_for_error == destination_error_union.abi) {
             const error_union_builder = try unit.instructions.append(context.my_allocator, .{
@@ -6916,7 +6917,7 @@ pub const Builder = struct {
                     },
                 },
             });
-            try builder.appendInstruction(unit, context, error_union_builder);
+            try builder.appendInstruction(unit, error_union_builder);
 
             const final_error_union = try unit.instructions.append(context.my_allocator, .{
                 .insert_value = .{
@@ -6937,7 +6938,7 @@ pub const Builder = struct {
                     },
                 },
             });
-            try builder.appendInstruction(unit, context, final_error_union);
+            try builder.appendInstruction(unit, final_error_union);
 
             return V{
                 .value = .{
@@ -6984,7 +6985,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, left_load);
+                            try builder.appendInstruction(unit, left_load);
 
                             switch (unit.types.get(expected_right_type).*) {
                                 .integer => |integer| switch (integer.kind) {
@@ -7008,7 +7009,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, instruction);
+                                        try builder.appendInstruction(unit, instruction);
 
                                         break :blk V{
                                             .value = .{
@@ -7029,7 +7030,7 @@ pub const Builder = struct {
                             .source = value_to_store,
                         },
                     });
-                    try builder.appendInstruction(unit, context, store);
+                    try builder.appendInstruction(unit, store);
 
                     return .{
                         .value = .{
@@ -7045,8 +7046,10 @@ pub const Builder = struct {
 
     fn newBasicBlock(builder: *Builder, unit: *Unit, context: *const Context) !BasicBlock.Index {
         const function = unit.function_definitions.get(builder.current_function);
-        const basic_block = try unit.basic_blocks.append(context.my_allocator, .{});
-        try function.basic_blocks.append(context.my_allocator, basic_block);
+        const basic_block = try unit.basic_blocks.append(context.my_allocator, .{
+            .instructions = try PinnedArray(Instruction.Index).init(std.mem.page_size),
+        });
+        _ = function.basic_blocks.append(basic_block);
 
         return basic_block;
     }
@@ -9145,7 +9148,7 @@ pub const Builder = struct {
         const memcpy = try unit.instructions.append(context.my_allocator, .{
             .memcpy = arguments,
         });
-        try builder.appendInstruction(unit, context, memcpy);
+        try builder.appendInstruction(unit, memcpy);
     }
 
     fn emitIntegerCompare(builder: *Builder, unit: *Unit, context: *const Context, left_value: V, right_value: V, integer: Type.Integer, compare_node_id: Node.Id) anyerror!V {
@@ -9177,7 +9180,7 @@ pub const Builder = struct {
                 },
             },
         });
-        try builder.appendInstruction(unit, context, compare);
+        try builder.appendInstruction(unit, compare);
 
         return .{
             .value = .{
@@ -9224,6 +9227,7 @@ pub const Builder = struct {
                 .argument_map = try PinnedHashMap(*Debug.Declaration.Argument, Instruction.Index).init(std.mem.page_size),
             },
             .has_debug_info = true,
+            .basic_blocks = try PinnedArray(BasicBlock.Index).init(std.mem.page_size),
         });
 
         defer builder.current_function = old_function;
@@ -9265,7 +9269,7 @@ pub const Builder = struct {
             const return_pointer_argument = try unit.instructions.append(context.my_allocator, .{
                 .abi_argument = 0,
             });
-            try builder.appendInstruction(unit, context, return_pointer_argument);
+            try builder.appendInstruction(unit, return_pointer_argument);
             function.return_pointer = return_pointer_argument;
         }
 
@@ -9287,7 +9291,7 @@ pub const Builder = struct {
                                 .abi_argument = @intCast(argument_abi.indices[0] + argument_index),
                             });
 
-                            try builder.appendInstruction(unit, context, argument_instruction);
+                            try builder.appendInstruction(unit, argument_instruction);
 
                             argument_abi_instructions[argument_index] = argument_instruction;
                         }
@@ -9343,7 +9347,7 @@ pub const Builder = struct {
                                     },
                                 });
 
-                                try builder.appendInstruction(unit, context, store);
+                                try builder.appendInstruction(unit, store);
 
                                 break :b stack;
                             },
@@ -9398,7 +9402,7 @@ pub const Builder = struct {
                                         .source = source,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, first_store);
+                                try builder.appendInstruction(unit, first_store);
 
                                 const gep = try unit.instructions.append(context.my_allocator, .{
                                     .get_element_pointer = .{
@@ -9418,7 +9422,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "direct_pair"),
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, gep);
+                                try builder.appendInstruction(unit, gep);
 
                                 destination = .{
                                     .value = .{
@@ -9440,7 +9444,7 @@ pub const Builder = struct {
                                         .source = source,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, second_store);
+                                try builder.appendInstruction(unit, second_store);
 
                                 break :b stack;
                             },
@@ -9487,7 +9491,7 @@ pub const Builder = struct {
                                                 },
                                             });
 
-                                            try builder.appendInstruction(unit, context, store);
+                                            try builder.appendInstruction(unit, store);
                                         } else {
                                             const coerced_alloca = try builder.createStackVariable(unit, context, coerced_type_index, null);
                                             const coerced_pointer_type = try unit.getPointerType(context, .{
@@ -9514,7 +9518,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, store);
+                                            try builder.appendInstruction(unit, store);
 
                                             try builder.emitMemcpy(unit, context, .{
                                                 .destination = .{
@@ -9553,7 +9557,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, debug_declare_argument);
+                        try builder.appendInstruction(unit, debug_declare_argument);
 
                         runtime_parameter_count += 1;
                     },
@@ -9578,7 +9582,7 @@ pub const Builder = struct {
                 const old_block = builder.current_basic_block;
                 builder.current_basic_block = builder.return_block;
 
-                try builder.appendInstruction(unit, context, builder.return_phi);
+                try builder.appendInstruction(unit, builder.return_phi);
                 try builder.buildRet(unit, context, .{
                     .value = .{
                         .runtime = builder.return_phi,
@@ -9629,7 +9633,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, insert);
+                                        try builder.appendInstruction(unit, insert);
 
                                         try builder.buildRet(unit, context, .{
                                             .value = .{
@@ -9680,7 +9684,7 @@ pub const Builder = struct {
                                             },
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, return_value);
+                                    try builder.appendInstruction(unit, return_value);
 
                                     phi.addIncoming(.{
                                         .value = .{
@@ -10141,7 +10145,7 @@ pub const Builder = struct {
                                             .type = load_type,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
 
                                     break :right .{
                                         .value = .{
@@ -10278,7 +10282,7 @@ pub const Builder = struct {
                                                 .type = right_value.type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, cast);
+                                        try builder.appendInstruction(unit, cast);
 
                                         const new_left_value = V{
                                             .value = .{
@@ -10540,7 +10544,7 @@ pub const Builder = struct {
                                             else => |t| @panic(@tagName(t)),
                                         };
 
-                                        try builder.appendInstruction(unit, context, instruction);
+                                        try builder.appendInstruction(unit, instruction);
 
                                         break :block .{
                                             .value = .{
@@ -10569,7 +10573,7 @@ pub const Builder = struct {
                                             .is_struct = false,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, gep);
+                                    try builder.appendInstruction(unit, gep);
 
                                     const v = V{
                                         .value = .{ .runtime = gep },
@@ -10767,7 +10771,7 @@ pub const Builder = struct {
                                     .index = 1,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, extract_value);
+                            try builder.appendInstruction(unit, extract_value);
 
                             break :b .{
                                 .value = .{
@@ -10810,7 +10814,7 @@ pub const Builder = struct {
                                             .name = try unit.processIdentifier(context, "slice_end_gep"),
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, gep);
+                                    try builder.appendInstruction(unit, gep);
 
                                     const load = try unit.instructions.append(context.my_allocator, .{
                                         .load = .{
@@ -10829,7 +10833,7 @@ pub const Builder = struct {
                                             .type = Type.usize,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
 
                                     break :b V{
                                         .value = .{
@@ -10896,7 +10900,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, range_compute);
+                        try builder.appendInstruction(unit, range_compute);
 
                         break :b .{
                             .value = .{
@@ -10917,7 +10921,7 @@ pub const Builder = struct {
                                         .index = 0,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, extract_pointer);
+                                try builder.appendInstruction(unit, extract_pointer);
 
                                 const gep = try unit.instructions.append(context.my_allocator, .{
                                     .get_element_pointer = .{
@@ -10928,7 +10932,7 @@ pub const Builder = struct {
                                         .is_struct = false,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, gep);
+                                try builder.appendInstruction(unit, gep);
 
                                 break :slice V{
                                     .value = .{
@@ -10957,7 +10961,7 @@ pub const Builder = struct {
                                                 .type = slice.child_pointer_type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, load);
+                                        try builder.appendInstruction(unit, load);
 
                                         const gep = try unit.instructions.append(context.my_allocator, .{
                                             .get_element_pointer = .{
@@ -10968,7 +10972,7 @@ pub const Builder = struct {
                                                 .is_struct = false,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, gep);
+                                        try builder.appendInstruction(unit, gep);
 
                                         break :slice V{
                                             .value = .{
@@ -10999,7 +11003,7 @@ pub const Builder = struct {
                                                             .type = pointer.type,
                                                         },
                                                     });
-                                                    try builder.appendInstruction(unit, context, load);
+                                                    try builder.appendInstruction(unit, load);
                                                     const gep = try unit.instructions.append(context.my_allocator, .{
                                                         .get_element_pointer = .{
                                                             .pointer = load,
@@ -11009,7 +11013,7 @@ pub const Builder = struct {
                                                             .is_struct = false,
                                                         },
                                                     });
-                                                    try builder.appendInstruction(unit, context, gep);
+                                                    try builder.appendInstruction(unit, gep);
                                                     break :pointer V{
                                                         .value = .{
                                                             .runtime = gep,
@@ -11045,7 +11049,7 @@ pub const Builder = struct {
                                                 .new_value = pointer_value,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, insert_pointer);
+                                        try builder.appendInstruction(unit, insert_pointer);
 
                                         const insert_length = try unit.instructions.append(context.my_allocator, .{
                                             .insert_value = .{
@@ -11059,7 +11063,7 @@ pub const Builder = struct {
                                                 .new_value = len_expression,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, insert_length);
+                                        try builder.appendInstruction(unit, insert_length);
 
                                         break :block V{
                                             .value = .{
@@ -11085,7 +11089,7 @@ pub const Builder = struct {
                                         .index = 0,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, extract_value);
+                                try builder.appendInstruction(unit, extract_value);
 
                                 const pointer_type = slice.child_pointer_type;
                                 const pointer_gep = try unit.instructions.append(context.my_allocator, .{
@@ -11097,7 +11101,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "slice_pointer_gep"),
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, pointer_gep);
+                                try builder.appendInstruction(unit, pointer_gep);
 
                                 const slice_builder = try unit.instructions.append(context.my_allocator, .{
                                     .insert_value = .{
@@ -11116,7 +11120,7 @@ pub const Builder = struct {
                                         },
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, slice_builder);
+                                try builder.appendInstruction(unit, slice_builder);
 
                                 const final_slice = try unit.instructions.append(context.my_allocator, .{
                                     .insert_value = .{
@@ -11131,7 +11135,7 @@ pub const Builder = struct {
                                     },
                                 });
 
-                                try builder.appendInstruction(unit, context, final_slice);
+                                try builder.appendInstruction(unit, final_slice);
 
                                 break :blk .{
                                     .value = .{
@@ -11151,7 +11155,7 @@ pub const Builder = struct {
                                             .name = try unit.processIdentifier(context, "pointer_many_slice"),
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, pointer_gep);
+                                    try builder.appendInstruction(unit, pointer_gep);
 
                                     const pointer_type = try unit.getPointerType(context, .{
                                         .type = pointer.type,
@@ -11186,7 +11190,7 @@ pub const Builder = struct {
                                             },
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, slice_builder);
+                                    try builder.appendInstruction(unit, slice_builder);
 
                                     const final_slice = try unit.instructions.append(context.my_allocator, .{
                                         .insert_value = .{
@@ -11200,7 +11204,7 @@ pub const Builder = struct {
                                             .new_value = len_expression,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, final_slice);
+                                    try builder.appendInstruction(unit, final_slice);
 
                                     break :blk .{
                                         .value = .{
@@ -11221,7 +11225,7 @@ pub const Builder = struct {
                                                 .name = try unit.processIdentifier(context, "array_slice"),
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, pointer_gep);
+                                        try builder.appendInstruction(unit, pointer_gep);
 
                                         const pointer_type = try unit.getPointerType(context, .{
                                             .type = array.type,
@@ -11256,7 +11260,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, slice_builder);
+                                        try builder.appendInstruction(unit, slice_builder);
 
                                         const final_slice = try unit.instructions.append(context.my_allocator, .{
                                             .insert_value = .{
@@ -11270,7 +11274,7 @@ pub const Builder = struct {
                                                 .new_value = len_expression,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, final_slice);
+                                        try builder.appendInstruction(unit, final_slice);
 
                                         break :blk .{
                                             .value = .{
@@ -11288,7 +11292,7 @@ pub const Builder = struct {
                                                     .type = pointer.type,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, load);
+                                            try builder.appendInstruction(unit, load);
 
                                             const pointer_gep = try unit.instructions.append(context.my_allocator, .{
                                                 .get_element_pointer = .{
@@ -11299,7 +11303,7 @@ pub const Builder = struct {
                                                     .name = try unit.processIdentifier(context, "double_many_pointer_slice"),
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, pointer_gep);
+                                            try builder.appendInstruction(unit, pointer_gep);
 
                                             const pointer_type = try unit.getPointerType(context, .{
                                                 .type = child_pointer.type,
@@ -11334,7 +11338,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, slice_builder);
+                                            try builder.appendInstruction(unit, slice_builder);
 
                                             const final_slice = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
@@ -11348,7 +11352,7 @@ pub const Builder = struct {
                                                     .new_value = len_expression,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, final_slice);
+                                            try builder.appendInstruction(unit, final_slice);
 
                                             break :blk .{
                                                 .value = .{
@@ -11365,7 +11369,7 @@ pub const Builder = struct {
                                                         .type = pointer.type,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, load);
+                                                try builder.appendInstruction(unit, load);
 
                                                 const pointer_gep = try unit.instructions.append(context.my_allocator, .{
                                                     .get_element_pointer = .{
@@ -11376,7 +11380,7 @@ pub const Builder = struct {
                                                         .name = try unit.processIdentifier(context, "double_array_slice"),
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, pointer_gep);
+                                                try builder.appendInstruction(unit, pointer_gep);
 
                                                 const pointer_type = try unit.getPointerType(context, .{
                                                     .type = array.type,
@@ -11411,7 +11415,7 @@ pub const Builder = struct {
                                                         },
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, slice_builder);
+                                                try builder.appendInstruction(unit, slice_builder);
 
                                                 const final_slice = try unit.instructions.append(context.my_allocator, .{
                                                     .insert_value = .{
@@ -11425,7 +11429,7 @@ pub const Builder = struct {
                                                         .new_value = len_expression,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, final_slice);
+                                                try builder.appendInstruction(unit, final_slice);
 
                                                 break :blk .{
                                                     .value = .{
@@ -11444,7 +11448,7 @@ pub const Builder = struct {
                                                 .type = pointer.type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, load);
+                                        try builder.appendInstruction(unit, load);
 
                                         const extract_pointer = try unit.instructions.append(context.my_allocator, .{
                                             .extract_value = .{
@@ -11457,7 +11461,7 @@ pub const Builder = struct {
                                                 .index = 0,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, extract_pointer);
+                                        try builder.appendInstruction(unit, extract_pointer);
 
                                         const pointer_gep = try unit.instructions.append(context.my_allocator, .{
                                             .get_element_pointer = .{
@@ -11468,7 +11472,7 @@ pub const Builder = struct {
                                                 .name = try unit.processIdentifier(context, "slice_ptr_gep"),
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, pointer_gep);
+                                        try builder.appendInstruction(unit, pointer_gep);
 
                                         const slice_type = pointer.type;
 
@@ -11489,7 +11493,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, slice_builder);
+                                        try builder.appendInstruction(unit, slice_builder);
 
                                         const final_slice = try unit.instructions.append(context.my_allocator, .{
                                             .insert_value = .{
@@ -11503,7 +11507,7 @@ pub const Builder = struct {
                                                 .new_value = len_expression,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, final_slice);
+                                        try builder.appendInstruction(unit, final_slice);
 
                                         break :blk .{
                                             .value = .{
@@ -11532,7 +11536,7 @@ pub const Builder = struct {
                                         },
                                     });
 
-                                    try builder.appendInstruction(unit, context, cast);
+                                    try builder.appendInstruction(unit, cast);
                                     break :b .{
                                         .value = .{
                                             .runtime = cast,
@@ -11549,7 +11553,7 @@ pub const Builder = struct {
                                         },
                                     });
 
-                                    try builder.appendInstruction(unit, context, cast);
+                                    try builder.appendInstruction(unit, cast);
                                     break :b V{
                                         .value = .{
                                             .runtime = cast,
@@ -11605,7 +11609,7 @@ pub const Builder = struct {
                                 .new_value = global_string_pointer,
                             },
                         });
-                        try builder.appendInstruction(unit, context, slice_builder);
+                        try builder.appendInstruction(unit, slice_builder);
 
                         const len = unit.types.get(string_global.declaration.type).array.count;
 
@@ -11631,7 +11635,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, final_slice);
+                        try builder.appendInstruction(unit, final_slice);
 
                         break :blk .{
                             .value = .{
@@ -11665,7 +11669,7 @@ pub const Builder = struct {
                                         .type = type_index,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, cast);
+                                try builder.appendInstruction(unit, cast);
 
                                 break :blk .{
                                     .value = .{
@@ -11775,7 +11779,7 @@ pub const Builder = struct {
                                                     .type = slice.child_pointer_type,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, cast);
+                                            try builder.appendInstruction(unit, cast);
                                             const slice_builder = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
                                                     .expression = .{
@@ -11793,7 +11797,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, slice_builder);
+                                            try builder.appendInstruction(unit, slice_builder);
 
                                             const final_slice = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
@@ -11816,7 +11820,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, final_slice);
+                                            try builder.appendInstruction(unit, final_slice);
 
                                             break :blk .{
                                                 .value = .{
@@ -11850,7 +11854,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, slice_builder);
+                                            try builder.appendInstruction(unit, slice_builder);
 
                                             const final_slice = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
@@ -11873,7 +11877,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, final_slice);
+                                            try builder.appendInstruction(unit, final_slice);
 
                                             break :blk .{
                                                 .value = .{
@@ -11896,7 +11900,7 @@ pub const Builder = struct {
                                                     .type = slice.child_pointer_type,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, cast);
+                                            try builder.appendInstruction(unit, cast);
 
                                             const slice_builder = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
@@ -11915,7 +11919,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, slice_builder);
+                                            try builder.appendInstruction(unit, slice_builder);
 
                                             const final_slice = try unit.instructions.append(context.my_allocator, .{
                                                 .insert_value = .{
@@ -11938,7 +11942,7 @@ pub const Builder = struct {
                                                     },
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, final_slice);
+                                            try builder.appendInstruction(unit, final_slice);
 
                                             break :blk .{
                                                 .value = .{
@@ -11967,7 +11971,7 @@ pub const Builder = struct {
                                                     .value = v,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, cast);
+                                            try builder.appendInstruction(unit, cast);
                                             break :blk .{
                                                 .value = .{
                                                     .runtime = cast,
@@ -12054,7 +12058,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "indexed_array_gep"),
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, gep);
+                                try builder.appendInstruction(unit, gep);
 
                                 const gep_type = try unit.getPointerType(context, .{
                                     .type = array.type,
@@ -12079,7 +12083,7 @@ pub const Builder = struct {
                                             .type = pointer.type,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
                                     const gep = try unit.instructions.append(context.my_allocator, .{
                                         .get_element_pointer = .{
                                             .pointer = load,
@@ -12089,7 +12093,7 @@ pub const Builder = struct {
                                             .name = try unit.processIdentifier(context, "indexed_many_pointer"),
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, gep);
+                                    try builder.appendInstruction(unit, gep);
 
                                     const gep_type = try unit.getPointerType(context, .{
                                         .type = child_pointer.type,
@@ -12114,7 +12118,7 @@ pub const Builder = struct {
                                                 .type = pointer.type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, load);
+                                        try builder.appendInstruction(unit, load);
 
                                         const gep = try unit.instructions.append(context.my_allocator, .{
                                             .get_element_pointer = .{
@@ -12125,7 +12129,7 @@ pub const Builder = struct {
                                                 .name = try unit.processIdentifier(context, "indexed_pointer_array"),
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, gep);
+                                        try builder.appendInstruction(unit, gep);
 
                                         const gep_type = try unit.getPointerType(context, .{
                                             .type = array.type,
@@ -12152,7 +12156,7 @@ pub const Builder = struct {
                                                     .type = pointer.type,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, load);
+                                            try builder.appendInstruction(unit, load);
 
                                             const gep = try unit.instructions.append(context.my_allocator, .{
                                                 .get_element_pointer = .{
@@ -12163,7 +12167,7 @@ pub const Builder = struct {
                                                     .name = try unit.processIdentifier(context, "many_pointer_integer"),
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, gep);
+                                            try builder.appendInstruction(unit, gep);
 
                                             const gep_type = try unit.getPointerType(context, .{
                                                 .type = child_pointer.type,
@@ -12191,7 +12195,7 @@ pub const Builder = struct {
                                                         .type = pointer.type,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, load);
+                                                try builder.appendInstruction(unit, load);
 
                                                 const pointer_field_index = struct_type.fields[sliceable.pointer];
                                                 const pointer_field = unit.struct_fields.get(pointer_field_index);
@@ -12244,7 +12248,7 @@ pub const Builder = struct {
                                 .type = unit.types.get(gep.type).pointer.type,
                             },
                         });
-                        try builder.appendInstruction(unit, context, load);
+                        try builder.appendInstruction(unit, load);
 
                         break :blk .{
                             .value = .{
@@ -12302,7 +12306,7 @@ pub const Builder = struct {
                                 },
                             },
                         });
-                        try builder.appendInstruction(unit, context, xor);
+                        try builder.appendInstruction(unit, xor);
 
                         break :blk .{
                             .value = .{
@@ -12402,7 +12406,7 @@ pub const Builder = struct {
                                 },
                             },
                         });
-                        try builder.appendInstruction(unit, context, sub);
+                        try builder.appendInstruction(unit, sub);
                         break :block .{
                             .value = .{
                                 .runtime = sub,
@@ -12508,7 +12512,7 @@ pub const Builder = struct {
                                 .id = .equal,
                             },
                         });
-                        try builder.appendInstruction(unit, context, cmp);
+                        try builder.appendInstruction(unit, cmp);
                         const is_null_block = try builder.newBasicBlock(unit, context);
                         const is_not_null_block = try builder.newBasicBlock(unit, context);
                         try builder.branch(unit, context, cmp, is_null_block, is_not_null_block);
@@ -12529,7 +12533,7 @@ pub const Builder = struct {
                                     .type = type_to_expect,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, cast);
+                            try builder.appendInstruction(unit, cast);
 
                             break :block .{
                                 .value = .{
@@ -12570,7 +12574,7 @@ pub const Builder = struct {
                                 .index = 0,
                             },
                         });
-                        try builder.appendInstruction(unit, context, get_pointer);
+                        try builder.appendInstruction(unit, get_pointer);
                         const cmp = try unit.instructions.append(context.my_allocator, .{
                             .integer_compare = .{
                                 .left = .{
@@ -12584,7 +12588,7 @@ pub const Builder = struct {
                                 .id = .equal,
                             },
                         });
-                        try builder.appendInstruction(unit, context, cmp);
+                        try builder.appendInstruction(unit, cmp);
                         const is_null_block = try builder.newBasicBlock(unit, context);
                         const is_not_null_block = try builder.newBasicBlock(unit, context);
                         try builder.branch(unit, context, cmp, is_null_block, is_not_null_block);
@@ -12616,7 +12620,7 @@ pub const Builder = struct {
                                     .type = type_to_expect,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, cast);
+                            try builder.appendInstruction(unit, cast);
 
                             const unwrap = V{
                                 .value = .{
@@ -12629,7 +12633,7 @@ pub const Builder = struct {
 
                             builder.current_basic_block = phi_block;
 
-                            try builder.appendInstruction(unit, context, phi_index);
+                            try builder.appendInstruction(unit, phi_index);
 
                             break :block V{
                                 .value = .{ .runtime = phi_index },
@@ -12644,7 +12648,7 @@ pub const Builder = struct {
                                     .type = type_to_expect,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, cast);
+                            try builder.appendInstruction(unit, cast);
 
                             break :block .{
                                 .value = .{
@@ -12680,7 +12684,7 @@ pub const Builder = struct {
                         .signedness = .unsigned,
                     },
                 });
-                try builder.appendInstruction(unit, context, not);
+                try builder.appendInstruction(unit, not);
 
                 break :block V{
                     .type = value.type,
@@ -12737,7 +12741,7 @@ pub const Builder = struct {
                             .index = 1,
                         },
                     });
-                    try builder.appendInstruction(unit, context, is_error);
+                    try builder.appendInstruction(unit, is_error);
                     const error_block = try builder.newBasicBlock(unit, context);
                     const clean_block = try builder.newBasicBlock(unit, context);
 
@@ -12758,7 +12762,7 @@ pub const Builder = struct {
                                                         .index = 0,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, extract_value);
+                                                try builder.appendInstruction(unit, extract_value);
 
                                                 break :blk V{
                                                     .type = error_union.abi,
@@ -12786,7 +12790,7 @@ pub const Builder = struct {
                                                         .source = value,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, try_store);
+                                                try builder.appendInstruction(unit, try_store);
 
                                                 const union_for_error_gep = try unit.instructions.append(context.my_allocator, .{
                                                     .get_element_pointer = .{
@@ -12806,7 +12810,7 @@ pub const Builder = struct {
                                                         .name = try unit.processIdentifier(context, "union_for_error_gep"),
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, union_for_error_gep);
+                                                try builder.appendInstruction(unit, union_for_error_gep);
 
                                                 const error_load = try unit.instructions.append(context.my_allocator, .{
                                                     .load = .{
@@ -12825,7 +12829,7 @@ pub const Builder = struct {
                                                         .type = error_union.@"error",
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, error_load);
+                                                try builder.appendInstruction(unit, error_load);
                                                 break :err V{
                                                     .value = .{
                                                         .runtime = error_load,
@@ -12847,7 +12851,7 @@ pub const Builder = struct {
                                                         .new_value = error_value,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, error_union_builder);
+                                                try builder.appendInstruction(unit, error_union_builder);
 
                                                 const final_error_union = try unit.instructions.append(context.my_allocator, .{
                                                     .insert_value = .{
@@ -12868,7 +12872,7 @@ pub const Builder = struct {
                                                         },
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, final_error_union);
+                                                try builder.appendInstruction(unit, final_error_union);
 
                                                 break :final V{
                                                     .value = .{
@@ -12899,7 +12903,7 @@ pub const Builder = struct {
                                                         .new_value = error_value,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, error_union_builder);
+                                                try builder.appendInstruction(unit, error_union_builder);
 
                                                 const final_error_union = try unit.instructions.append(context.my_allocator, .{
                                                     .insert_value = .{
@@ -12920,7 +12924,7 @@ pub const Builder = struct {
                                                         },
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, final_error_union);
+                                                try builder.appendInstruction(unit, final_error_union);
 
                                                 const support_alloca = try builder.createStackVariable(unit, context, error_union.union_for_error, null);
 
@@ -12948,7 +12952,7 @@ pub const Builder = struct {
                                                         },
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, support_store);
+                                                try builder.appendInstruction(unit, support_store);
 
                                                 const support_load = try unit.instructions.append(context.my_allocator, .{
                                                     .load = .{
@@ -12961,7 +12965,7 @@ pub const Builder = struct {
                                                         .type = return_type_index,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, support_load);
+                                                try builder.appendInstruction(unit, support_load);
 
                                                 break :final V{
                                                     .value = .{
@@ -12985,7 +12989,7 @@ pub const Builder = struct {
                                                         .index = 0,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, get_error);
+                                                try builder.appendInstruction(unit, get_error);
                                                 break :b V{
                                                     .value = .{
                                                         .runtime = get_error,
@@ -13012,7 +13016,7 @@ pub const Builder = struct {
                                                         .source = value,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, try_store);
+                                                try builder.appendInstruction(unit, try_store);
 
                                                 const union_for_error_gep = try unit.instructions.append(context.my_allocator, .{
                                                     .get_element_pointer = .{
@@ -13032,7 +13036,7 @@ pub const Builder = struct {
                                                         .name = try unit.processIdentifier(context, "union_for_error_gep"),
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, union_for_error_gep);
+                                                try builder.appendInstruction(unit, union_for_error_gep);
 
                                                 const error_load = try unit.instructions.append(context.my_allocator, .{
                                                     .load = .{
@@ -13051,7 +13055,7 @@ pub const Builder = struct {
                                                         .type = error_union.@"error",
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, error_load);
+                                                try builder.appendInstruction(unit, error_load);
                                                 break :err V{
                                                     .value = .{
                                                         .runtime = error_load,
@@ -13107,7 +13111,7 @@ pub const Builder = struct {
                             .index = 0,
                         },
                     });
-                    try builder.appendInstruction(unit, context, result);
+                    try builder.appendInstruction(unit, result);
 
                     const v = V{
                         .value = .{
@@ -13217,7 +13221,7 @@ pub const Builder = struct {
                                 .type = type_index,
                             },
                         });
-                        try builder.appendInstruction(unit, context, zero_extend);
+                        try builder.appendInstruction(unit, zero_extend);
                         var value = V{
                             .value = .{
                                 .runtime = zero_extend,
@@ -13240,7 +13244,7 @@ pub const Builder = struct {
                                     .type = type_index,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, field_zero_extend);
+                            try builder.appendInstruction(unit, field_zero_extend);
 
                             const shift_left = try unit.instructions.append(context.my_allocator, .{
                                 .integer_binary_operation = .{
@@ -13265,7 +13269,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, shift_left);
+                            try builder.appendInstruction(unit, shift_left);
 
                             const merge_or = try unit.instructions.append(context.my_allocator, .{
                                 .integer_binary_operation = .{
@@ -13280,7 +13284,7 @@ pub const Builder = struct {
                                     .right = value,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, merge_or);
+                            try builder.appendInstruction(unit, merge_or);
 
                             value = .{
                                 .value = .{
@@ -13331,7 +13335,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, struct_initialization_instruction);
+                            try builder.appendInstruction(unit, struct_initialization_instruction);
 
                             struct_initialization.value = .{
                                 .runtime = struct_initialization_instruction,
@@ -13445,7 +13449,7 @@ pub const Builder = struct {
                     },
                 });
 
-                try builder.appendInstruction(unit, context, insert_value);
+                try builder.appendInstruction(unit, insert_value);
 
                 array_builder.value = .{
                     .runtime = insert_value,
@@ -13494,7 +13498,7 @@ pub const Builder = struct {
                                                 .name = field.name,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, gep);
+                                        try builder.appendInstruction(unit, gep);
 
                                         const second_load = try unit.instructions.append(context.my_allocator, .{
                                             .load = .{
@@ -13513,7 +13517,7 @@ pub const Builder = struct {
                                                 .type = field.type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, second_load);
+                                        try builder.appendInstruction(unit, second_load);
 
                                         return .{
                                             .callable = .{
@@ -13564,7 +13568,7 @@ pub const Builder = struct {
                                             .type = first_argument_type_index,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
 
                                     return .{
                                         .member = .{
@@ -13678,7 +13682,7 @@ pub const Builder = struct {
                                         .type = pointer.type,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, load);
+                                try builder.appendInstruction(unit, load);
 
                                 const member_resolution = try builder.end_up_resolving_member_call(unit, context, child_pointer.type, .{
                                     .value = .{
@@ -13744,7 +13748,7 @@ pub const Builder = struct {
                                             .type = pointer.type,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
 
                                     break :b .{
                                         .callable = .{
@@ -13877,7 +13881,7 @@ pub const Builder = struct {
                                     .source = argument_value,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, store);
+                            try builder.appendInstruction(unit, store);
 
                             const target_type = unit.types.get(coerced_type_index);
                             const target_alignment = target_type.getAbiAlignment(unit);
@@ -13896,7 +13900,7 @@ pub const Builder = struct {
                                         .type = coerced_type_index,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, load);
+                                try builder.appendInstruction(unit, load);
 
                                 argument_list.appendAssumeCapacity(V{
                                     .value = .{
@@ -13935,7 +13939,7 @@ pub const Builder = struct {
                                         .alignment = alignment,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, load);
+                                try builder.appendInstruction(unit, load);
 
                                 argument_list.appendAssumeCapacity(V{
                                     .value = .{
@@ -13981,7 +13985,7 @@ pub const Builder = struct {
                                         .index = 0,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, extract_0);
+                                try builder.appendInstruction(unit, extract_0);
 
                                 argument_list.appendAssumeCapacity(.{
                                     .value = .{
@@ -13996,7 +14000,7 @@ pub const Builder = struct {
                                         .index = 1,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, extract_1);
+                                try builder.appendInstruction(unit, extract_1);
 
                                 argument_list.appendAssumeCapacity(.{
                                     .value = .{
@@ -14031,7 +14035,7 @@ pub const Builder = struct {
                                             .source = argument_value,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, coerced_store);
+                                    try builder.appendInstruction(unit, coerced_store);
 
                                     break :b coerced_pointer;
                                 } else b: {
@@ -14056,7 +14060,7 @@ pub const Builder = struct {
                                             .source = argument_value,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, store);
+                                    try builder.appendInstruction(unit, store);
 
                                     break :b argument_alloca;
                                 };
@@ -14078,7 +14082,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "direct_pair_gep0"),
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, gep0);
+                                try builder.appendInstruction(unit, gep0);
 
                                 const load0 = try unit.instructions.append(context.my_allocator, .{
                                     .load = .{
@@ -14097,7 +14101,7 @@ pub const Builder = struct {
                                         .type = pair[0],
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, load0);
+                                try builder.appendInstruction(unit, load0);
 
                                 const gep1 = try unit.instructions.append(context.my_allocator, .{
                                     .get_element_pointer = .{
@@ -14117,7 +14121,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "direct_pair_gep1"),
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, gep1);
+                                try builder.appendInstruction(unit, gep1);
 
                                 const load1 = try unit.instructions.append(context.my_allocator, .{
                                     .load = .{
@@ -14136,7 +14140,7 @@ pub const Builder = struct {
                                         .type = pair[1],
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, load1);
+                                try builder.appendInstruction(unit, load1);
 
                                 argument_list.appendAssumeCapacity(V{
                                     .value = .{
@@ -14182,7 +14186,7 @@ pub const Builder = struct {
                                         .source = argument_value,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, store);
+                                try builder.appendInstruction(unit, store);
 
                                 argument_list.appendAssumeCapacity(indirect_value);
                             }
@@ -14204,7 +14208,7 @@ pub const Builder = struct {
                 },
             },
         });
-        try builder.appendInstruction(unit, context, instruction);
+        try builder.appendInstruction(unit, instruction);
 
         if (function_prototype.return_type == .noreturn) {
             try builder.buildTrap(unit, context);
@@ -14218,7 +14222,7 @@ pub const Builder = struct {
                 },
             });
 
-            try builder.appendInstruction(unit, context, load);
+            try builder.appendInstruction(unit, load);
             return .{
                 .value = .{
                     .runtime = load,
@@ -14289,7 +14293,7 @@ pub const Builder = struct {
                 },
             });
 
-            try builder.appendInstruction(unit, context, debug_declare_local);
+            try builder.appendInstruction(unit, debug_declare_local);
 
             const store = try unit.instructions.append(context.my_allocator, .{
                 .store = .{
@@ -14303,7 +14307,7 @@ pub const Builder = struct {
                 },
             });
 
-            try builder.appendInstruction(unit, context, store);
+            try builder.appendInstruction(unit, store);
 
             return stack;
         } else {
@@ -14555,7 +14559,7 @@ pub const Builder = struct {
                                                     .index = 1,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, len_extract_instruction);
+                                            try builder.appendInstruction(unit, len_extract_instruction);
 
                                             break :b V{
                                                 .value = .{
@@ -14603,7 +14607,7 @@ pub const Builder = struct {
                                                 .index = 1,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, len_extract_value);
+                                        try builder.appendInstruction(unit, len_extract_value);
 
                                         break :blk .{
                                             .stack_slot = stack_slot,
@@ -14704,7 +14708,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, load);
+                        try builder.appendInstruction(unit, load);
 
                         const compare = try unit.instructions.append(context.my_allocator, .{
                             .integer_compare = .{
@@ -14719,7 +14723,7 @@ pub const Builder = struct {
                                 .id = .unsigned_less,
                             },
                         });
-                        try builder.appendInstruction(unit, context, compare);
+                        try builder.appendInstruction(unit, compare);
 
                         const body_block = try builder.newBasicBlock(unit, context);
                         const exit_block = try builder.newBasicBlock(unit, context);
@@ -14745,7 +14749,7 @@ pub const Builder = struct {
                                     .type = Type.usize,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, load_i);
+                            try builder.appendInstruction(unit, load_i);
 
                             for (payloads[0..not_range_len], slices) |payload_node_index, slice| {
                                 const pointer_extract_value = try unit.instructions.append(context.my_allocator, .{
@@ -14754,7 +14758,7 @@ pub const Builder = struct {
                                         .index = 0,
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, pointer_extract_value);
+                                try builder.appendInstruction(unit, pointer_extract_value);
 
                                 const slice_type = unit.types.get(slice.type).slice;
 
@@ -14772,7 +14776,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "slice_for_payload"),
                                     },
                                 });
-                                try builder.appendInstruction(unit, context, gep);
+                                try builder.appendInstruction(unit, gep);
 
                                 const is_by_value = true;
                                 const init_instruction = switch (is_by_value) {
@@ -14788,7 +14792,7 @@ pub const Builder = struct {
                                                 .type = slice_type.child_type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, load_gep);
+                                        try builder.appendInstruction(unit, load_gep);
                                         break :vblk load_gep;
                                     },
                                     false => gep,
@@ -14829,7 +14833,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, load_iterator);
+                        try builder.appendInstruction(unit, load_iterator);
 
                         const increment = try unit.instructions.append(context.my_allocator, .{
                             .integer_binary_operation = .{
@@ -14854,7 +14858,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, increment);
+                        try builder.appendInstruction(unit, increment);
 
                         const increment_store = try unit.instructions.append(context.my_allocator, .{
                             .store = .{
@@ -14873,7 +14877,7 @@ pub const Builder = struct {
                             },
                         });
 
-                        try builder.appendInstruction(unit, context, increment_store);
+                        try builder.appendInstruction(unit, increment_store);
 
                         try builder.jump(unit, context, builder.loop_header_block);
 
@@ -14977,7 +14981,7 @@ pub const Builder = struct {
                             .index = 1,
                         },
                     });
-                    try builder.appendInstruction(unit, context, is_error);
+                    try builder.appendInstruction(unit, is_error);
                     const error_block = try builder.newBasicBlock(unit, context);
                     const clean_block = try builder.newBasicBlock(unit, context);
                     try builder.branch(unit, context, is_error, error_block, clean_block);
@@ -14996,7 +15000,7 @@ pub const Builder = struct {
                                     .index = 0,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, error_extract_value);
+                            try builder.appendInstruction(unit, error_extract_value);
                             const error_value = V{
                                 .value = .{
                                     .runtime = error_extract_value,
@@ -15052,7 +15056,7 @@ pub const Builder = struct {
                                     .index = 0,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, no_error_extract_value);
+                            try builder.appendInstruction(unit, no_error_extract_value);
 
                             const value = V{
                                 .value = .{
@@ -15072,7 +15076,7 @@ pub const Builder = struct {
                                 try builder.jump(unit, context, exit_block);
                                 builder.current_basic_block = exit_block;
 
-                                try builder.appendInstruction(unit, context, phi_index);
+                                try builder.appendInstruction(unit, phi_index);
 
                                 return .{
                                     .value = .{
@@ -15119,7 +15123,7 @@ pub const Builder = struct {
                                 },
                             });
 
-                            try builder.appendInstruction(unit, context, pointer_value);
+                            try builder.appendInstruction(unit, pointer_value);
 
                             const condition = try unit.instructions.append(context.my_allocator, .{
                                 .integer_compare = .{
@@ -15139,7 +15143,7 @@ pub const Builder = struct {
                                     .type = slice.child_pointer_type,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, condition);
+                            try builder.appendInstruction(unit, condition);
                             try builder.resolveBranch(unit, context, Type.Expect{ .type = .void }, condition, arguments.taken_expression_node_index, arguments.not_taken_expression_node_index, payload_node.token, optional_expression);
                         } else {
                             unreachable;
@@ -15160,7 +15164,7 @@ pub const Builder = struct {
                                     .type = optional_expression.type,
                                 },
                             });
-                            try builder.appendInstruction(unit, context, condition);
+                            try builder.appendInstruction(unit, condition);
                             try builder.resolveBranch(unit, context, Type.Expect{ .type = .void }, condition, arguments.taken_expression_node_index, arguments.not_taken_expression_node_index, payload_node.token, optional_expression);
                         } else {
                             unreachable;
@@ -15211,7 +15215,7 @@ pub const Builder = struct {
                             .type = not_null_slice,
                         },
                     });
-                    try builder.appendInstruction(unit, context, unwrap);
+                    try builder.appendInstruction(unit, unwrap);
 
                     const emit = true;
                     _ = try builder.emitLocalVariableDeclaration(unit, context, optional_payload_token, .@"const", not_null_slice, .{
@@ -15237,7 +15241,7 @@ pub const Builder = struct {
                             .type = pointer_type,
                         },
                     });
-                    try builder.appendInstruction(unit, context, unwrap);
+                    try builder.appendInstruction(unit, unwrap);
 
                     const emit = true;
                     _ = try builder.emitLocalVariableDeclaration(unit, context, optional_payload_token, .@"const", pointer_type, .{
@@ -15279,7 +15283,7 @@ pub const Builder = struct {
             },
         });
 
-        try builder.appendInstruction(unit, context, br);
+        try builder.appendInstruction(unit, br);
 
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
         const taken_bb = unit.basic_blocks.get(taken_block);
@@ -15296,7 +15300,7 @@ pub const Builder = struct {
             },
         });
 
-        try builder.appendInstruction(unit, context, instruction);
+        try builder.appendInstruction(unit, instruction);
 
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
         const new_bb = unit.basic_blocks.get(new_basic_block);
@@ -15418,7 +15422,7 @@ pub const Builder = struct {
                         .block_type = type_index,
                     },
                 });
-                try builder.appendInstruction(unit, context, switch_instruction_index);
+                try builder.appendInstruction(unit, switch_instruction_index);
 
                 const switch_instruction = &unit.instructions.get(switch_instruction_index).@"switch";
                 const phi_info: ?PhiInfo = switch (unit.types.get(type_index).*) {
@@ -15552,7 +15556,7 @@ pub const Builder = struct {
                     const phi_instruction = &unit.instructions.get(phi.instruction).phi;
                     if (phi_instruction.values.len > 0) {
                         builder.current_basic_block = phi.block;
-                        try builder.appendInstruction(unit, context, phi.instruction);
+                        try builder.appendInstruction(unit, phi.instruction);
 
                         return V{
                             .value = .{
@@ -15680,7 +15684,7 @@ pub const Builder = struct {
                                         },
                                     });
 
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
                                     break :v .{
                                         .value = .{
                                             .runtime = load,
@@ -15832,7 +15836,7 @@ pub const Builder = struct {
                                     }),
                                 },
                             });
-                            try builder.appendInstruction(unit, context, gep);
+                            try builder.appendInstruction(unit, gep);
 
                             const gep_value = V{
                                 .value = .{
@@ -15856,7 +15860,7 @@ pub const Builder = struct {
                                             .type = field_type,
                                         },
                                     });
-                                    try builder.appendInstruction(unit, context, load);
+                                    try builder.appendInstruction(unit, load);
 
                                     break :b .{
                                         .value = .{
@@ -15898,7 +15902,7 @@ pub const Builder = struct {
                                                     .type = pointer.type,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, load);
+                                            try builder.appendInstruction(unit, load);
 
                                             // GEP because this is still a pointer
                                             const gep = try unit.instructions.append(context.my_allocator, .{
@@ -15919,7 +15923,7 @@ pub const Builder = struct {
                                                     .name = field.name,
                                                 },
                                             });
-                                            try builder.appendInstruction(unit, context, gep);
+                                            try builder.appendInstruction(unit, gep);
 
                                             const mutability = child_pointer.mutability;
                                             const gep_pointer_type = try unit.getPointerType(context, .{
@@ -15945,7 +15949,7 @@ pub const Builder = struct {
                                                             .type = field.type,
                                                         },
                                                     });
-                                                    try builder.appendInstruction(unit, context, field_load);
+                                                    try builder.appendInstruction(unit, field_load);
 
                                                     break :right .{
                                                         .value = .{
@@ -15991,7 +15995,7 @@ pub const Builder = struct {
                                                 .name = field.name,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, gep);
+                                        try builder.appendInstruction(unit, gep);
 
                                         const gep_value = V{
                                             .value = .{
@@ -16015,7 +16019,7 @@ pub const Builder = struct {
                                                     },
                                                 });
 
-                                                try builder.appendInstruction(unit, context, load);
+                                                try builder.appendInstruction(unit, load);
 
                                                 break :b V{
                                                     .value = .{
@@ -16049,7 +16053,7 @@ pub const Builder = struct {
                                                 .type = pointer.type,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, load);
+                                        try builder.appendInstruction(unit, load);
 
                                         var bit_offset: u32 = 0;
                                         for (fields[0..i]) |fi| {
@@ -16084,7 +16088,7 @@ pub const Builder = struct {
                                                         .signedness = integer.signedness,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, shl);
+                                                try builder.appendInstruction(unit, shl);
 
                                                 break :shl shl;
                                             },
@@ -16111,7 +16115,7 @@ pub const Builder = struct {
                                                         .type = field.type,
                                                     },
                                                 });
-                                                try builder.appendInstruction(unit, context, truncate);
+                                                try builder.appendInstruction(unit, truncate);
                                                 break :b V{
                                                     .value = .{
                                                         .runtime = truncate,
@@ -16149,7 +16153,7 @@ pub const Builder = struct {
                                 .type = ti,
                             },
                         });
-                        try builder.appendInstruction(unit, context, cast);
+                        try builder.appendInstruction(unit, cast);
 
                         return .{
                             .value = .{
@@ -16206,7 +16210,7 @@ pub const Builder = struct {
                                 .type = ti,
                             },
                         });
-                        try builder.appendInstruction(unit, context, cast);
+                        try builder.appendInstruction(unit, cast);
 
                         return .{
                             .value = .{
@@ -16237,7 +16241,7 @@ pub const Builder = struct {
                                                 .new_value = result,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, error_union_builder);
+                                        try builder.appendInstruction(unit, error_union_builder);
 
                                         const final_error_union = try unit.instructions.append(context.my_allocator, .{
                                             .insert_value = .{
@@ -16258,7 +16262,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, final_error_union);
+                                        try builder.appendInstruction(unit, final_error_union);
 
                                         return .{
                                             .value = .{
@@ -16288,7 +16292,7 @@ pub const Builder = struct {
                                                 .new_value = result,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, error_union_builder);
+                                        try builder.appendInstruction(unit, error_union_builder);
 
                                         const final_error_union = try unit.instructions.append(context.my_allocator, .{
                                             .insert_value = .{
@@ -16309,7 +16313,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, final_error_union);
+                                        try builder.appendInstruction(unit, final_error_union);
 
                                         const support_alloca = try builder.createStackVariable(unit, context, error_union.union_for_error, null);
 
@@ -16337,7 +16341,7 @@ pub const Builder = struct {
                                                 },
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, support_store);
+                                        try builder.appendInstruction(unit, support_store);
 
                                         const support_load = try unit.instructions.append(context.my_allocator, .{
                                             .load = .{
@@ -16350,7 +16354,7 @@ pub const Builder = struct {
                                                 .type = ti,
                                             },
                                         });
-                                        try builder.appendInstruction(unit, context, support_load);
+                                        try builder.appendInstruction(unit, support_load);
                                         return .{
                                             .value = .{
                                                 .runtime = support_load,
@@ -16374,7 +16378,7 @@ pub const Builder = struct {
                                 .type = ti,
                             },
                         });
-                        try builder.appendInstruction(unit, context, zero_extend);
+                        try builder.appendInstruction(unit, zero_extend);
 
                         return .{
                             .value = .{
@@ -16501,13 +16505,13 @@ pub const Builder = struct {
 
     fn buildUnreachable(builder: *Builder, unit: *Unit, context: *const Context) !void {
         const instruction = try unit.instructions.append(context.my_allocator, .@"unreachable");
-        try builder.appendInstruction(unit, context, instruction);
+        try builder.appendInstruction(unit, instruction);
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
     }
 
     fn buildTrap(builder: *Builder, unit: *Unit, context: *const Context) !void {
         const instruction = try unit.instructions.append(context.my_allocator, .trap);
-        try builder.appendInstruction(unit, context, instruction);
+        try builder.appendInstruction(unit, instruction);
 
         try builder.buildUnreachable(unit, context);
     }
@@ -16552,7 +16556,7 @@ pub const Builder = struct {
                             .source = value,
                         },
                     });
-                    try builder.appendInstruction(unit, context, store);
+                    try builder.appendInstruction(unit, store);
 
                     const target_type = unit.types.get(struct_type_index);
                     const target_size = target_type.getAbiSize(unit);
@@ -16576,7 +16580,7 @@ pub const Builder = struct {
                                 .type = struct_type_index,
                             },
                         });
-                        try builder.appendInstruction(unit, context, load);
+                        try builder.appendInstruction(unit, load);
 
                         break :b V{
                             .value = .{
@@ -16615,7 +16619,7 @@ pub const Builder = struct {
                                 .alignment = alignment,
                             },
                         });
-                        try builder.appendInstruction(unit, context, load);
+                        try builder.appendInstruction(unit, load);
 
                         break :b V{
                             .value = .{
@@ -16639,7 +16643,7 @@ pub const Builder = struct {
                         .source = value,
                     },
                 });
-                try builder.appendInstruction(unit, context, store);
+                try builder.appendInstruction(unit, store);
                 const void_value = V{
                     .value = .{
                         .@"comptime" = .void,
@@ -16672,7 +16676,7 @@ pub const Builder = struct {
                         .source = value,
                     },
                 });
-                try builder.appendInstruction(unit, context, store);
+                try builder.appendInstruction(unit, store);
 
                 const target_type = unit.types.get(coerced_type_index);
                 const target_alignment = target_type.getAbiAlignment(unit);
@@ -16691,7 +16695,7 @@ pub const Builder = struct {
                             .type = coerced_type_index,
                         },
                     });
-                    try builder.appendInstruction(unit, context, load);
+                    try builder.appendInstruction(unit, load);
 
                     break :b V{
                         .value = .{
@@ -16730,7 +16734,7 @@ pub const Builder = struct {
                             .alignment = alignment,
                         },
                     });
-                    try builder.appendInstruction(unit, context, load);
+                    try builder.appendInstruction(unit, load);
 
                     break :b V{
                         .value = .{
@@ -16745,7 +16749,7 @@ pub const Builder = struct {
         const ret = try unit.instructions.append(context.my_allocator, .{
             .ret = abi_value,
         });
-        try builder.appendInstruction(unit, context, ret);
+        try builder.appendInstruction(unit, ret);
         unit.basic_blocks.get(builder.current_basic_block).terminated = true;
     }
 
@@ -16892,7 +16896,7 @@ pub const Builder = struct {
                 .name = try unit.processIdentifier(context, "slice_pointer_access"),
             },
         });
-        try builder.appendInstruction(unit, context, gep);
+        try builder.appendInstruction(unit, gep);
 
         const pointer_to_slice_pointer = try unit.getPointerType(context, .{
             .type = sliceable_pointer_type_index,
@@ -16913,7 +16917,7 @@ pub const Builder = struct {
                 .type = sliceable_pointer_type_index,
             },
         });
-        try builder.appendInstruction(unit, context, pointer_load);
+        try builder.appendInstruction(unit, pointer_load);
 
         const slice_pointer_gep = try unit.instructions.append(context.my_allocator, .{
             .get_element_pointer = .{
@@ -16924,7 +16928,7 @@ pub const Builder = struct {
                 .name = try unit.processIdentifier(context, "indexed_slice_gep"),
             },
         });
-        try builder.appendInstruction(unit, context, slice_pointer_gep);
+        try builder.appendInstruction(unit, slice_pointer_gep);
 
         return .{
             .value = .{

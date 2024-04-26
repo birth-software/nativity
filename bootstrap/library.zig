@@ -218,6 +218,16 @@ pub fn PinnedArray(comptime T: type) type {
             array.length += count;
             @memcpy(array.pointer[index..][0..count], items);
         }
+
+        pub fn insert(array: *@This(), index: u32, item: T) void {
+            assert(index < array.length);
+            array.ensure_capacity(1);
+            const src = array.slice()[index..];
+            array.length += 1;
+            const dst = array.slice()[index + 1..];
+            copy_backwards(T, dst, src);
+            array.slice()[index] = item;
+        }
     };
 }
 
