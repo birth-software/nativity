@@ -126,12 +126,17 @@ const pinned_array_default_granularity = pinned_array_page_size;
 
 // This must be used with big arrays, which are not resizeable (can't be cleared)
 pub fn PinnedArray(comptime T: type) type {
+    return PinnedArrayAdvanced(T, null);
+}
+
+// This must be used with big arrays, which are not resizeable (can't be cleared)
+pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
     return struct {
         pointer: [*]T = @constCast((&[_]T{}).ptr),
         length: u32 = 0,
         granularity: u32 = 0,
 
-        pub const Index = enum(u32) {
+        pub const Index = if (MaybeIndex) |I| getIndexForType(T, I) else enum(u32) {
             null = 0xffff_ffff,
             _,
         };
@@ -197,6 +202,10 @@ pub fn PinnedArray(comptime T: type) type {
             return array.append_with_capacity(item);
         }
 
+        pub fn append_index(array: *Array, item: T) Index {
+            return array.get_index(array.append(item));
+        }
+
         pub fn append_slice(array: *Array, items: []const T) void {
             array.ensure_capacity(@intCast(items.len));
             array.append_slice_with_capacity(items);
@@ -251,97 +260,15 @@ pub fn commit(bytes: [*]u8, size: u64) !void {
     };
 }
 
-pub fn BlockList(comptime T: type, comptime E: type) type {
-    const item_count = 64;
-
-    return struct {
-        blocks: UnpinnedArray(*Block) = .{},
-        len: usize = 0,
-
-        const Block = BoundedArray(T, item_count);
-        const List = @This();
-
-        pub const Index = getIndexForType(T, E);
-        pub const ElementIndex = Index.Index;
-
-        pub fn wrapSplit(block: usize, element: usize) ElementIndex {
-            return @enumFromInt(block * item_count + element);
-        }
-
-        pub fn get(list: *List, index: ElementIndex) *T {
-            assert(index != .null);
-            const i: u32 = @intFromEnum(index);
-            const block_index = i / item_count;
-            const element_index = i % item_count;
-            assert(block_index < list.blocks.length);
-            const block = list.blocks.pointer[block_index];
-            const block_slice = block.buffer[0..block.len];
-            const element = &block_slice[element_index];
-            return element;
-        }
-
-        pub fn append(list: *List, allocator: *MyAllocator, element: T) !ElementIndex {
-            const result = try list.addOne(allocator);
-            list.get(result).* = element;
-            return result;
-        }
-
-        pub fn addOne(list: *List, allocator: *MyAllocator) !ElementIndex {
-            const block_index = try list.getFreeBlock(allocator);
-            assert(block_index < list.blocks.length);
-            const block = list.blocks.pointer[block_index];
-            const index = block.len;
-            _ = try block.addOne();
-            list.len += 1;
-            return @enumFromInt(block_index * item_count + index);
-        }
-
-        fn getFreeBlock(list: *List, allocator: *MyAllocator) !usize {
-            for (list.blocks.slice(), 0..) |block, i| {
-                block.ensureUnusedCapacity(1) catch continue;
-                return i;
-            } else {
-                const new_block = try allocator.allocate_one(Block);
-                new_block.* = .{};
-                const block_index = list.blocks.length;
-                try list.blocks.append(allocator, new_block);
-                return block_index;
-            }
-        }
-
-        pub fn indexOf(list: *List, elem: *const T) ElementIndex {
-            const address = @intFromPtr(elem);
-            for (list.blocks.items, 0..) |block, block_index| {
-                const base = @intFromPtr(&block.buffer[0]);
-                const top = base + @sizeOf(T) * item_count;
-                if (address >= base and address < top) {
-                    const result: u32 = @intCast(block_index * item_count + @divExact(address - base, @sizeOf(T)));
-                    return Index.wrap(result);
-                }
-            }
-
-            @panic("not found");
-        }
-    };
-}
-
 pub fn getIndexForType(comptime T: type, comptime E: type) type {
     assert(@typeInfo(E) == .Enum);
     _ = T;
-    const MAX = std.math.maxInt(IndexType);
+    const MAX = std.math.maxInt(u32);
 
     const EnumField = std.builtin.Type.EnumField;
     comptime var fields: []const EnumField = &.{};
     // comptime var enum_value: comptime_int = 0;
     fields = fields ++ @typeInfo(E).Enum.fields;
-
-    // for (names) |name| {
-    //     fields = fields ++ [1]EnumField{.{
-    //         .name = name,
-    //         .value = enum_value,
-    //     }};
-    //     enum_value += 1;
-    // }
 
     fields = fields ++ [1]EnumField{.{
         .name = "null",
@@ -350,47 +277,17 @@ pub fn getIndexForType(comptime T: type, comptime E: type) type {
 
     const Result = @Type(.{
         .Enum = .{
-            .tag_type = IndexType,
+            .tag_type = u32,
             .fields = fields,
             .decls = &.{},
             .is_exhaustive = false,
         },
     });
 
-    return struct {
-        pub const Index = Result;
-
-        pub fn unwrap(this: Index) IndexType {
-            assert(this != .null);
-            return @intFromEnum(this);
-        }
-
-        pub fn wrap(value: IndexType) Index {
-            assert(value < MAX);
-            return @enumFromInt(value);
-        }
-
-        pub fn addInt(this: Index, value: IndexType) Index {
-            const this_int = @intFromEnum(this);
-            return @enumFromInt(this_int + value);
-        }
-
-        pub fn subInt(this: Index, value: IndexType) IndexType {
-            const this_int = @intFromEnum(this);
-            return this_int - value;
-        }
-
-        pub fn add(a: Index, b: Index) Index {
-            return @enumFromInt(@intFromEnum(a) + @intFromEnum(b));
-        }
-
-        pub fn sub(a: Index, b: Index) IndexType {
-            return @intFromEnum(a) - @intFromEnum(b);
-        }
-    };
+    return Result;
 }
 
-pub fn my_hash(bytes: []const u8) IndexType {
+pub fn my_hash(bytes: []const u8) u32 {
     const fnv_offset = 14695981039346656037;
     const fnv_prime = 1099511628211;
     var result: u64 = fnv_offset;
@@ -451,12 +348,6 @@ pub fn byte_equal_terminated(a: [*:0]const u8, b: [*:0]const u8) bool {
     const b_slice = span(b);
     return byte_equal(a_slice, b_slice);
 }
-
-const MapResult = struct {
-    key_pointer: *anyopaque,
-    value_pointer: *anyopaque,
-    capacity: IndexType,
-};
 
 const pinned_hash_map_page_size = 2 * 1024 * 1024;
 const pinned_hash_map_max_size = std.math.maxInt(u32) - pinned_hash_map_page_size;
@@ -532,7 +423,7 @@ pub fn PinnedHashMap(comptime K: type, comptime V: type) type {
             map.put_at_with_capacity(len, key, value);
         }
 
-        fn put_at_with_capacity(map: *@This(), index: IndexType, key: K, value: V) void {
+        fn put_at_with_capacity(map: *@This(), index: u32, key: K, value: V) void {
             map.length += 1;
             assert(index < map.length);
             map.key_pointer[index] = key;
@@ -702,105 +593,6 @@ pub const PageAllocator = struct {
         }
     }
 };
-
-pub const IndexType = if (@sizeOf(usize) >= 8) u32 else usize;
-
-const ArrayCapacity = struct {
-    pointer: *anyopaque,
-    capacity: IndexType,
-};
-
-fn ensure_capacity_array(allocator: *MyAllocator, current_capacity: IndexType, desired_capacity: IndexType, pointer: [*]u8, length: IndexType, element_size: IndexType, element_alignment: u16) !ArrayCapacity {
-    var new_capacity = @max(current_capacity, initial_item_count);
-    while (new_capacity < desired_capacity) {
-        new_capacity *= factor;
-    }
-    if (new_capacity > current_capacity) {
-        const old_byte_slice = pointer[0 .. length * element_size];
-        const new_byte_capacity = new_capacity * element_size;
-        const new_slice = try allocator.reallocate(old_byte_slice, new_byte_capacity, element_alignment);
-        return .{
-            .pointer = new_slice.ptr,
-            .capacity = new_capacity,
-        };
-    } else {
-        return .{
-            .pointer = pointer,
-            .capacity = current_capacity,
-        };
-    }
-}
-
-const initial_item_count = 16;
-const factor = 2;
-
-pub fn UnpinnedArray(comptime T: type) type {
-    return struct {
-        pointer: [*]T = undefined,
-        length: IndexType = 0,
-        capacity: IndexType = 0,
-
-        pub fn initialize_with_capacity(allocator: *MyAllocator, item_count: IndexType) !@This() {
-            var array = @This(){};
-            try array.ensure_capacity(allocator, item_count);
-            return array;
-        }
-
-        pub fn ensure_capacity(array: *@This(), allocator: *MyAllocator, desired_capacity: IndexType) !void {
-            const result = try ensure_capacity_array(allocator, array.capacity, desired_capacity, @ptrCast(array.pointer), array.length, @sizeOf(T), @alignOf(T));
-            array.pointer = @ptrCast(@alignCast(result.pointer));
-            array.capacity = result.capacity;
-        }
-
-        pub fn append(array: *@This(), allocator: *MyAllocator, item: T) !void {
-            try array.ensure_capacity(allocator, array.length + 1);
-            array.append_with_capacity(item);
-        }
-
-        pub fn append_slice(array: *@This(), allocator: *MyAllocator, items: []const T) !void {
-            try array.ensure_capacity(allocator, @intCast(array.length + items.len));
-            @memcpy(array.pointer[array.length..][0..items.len], items);
-            array.length += @intCast(items.len);
-        }
-
-        pub fn append_with_capacity(array: *@This(), item: T) void {
-            assert(array.length < array.capacity);
-            array.pointer[array.length] = item;
-            array.length += 1;
-        }
-
-        pub fn slice(array: *@This()) []T {
-            return array.pointer[0..array.length];
-        }
-
-        pub fn insert(array: *@This(), allocator: *MyAllocator, index: IndexType, item: T) !void {
-            assert(index < array.length);
-            if (array.length + 1 <= array.capacity) {
-                const after_count = array.length - index;
-                copy_backwards(T, array.pointer[index + 1 ..][0..after_count], array.pointer[index..][0..after_count]);
-            } else {
-                const new_capacity = array.capacity * 2;
-                const new_slice = try allocator.allocate(new_capacity * @sizeOf(T), @alignOf(T));
-                const new_typed_slice: []T = @as([*]T, @ptrCast(@alignCast(new_slice.ptr)))[0..new_capacity];
-                @memcpy(new_typed_slice[0..index], array.pointer[0..index]);
-                const after_count = array.length - index;
-                @memcpy(new_typed_slice[index + 1 ..][0..after_count], array.pointer[index..][0..after_count]);
-                try allocator.free(@as([*]u8, @ptrCast(@alignCast(array.slice().ptr)))[0 .. array.capacity * @sizeOf(T)]);
-                array.pointer = new_typed_slice.ptr;
-                array.capacity = new_capacity;
-            }
-
-            array.pointer[index] = item;
-            array.length += 1;
-        }
-
-        pub fn pop(array: *@This()) T {
-            assert(array.length > 0);
-            array.length -= 1;
-            return array.pointer[array.length];
-        }
-    };
-}
 
 fn copy_backwards(comptime T: type, destination: []T, source: []const T) void {
     @setRuntimeSafety(false);

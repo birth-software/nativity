@@ -34,7 +34,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     switch (@import("builtin").os.tag) {
         .macos => {
             _ = argv.append("-dynamic");
-            argv.append_slice(context.my_allocator, &.{ "-platform_version", "macos", "13.4.1", "13.3" });
+            argv.append_slice(&.{ "-platform_version", "macos", "13.4.1", "13.3" });
             _ = argv.append("-arch");
             _ = argv.append(switch (@import("builtin").cpu.arch) {
                 .aarch64 => "arm64",
