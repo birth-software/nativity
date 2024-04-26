@@ -80,6 +80,12 @@ pub const Arena = struct {
         const result: [*]T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T) * count)));
         return result[0..count];
     }
+
+    pub fn duplicate_bytes(arena: *Arena, bytes: []const u8) ![]u8 {
+        const slice = try arena.new_array(u8, bytes.len);
+        @memcpy(slice, bytes);
+        return slice;
+    }
 };
 
 pub fn DynamicBoundedArray(comptime T: type) type {
@@ -487,112 +493,6 @@ pub fn enumFromString(comptime E: type, string: []const u8) ?E {
 }
 
 extern fn pthread_jit_write_protect_np(enabled: bool) void;
-
-pub fn allocate_virtual_memory(size: usize, flags: packed struct {
-    executable: bool = false,
-}) ![]align(page_size) u8 {
-    return switch (os) {
-        .windows => blk: {
-            const windows = std.os.windows;
-            break :blk @as([*]align(page_size) u8, @ptrCast(@alignCast(try windows.VirtualAlloc(null, size, windows.MEM_COMMIT | windows.MEM_RESERVE, windows.PAGE_EXECUTE_READWRITE))))[0..size];
-        },
-        .linux, .macos => |os_tag| blk: {
-            const jit = switch (os_tag) {
-                .macos => 0x800,
-                .linux => 0,
-                else => @compileError("OS not supported"),
-            };
-            _ = jit; // autofix
-            const execute_flag: switch (os_tag) {
-                .linux => u32,
-                .macos => c_int,
-                else => @compileError("OS not supported"),
-            } = if (flags.executable) std.posix.PROT.EXEC else 0;
-            const protection_flags: u32 = @intCast(std.posix.PROT.READ | std.posix.PROT.WRITE | execute_flag);
-
-            const result = try std.posix.mmap(null, size, protection_flags, .{
-                .TYPE = .PRIVATE,
-                .ANONYMOUS = true,
-            }, -1, 0);
-            if (arch == .aarch64 and os == .macos) {
-                if (flags.executable) {
-                    pthread_jit_write_protect_np(false);
-                }
-            }
-
-            break :blk result;
-        },
-        else => @compileError("OS not supported"),
-    };
-}
-
-pub fn free_virtual_memory(slice: []align(page_size) const u8) void {
-    switch (os) {
-        .windows => {
-            std.os.windows.VirtualFree(@constCast(@ptrCast(slice.ptr)), slice.len, std.os.windows.MEM_RELEASE);
-        },
-        else => {
-            std.posix.munmap(slice);
-        },
-    }
-}
-
-pub const MyAllocator = struct {
-    handler: *const fn (allocator: *MyAllocator, old_ptr: ?[*]u8, old_size: usize, new_size: usize, alignment: u16) Error![*]u8,
-
-    pub fn allocate_one(allocator: *MyAllocator, comptime T: type) !*T {
-        const slice = try allocator.allocate(@sizeOf(T), @alignOf(T));
-        assert(slice.len == @sizeOf(T));
-        return @ptrCast(@alignCast(&slice.ptr[0]));
-    }
-
-    pub fn allocate(allocator: *MyAllocator, size: usize, alignment: u16) ![]u8 {
-        const ptr = try allocator.handler(allocator, null, 0, size, alignment);
-        return ptr[0..size];
-    }
-
-    pub fn free(allocator: *MyAllocator, bytes: []u8) !void {
-        _ = try allocator.handler(allocator, bytes.ptr, bytes.len, 0, 0);
-    }
-
-    pub fn reallocate(allocator: *MyAllocator, bytes: []u8, size: usize, alignment: u16) ![]u8 {
-        const new_ptr = try allocator.handler(allocator, bytes.ptr, bytes.len, size, alignment);
-        return new_ptr[0..size];
-    }
-
-    pub fn duplicate_bytes(allocator: *MyAllocator, bytes: []const u8) ![]u8 {
-        const slice = try allocator.allocate(bytes.len, 0);
-        @memcpy(slice, bytes);
-        return slice;
-    }
-
-    const Error = error{
-        allocation_failed,
-    };
-};
-
-pub const PageAllocator = struct {
-    allocator: MyAllocator = .{ .handler = handler },
-
-    fn handler(allocator: *MyAllocator, maybe_old_ptr: ?[*]u8, old_size: usize, new_size: usize, alignment: u16) MyAllocator.Error![*]u8 {
-        _ = allocator; // autofix
-        _ = alignment; // autofix
-        const maybe_new_slice: ?[]u8 = if (new_size > 0) allocate_virtual_memory(new_size, .{}) catch return MyAllocator.Error.allocation_failed else null;
-
-        if (maybe_old_ptr) |old_ptr| {
-            const old_slice = old_ptr[0..old_size];
-            if (maybe_new_slice) |new_slice| {
-                @memcpy(new_slice[0..old_size], old_slice);
-                free_virtual_memory(@ptrCast(@alignCast(old_slice)));
-                return new_slice.ptr;
-            } else {
-                return old_slice.ptr;
-            }
-        } else {
-            return (maybe_new_slice orelse unreachable).ptr;
-        }
-    }
-};
 
 fn copy_backwards(comptime T: type, destination: []T, source: []const T) void {
     @setRuntimeSafety(false);

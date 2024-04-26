@@ -1378,7 +1378,7 @@ pub const LLVM = struct {
                                 .unsigned => 'u',
                             };
 
-                            break :b try context.my_allocator.duplicate_bytes(slice);
+                            break :b try context.arena.duplicate_bytes(slice);
                         },
                         .bool => "bool",
                         else => |t| @panic(@tagName(t)),
@@ -2638,7 +2638,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                     literal_slice[1] = '$';
                                                     literal_slice[2] = '0';
                                                     literal_slice[3] = 'x';
-                                                    assembly_statements.appendSliceAssumeCapacity(try context.my_allocator.duplicate_bytes(literal_slice));
+                                                    assembly_statements.appendSliceAssumeCapacity(try context.arena.duplicate_bytes(literal_slice));
                                                 },
                                                 .value => |sema_value| {
                                                     if (llvm.llvm_value_map.get(sema_value)) |v| {
@@ -2657,7 +2657,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                         new_buffer[operand_slice.len] = ':';
                                                         new_buffer[operand_slice.len + 1] = 'P';
                                                         new_buffer[operand_slice.len + 2] = '}';
-                                                        const new_slice = try context.my_allocator.duplicate_bytes(new_buffer[0 .. operand_slice.len + 3]);
+                                                        const new_slice = try context.arena.duplicate_bytes(new_buffer[0 .. operand_slice.len + 3]);
                                                         assembly_statements.appendSliceAssumeCapacity(new_slice);
                                                         operand_values.appendAssumeCapacity(value);
                                                         const value_type = value.getType();

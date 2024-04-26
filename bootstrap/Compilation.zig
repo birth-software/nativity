@@ -68,14 +68,13 @@ const Optimization = enum {
     aggressively_optimize_for_size,
 };
 
-pub fn createContext(allocator: Allocator, my_allocator: *MyAllocator) !*const Context {
+pub fn createContext(allocator: Allocator) !*const Context {
     const context: *Context = try allocator.create(Context);
 
     const self_exe_path = try std.fs.selfExePathAlloc(allocator);
     const self_exe_dir_path = std.fs.path.dirname(self_exe_path).?;
     context.* = .{
         .allocator = allocator,
-        .my_allocator = my_allocator,
         .cwd_absolute_path = try realpathAlloc(allocator, "."),
         .executable_absolute_path = self_exe_path,
         .directory_absolute_path = self_exe_dir_path,
@@ -490,25 +489,6 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
         } else if (starts_with_slice(argument, "-m")) {
             cc_argv.appendAssumeCapacity(argument);
         } else {
-            // const debug_args = true;
-            // if (debug_args) {
-            //     const home_dir = switch (@import("builtin").os.tag) {
-            //         .linux, .macos => std.posix.getenv("HOME") orelse unreachable,
-            //         .windows => try std.process.getEnvVarOwned(context.allocator, "USERPROFILE"),
-            //         else => @compileError("OS not supported"),
-            //     };
-            //     var list = PinnedArray(u8){};
-            //     for (arguments) |arg| {
-            //         list.append_slice(context.my_allocator, arg);
-            //         list.append(context.my_allocator, ' ');
-            //     }
-            //     list.append(context.my_allocator, '\n');
-            //     list.append_slice(context.my_allocator, "Unhandled argument: ");
-            //     list.append_slice(context.my_allocator, argument);
-            //     list.append(context.my_allocator, '\n');
-            //
-            //     std.fs.cwd().writeFile(try std.fmt.allocPrint(context.allocator, "{s}/dev/nativity/nat/unhandled_arg_{}", .{ home_dir, std.time.milliTimestamp() }), list.slice());
-            // }
             try write(.panic, "unhandled argument: '");
             try write(.panic, argument);
             try write(.panic, "'\n");
@@ -4143,7 +4123,6 @@ pub const Struct = struct {
 
 pub const Context = struct {
     allocator: Allocator,
-    my_allocator: *MyAllocator,
     arena: *Arena,
     cwd_absolute_path: []const u8,
     directory_absolute_path: []const u8,
@@ -4632,7 +4611,7 @@ pub const Builder = struct {
         const new_slice = ptr[0 .. slice.len + name.len];
         @memcpy(new_slice[0..name.len], name);
         buffer[len] = 0;
-        return @ptrCast(try context.my_allocator.duplicate_bytes(new_slice));
+        return @ptrCast(try context.arena.duplicate_bytes(new_slice));
     }
 
     fn processStringLiteralFromStringAndDebugInfo(builder: *Builder, unit: *Unit, context: *const Context, string: [:0]const u8, debug_info: TokenDebugInfo) !*Debug.Declaration.Global {
@@ -17500,7 +17479,7 @@ pub const Unit = struct {
     }
 
     pub fn analyze(unit: *Unit, context: *const Context) !void {
-        const builder = try context.my_allocator.allocate_one(Builder);
+        const builder = try context.arena.new(Builder);
         builder.* = .{
             .generate_debug_info = unit.descriptor.generate_debug_information,
             .emit_ir = true,
@@ -17569,9 +17548,7 @@ pub const Unit = struct {
             .count = file.lexer.count,
         }, file_index);
 
-        // logln(.parser, .file, "[START PARSING FILE #{} {s}]", .{ file_index, file.package.source_path });
-        file.parser = try parser.analyze(context.allocator, context.my_allocator, context.arena, file.lexer, file.source_code, &unit.token_buffer, &unit.node_buffer, &unit.node_lists);
-        // logln(.parser, .file, "[END PARSING FILE #{} {s}]", .{ file_index, file.package.source_path });
+        file.parser = try parser.analyze(context.arena, file.lexer, file.source_code, &unit.token_buffer, &unit.node_buffer, &unit.node_lists);
         assert(file.status == .lexed);
         file.status = .parsed;
     }
@@ -17690,7 +17667,7 @@ pub const Unit = struct {
         }
 
         const main_package = blk: {
-            const result = try context.my_allocator.allocate_one(Package);
+            const result = try context.arena.new(Package);
             const main_package_absolute_directory_path = b: {
                 const relative_path = if (std.fs.path.dirname(unit.descriptor.main_package_path)) |dirname| dirname else ".";
                 break :b try context.pathFromCwd(relative_path);
@@ -17700,7 +17677,7 @@ pub const Unit = struct {
                     .handle = try std.fs.openDirAbsolute(main_package_absolute_directory_path, .{}),
                     .path = main_package_absolute_directory_path,
                 },
-                .source_path = try context.my_allocator.duplicate_bytes(std.fs.path.basename(unit.descriptor.main_package_path)),
+                .source_path = try context.arena.duplicate_bytes(std.fs.path.basename(unit.descriptor.main_package_path)),
                 .dependencies = try PinnedHashMap([]const u8, *Package).init(std.mem.page_size),
             };
             break :blk result;
