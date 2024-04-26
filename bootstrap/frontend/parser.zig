@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const library = @import("../library.zig");
@@ -9,7 +8,6 @@ const BlockList = library.BlockList;
 const BoundedArray = library.BoundedArray;
 const enumFromString = library.enumFromString;
 const PinnedArray = library.PinnedArray;
-const MyAllocator = library.MyAllocator;
 
 const lexer = @import("lexer.zig");
 
@@ -235,8 +233,6 @@ const Analyzer = struct {
     nodes: *PinnedArray(Node),
     node_lists: *PinnedArray([]const Node.Index),
     source_file: []const u8,
-    allocator: Allocator,
-    my_allocator: *MyAllocator,
     arena: *Arena,
     suffix_depth: usize = 0,
 
@@ -2381,7 +2377,7 @@ const Analyzer = struct {
 };
 
 // Here it is assumed that left brace is consumed
-pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, arena: *Arena, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *PinnedArray(Node), node_lists: *PinnedArray([]const Node.Index)) !Result {
+pub fn analyze(arena: *Arena, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *PinnedArray(Node), node_lists: *PinnedArray([]const Node.Index)) !Result {
     const start = std.time.Instant.now() catch unreachable;
     var analyzer = Analyzer{
         .lexer = lexer_result,
@@ -2389,8 +2385,6 @@ pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, arena: *Arena, 
         .source_file = source_file,
         // .file_index = file_index,
         .token_i = lexer_result.offset,
-        .allocator = allocator,
-        .my_allocator = my_allocator,
         .nodes = node_list,
         .node_lists = node_lists,
         .arena = arena,

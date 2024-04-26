@@ -21,26 +21,11 @@ fn todo() noreturn {
     @panic("TODO");
 }
 
-var my_allocator = PageAllocator{};
-
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena_allocator.allocator();
     const arguments: []const []const u8 = try std.process.argsAlloc(allocator);
-    const context = try Compilation.createContext(allocator, &my_allocator.allocator);
-    // const debug_args = false;
-    // if (debug_args and @import("builtin").os.tag != .windows) {
-    //     assert(arguments.len > 0);
-    //     const home_dir = std.posix.getenv("HOME") orelse unreachable;
-    //     const timestamp = std.time.milliTimestamp();
-    //     var argument_list = PinnedArray(u8){};
-    //     for (arguments) |arg| {
-    //         argument_list.append_slice(context.my_allocator, arg) catch {};
-    //         argument_list.append(context.my_allocator, ' ') catch {};
-    //     }
-    //     argument_list.append(context.my_allocator, '\n') catch {};
-    //     std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{ home_dir, timestamp }) catch unreachable, argument_list.slice()) catch {};
-    // }
+    const context = try Compilation.createContext(allocator);
 
     if (arguments.len <= 1) {
         return error.InvalidInput;
