@@ -575,7 +575,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                         target_triple_buffer.appendSliceAssumeCapacity("x86_64-");
                     },
                     .aarch64 => {
-                        target_triple_buffer.appendSliceAssumeCapacityppend_slice("aarch64-");
+                        target_triple_buffer.appendSliceAssumeCapacity("aarch64-");
                     },
                     else => @compileError("Architecture not supported"),
                 }

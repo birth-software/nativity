@@ -2526,7 +2526,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         global_variable.setInitializer(constant_initializer);
     }
 
-    var phis = try PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value.Instruction.PhiNode).init(0x1000);
+    var phis = try PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value.Instruction.PhiNode).init(std.mem.page_size);
 
     for (llvm.function_definition_map.keys(), llvm.function_definition_map.values()) |function_declaration, function| {
         phis.clear();
