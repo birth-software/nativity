@@ -138,10 +138,10 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     }
 
     for (options.libraries) |lib| {
-        _ = argv.append(try std.mem.concat(context.allocator, u8, &.{ "-l", lib.path }));
+        _ = argv.append(try context.arena.join(&.{"-l", lib.path}));
     }
 
-    const argv_zero_terminated = try Compilation.argsCopyZ(context.allocator, argv.const_slice());
+    const argv_zero_terminated = try Compilation.argsCopyZ(context.arena, argv.const_slice());
 
     var stdout_ptr: [*]const u8 = undefined;
     var stdout_len: usize = 0;

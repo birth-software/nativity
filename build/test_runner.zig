@@ -244,8 +244,6 @@ fn runStdTests(allocator: Allocator, args: struct {
     var errors = false;
     std.debug.print("std... ", .{});
 
-    std.debug.print("CWD: {s}\n", .{std.fs.cwd().realpathAlloc(allocator, ".") catch unreachable});
-
     const argv = &.{ args.compiler_path, "test", "-main_source_file", "lib/std/std.nat", "-name", "std" };
 
     const result = std.ChildProcess.run(.{

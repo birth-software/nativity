@@ -8,7 +8,6 @@ pub fn assert(ok: bool) void {
     if (!ok) unreachable;
 }
 
-pub const Allocator = std.mem.Allocator;
 pub const BoundedArray = std.BoundedArray;
 
 pub const Arena = struct {
@@ -85,6 +84,32 @@ pub const Arena = struct {
         const slice = try arena.new_array(u8, bytes.len);
         @memcpy(slice, bytes);
         return slice;
+    }
+
+    pub fn duplicate_bytes_zero_terminated(arena: *Arena, bytes: []const u8) ![:0]u8 {
+        const slice = try arena.new_array(u8, bytes.len + 1);
+        slice[bytes.len] = 0;
+        @memcpy(slice[0..bytes.len], bytes);
+        return slice[0..bytes.len:0];
+    }
+
+    pub fn join(arena: *Arena, slices: []const []const u8) ![]u8 {
+        var byte_count: usize = 0;
+
+        for (slices) |slice| {
+            byte_count += slice.len;
+        }
+
+        const result = try arena.new_array(u8, byte_count);
+
+        byte_count = 0;
+
+        for (slices) |slice| {
+            @memcpy(result[byte_count..][0..slice.len], slice);
+            byte_count += slice.len;
+        }
+
+        return result;
     }
 };
 
