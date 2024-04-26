@@ -6,10 +6,11 @@ const write = Compilation.write;
 // const log = Compilation.log;
 // const logln = Compilation.logln;
 const Module = Compilation.Module;
-const data_structures = @import("../library.zig");
-const BoundedArray = data_structures.BoundedArray;
-const MyHashMap = data_structures.MyHashMap;
-const PinnedArray = data_structures.PinnedArray;
+const library = @import("../library.zig");
+const BoundedArray = library.BoundedArray;
+const PinnedHashMap = library.PinnedHashMap;
+const PinnedArray = library.PinnedArray;
+const format_int = library.format_int;
 
 pub const bindings = @import("llvm_bindings.zig");
 
@@ -28,23 +29,23 @@ pub const LLVM = struct {
     module: *LLVM.Module,
     builder: *LLVM.Builder,
     debug_info_builder: *LLVM.DebugInfo.Builder,
-    debug_info_file_map: MyHashMap(Compilation.Debug.File.Index, *LLVM.DebugInfo.File) = .{},
-    debug_type_map: MyHashMap(Compilation.Type.Index, *LLVM.DebugInfo.Type) = .{},
-    type_name_map: MyHashMap(Compilation.Type.Index, []const u8) = .{},
-    type_map: MyHashMap(Compilation.Type.Index, *LLVM.Type) = .{},
-    function_declaration_map: MyHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function) = .{},
-    function_definition_map: MyHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function) = .{},
-    llvm_instruction_map: MyHashMap(Compilation.Instruction.Index, *LLVM.Value) = .{},
-    llvm_value_map: MyHashMap(Compilation.V, *LLVM.Value) = .{},
-    llvm_block_map: MyHashMap(Compilation.BasicBlock.Index, *LLVM.Value.BasicBlock) = .{},
-    llvm_external_functions: MyHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function) = .{},
-    global_variable_map: MyHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.GlobalVariable) = .{},
-    scope_map: MyHashMap(*Compilation.Debug.Scope, *LLVM.DebugInfo.Scope) = .{},
+    debug_info_file_map: PinnedHashMap(Compilation.Debug.File.Index, *LLVM.DebugInfo.File),
+    debug_type_map: PinnedHashMap(Compilation.Type.Index, *LLVM.DebugInfo.Type),
+    type_name_map: PinnedHashMap(Compilation.Type.Index, []const u8),
+    type_map: PinnedHashMap(Compilation.Type.Index, *LLVM.Type),
+    function_declaration_map: PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function),
+    function_definition_map: PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function),
+    llvm_instruction_map: PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value),
+    llvm_value_map: PinnedHashMap(Compilation.V, *LLVM.Value),
+    llvm_block_map: PinnedHashMap(Compilation.BasicBlock.Index, *LLVM.Value.BasicBlock),
+    llvm_external_functions: PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function),
+    global_variable_map: PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.GlobalVariable),
+    scope_map: PinnedHashMap(*Compilation.Debug.Scope, *LLVM.DebugInfo.Scope),
+    argument_allocas: PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value),
     pointer_type: ?*LLVM.Type.Pointer = null,
     function: *LLVM.Value.Constant.Function = undefined,
     exit_block: *LLVM.Value.BasicBlock = undefined,
     sema_function: *Compilation.Debug.Declaration.Global = undefined,
-    argument_allocas: MyHashMap(Compilation.Instruction.Index, *LLVM.Value) = .{},
     return_phi_node: ?*LLVM.Value.Instruction.PhiNode = null,
     scope: *LLVM.DebugInfo.Scope = undefined,
     file: *LLVM.DebugInfo.File = undefined,
@@ -1333,7 +1334,7 @@ pub const LLVM = struct {
                 else => |t| @panic(@tagName(t)),
             };
 
-            try llvm.type_map.put_no_clobber(context.my_allocator, type_index, llvm_type);
+            try llvm.type_map.put_no_clobber(type_index, llvm_type);
 
             return llvm_type;
         }
@@ -1349,7 +1350,7 @@ pub const LLVM = struct {
             const filename = std.fs.path.basename(full_path);
             const directory = full_path[0 .. full_path.len - filename.len];
             const debug_file = llvm.debug_info_builder.createFile(filename.ptr, filename.len, directory.ptr, directory.len) orelse unreachable;
-            try llvm.debug_info_file_map.put_no_clobber(context.my_allocator, sema_file_index, debug_file);
+            try llvm.debug_info_file_map.put_no_clobber(sema_file_index, debug_file);
             return debug_file;
         }
     }
@@ -1360,7 +1361,7 @@ pub const LLVM = struct {
         } else {
             if (unit.type_declarations.get(sema_type_index)) |global_declaration| {
                 const result = unit.getIdentifier(global_declaration.declaration.name);
-                try llvm.type_name_map.put_no_clobber(context.my_allocator, sema_type_index, result);
+                try llvm.type_name_map.put_no_clobber(sema_type_index, result);
                 return result;
             } else {
                 const sema_type = unit.types.get(sema_type_index);
@@ -1369,7 +1370,7 @@ pub const LLVM = struct {
                     .integer => |integer| switch (integer.kind) {
                         .materialized_int => b: {
                             var buffer: [65]u8 = undefined;
-                            const format = data_structures.format_int(&buffer, integer.bit_count, 10, false);
+                            const format = format_int(&buffer, integer.bit_count, 10, false);
                             const slice_ptr = format.ptr - 1;
                             const slice = slice_ptr[0 .. format.len + 1];
                             slice[0] = switch (integer.signedness) {
@@ -1410,7 +1411,7 @@ pub const LLVM = struct {
                     .array => |array| b: {
                         name.appendAssumeCapacity('[');
                         var buffer: [65]u8 = undefined;
-                        const array_count = data_structures.format_int(&buffer, array.count, 10, false);
+                        const array_count = format_int(&buffer, array.count, 10, false);
                         name.appendSliceAssumeCapacity(array_count);
                         name.appendAssumeCapacity(']');
                         const element_type_name = try llvm.renderTypeName(unit, context, array.type);
@@ -1424,8 +1425,7 @@ pub const LLVM = struct {
                     else => |t| @panic(@tagName(t)),
                 };
 
-
-                try llvm.type_name_map.put(context.my_allocator, sema_type_index, if (name.len > 0) b: {
+                try llvm.type_name_map.put(sema_type_index, if (name.len > 0) b: {
                     const new_name = try context.arena.new_array(u8, name.len);
                     @memcpy(new_name, result);
                     break :b new_name;
@@ -1533,7 +1533,7 @@ pub const LLVM = struct {
             .forward_declaration = null,
         });
 
-        try llvm.debug_type_map.put_no_clobber(context.my_allocator, sema_type_index, struct_type.toType());
+        try llvm.debug_type_map.put_no_clobber(sema_type_index, struct_type.toType());
         var field_types = BoundedArray(*LLVM.DebugInfo.Type, 512){};
         bit_size = 0;
 
@@ -1842,7 +1842,7 @@ pub const LLVM = struct {
                 else => |t| @panic(@tagName(t)),
             };
 
-            try llvm.debug_type_map.put(context.my_allocator, sema_type_index, result);
+            try llvm.debug_type_map.put(sema_type_index, result);
 
             assert(@intFromPtr(result) != 0xaaaa_aaaa_aaaa_aaaa);
             return result;
@@ -1863,7 +1863,7 @@ pub const LLVM = struct {
         if (gep.is_struct and gep.index.type != .u32) unreachable;
         const gep_name = unit.getIdentifier(gep.name);
         const get_element_pointer = llvm.builder.createGEP(base_type, pointer, indices.ptr, indices.len, gep_name.ptr, gep_name.len, in_bounds) orelse unreachable;
-        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, get_element_pointer);
+        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, get_element_pointer);
         return get_element_pointer;
     }
 
@@ -2047,7 +2047,7 @@ pub const LLVM = struct {
         basic_block_node.* = .{
             .data = basic_block_index,
         };
-        try llvm.llvm_block_map.put_no_clobber(context.my_allocator, basic_block_index, basic_block);
+        try llvm.llvm_block_map.put_no_clobber(basic_block_index, basic_block);
 
         return basic_block_node;
     }
@@ -2287,8 +2287,8 @@ pub const LLVM = struct {
         });
 
         switch (declaration.initial_value) {
-            .function_declaration => try llvm.function_declaration_map.put_no_clobber(context.my_allocator, declaration, function),
-            .function_definition => try llvm.function_definition_map.put_no_clobber(context.my_allocator, declaration, function),
+            .function_declaration => try llvm.function_declaration_map.put_no_clobber(declaration, function),
+            .function_definition => try llvm.function_definition_map.put_no_clobber(declaration, function),
             else => unreachable,
         }
 
@@ -2360,7 +2360,7 @@ pub const LLVM = struct {
                     const function_definition = unit.function_definitions.get(function_definition_index);
                     const scope = subprogram.toLocalScope().toScope();
 
-                    try llvm.scope_map.put_no_clobber(context.my_allocator, &function_definition.scope.scope, scope);
+                    try llvm.scope_map.put_no_clobber(&function_definition.scope.scope, scope);
                 },
                 .function_declaration => {},
                 else => |t| @panic(@tagName(t)),
@@ -2368,7 +2368,7 @@ pub const LLVM = struct {
         }
 
         switch (declaration.initial_value) {
-            .function_declaration => try llvm.llvm_external_functions.put_no_clobber(context.my_allocator, declaration, function),
+            .function_declaration => try llvm.llvm_external_functions.put_no_clobber(declaration, function),
             .function_definition => {},
             else => |t| @panic(@tagName(t)),
         }
@@ -2419,6 +2419,19 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             .inreg = llvm_context.getAttributeFromEnum(.InReg, 0),
             .@"noalias" = llvm_context.getAttributeFromEnum(.NoAlias, 0),
         },
+        .debug_info_file_map = try PinnedHashMap(Compilation.Debug.File.Index, *LLVM.DebugInfo.File).init(std.mem.page_size),
+        .debug_type_map = try PinnedHashMap(Compilation.Type.Index, *LLVM.DebugInfo.Type).init(std.mem.page_size),
+        .type_name_map = try PinnedHashMap(Compilation.Type.Index, []const u8).init(std.mem.page_size),
+        .type_map = try PinnedHashMap(Compilation.Type.Index, *LLVM.Type).init(std.mem.page_size),
+        .function_declaration_map = try PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function).init(std.mem.page_size),
+        .function_definition_map = try PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function).init(std.mem.page_size),
+        .llvm_instruction_map = try PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value).init(std.mem.page_size),
+        .llvm_value_map = try PinnedHashMap(Compilation.V, *LLVM.Value).init(std.mem.page_size),
+        .llvm_block_map = try PinnedHashMap(Compilation.BasicBlock.Index, *LLVM.Value.BasicBlock).init(std.mem.page_size),
+        .llvm_external_functions = try PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.Function).init(std.mem.page_size),
+        .global_variable_map = try PinnedHashMap(*Compilation.Debug.Declaration.Global, *LLVM.Value.Constant.GlobalVariable).init(std.mem.page_size),
+        .scope_map = try PinnedHashMap(*Compilation.Debug.Scope, *LLVM.DebugInfo.Scope).init(std.mem.page_size),
+        .argument_allocas = try PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value).init(std.mem.page_size),
     };
 
     if (unit.descriptor.generate_debug_information) {
@@ -2442,7 +2455,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         const compile_unit = llvm.debug_info_builder.createCompileUnit(LLVM.DebugInfo.Language.c, debug_info_file, producer, producer.len, is_optimized, flags, flags.len, runtime_version, splitname, splitname.len, debug_info_kind, DWOId, split_debug_inlining, debug_info_for_profiling, name_table_kind, ranges_base_address, sysroot, sysroot.len, sdk, sdk.len) orelse unreachable;
         llvm.scope = compile_unit.toScope();
 
-        try llvm.scope_map.put_no_clobber(context.my_allocator, &unit.scope.scope, llvm.scope);
+        try llvm.scope_map.put_no_clobber(&unit.scope.scope, llvm.scope);
     }
 
     for (unit.external_functions.values()) |external_function_declaration| {
@@ -2469,7 +2482,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             .string_literal => |hash| {
                 const string_literal = unit.string_literal_values.get(hash).?;
                 const global_variable = llvm.builder.createGlobalString(string_literal.ptr, string_literal.len, name.ptr, name.len, address_space, llvm.module) orelse unreachable;
-                try llvm.global_variable_map.put_no_clobber(context.my_allocator, global_declaration, global_variable);
+                try llvm.global_variable_map.put_no_clobber(global_declaration, global_variable);
             },
             else => {
                 const global_type = try llvm.getType(unit, context, global_declaration.declaration.type);
@@ -2485,7 +2498,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                 const thread_local_mode = LLVM.ThreadLocalMode.not_thread_local;
                 const externally_initialized = false;
                 const global_variable = llvm.module.addGlobalVariable(global_type, constant, linkage, initializer, name.ptr, name.len, null, thread_local_mode, address_space, externally_initialized) orelse return LLVM.Value.Error.constant_int;
-                try llvm.global_variable_map.put_no_clobber(context.my_allocator, global_declaration, global_variable);
+                try llvm.global_variable_map.put_no_clobber(global_declaration, global_variable);
             },
         }
 
@@ -2513,7 +2526,11 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
         global_variable.setInitializer(constant_initializer);
     }
 
+    var phis = try PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value.Instruction.PhiNode).init(0x1000);
+
     for (llvm.function_definition_map.keys(), llvm.function_definition_map.values()) |function_declaration, function| {
+        phis.clear();
+
         const function_definition_index = function_declaration.getFunctionDefinitionIndex();
         const function_definition = unit.function_definitions.get(function_definition_index);
         llvm.function = function;
@@ -2528,14 +2545,12 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             llvm.scope = subprogram.toLocalScope().toScope();
         }
 
-        var alloca_map = MyHashMap(Compilation.Instruction.Index, *LLVM.Value){};
+        var alloca_map = try PinnedHashMap(Compilation.Instruction.Index, *LLVM.Value).init(std.mem.page_size);
 
         var block_command_list = BasicBlockList{};
 
         const entry_block_node = try llvm.createBasicBlock(context, function_definition.basic_blocks.pointer[0], "fn_entry");
         block_command_list.append(entry_block_node);
-
-        var phis = MyHashMap(Compilation.Instruction.Index, *LLVM.Value.Instruction.PhiNode){};
 
         while (block_command_list.len != 0) {
             const block_node = block_command_list.first orelse unreachable;
@@ -2557,7 +2572,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             assert(@intFromEnum(push_scope.old.kind) >= @intFromEnum(Compilation.Debug.Scope.Kind.function));
 
                             const lexical_block = llvm.debug_info_builder.createLexicalBlock(old_scope, llvm.file, push_scope.new.line + 1, push_scope.new.column + 1) orelse unreachable;
-                            try llvm.scope_map.put_no_clobber(context.my_allocator, push_scope.new, lexical_block.toScope());
+                            try llvm.scope_map.put_no_clobber(push_scope.new, lexical_block.toScope());
                             llvm.scope = lexical_block.toScope();
                         }
                     },
@@ -2616,7 +2631,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                 },
                                                 .number_literal => |literal| {
                                                     var buffer: [65]u8 = undefined;
-                                                    const number_literal = data_structures.format_int(&buffer, literal, 16, false);
+                                                    const number_literal = format_int(&buffer, literal, 16, false);
                                                     const slice_ptr = number_literal.ptr - 4;
                                                     const literal_slice = slice_ptr[0 .. number_literal.len + 4];
                                                     literal_slice[0] = '$';
@@ -2632,7 +2647,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                                     } else {
                                                         const value = try llvm.emitLeftValue(unit, context, sema_value);
                                                         var buffer: [65]u8 = undefined;
-                                                        const operand_number = data_structures.format_int(&buffer, operand_values.len, 16, false);
+                                                        const operand_number = format_int(&buffer, operand_values.len, 16, false);
                                                         const slice_ptr = operand_number.ptr - 2;
                                                         const operand_slice = slice_ptr[0 .. operand_number.len + 2];
                                                         operand_slice[0] = '$';
@@ -2676,7 +2691,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
                         const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, &assembly_statements.buffer, assembly_statements.len, &constraints.buffer, constraints.len, has_side_effects, is_align_stack, dialect, can_throw) orelse return LLVM.Value.Error.inline_assembly;
                         const call = llvm.builder.createCall(function_type, inline_assembly.toValue(), &operand_values.buffer, operand_values.len, "", "".len, null) orelse return LLVM.Value.Instruction.Error.call;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, call.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, call.toValue());
                     },
                     .stack_slot => |stack_slot| {
                         // const stack_slot_type = unit.types.get(stack_slot.type);
@@ -2685,8 +2700,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const type_alignment = unit.types.get(stack_slot.type).getAbiAlignment(unit);
                         const alloca_array_size = null;
                         const declaration_alloca = llvm.builder.createAlloca(declaration_type, address_space, alloca_array_size, "", "".len, type_alignment) orelse return LLVM.Value.Instruction.Error.alloca;
-                        try alloca_map.put_no_clobber(context.my_allocator, instruction_index, declaration_alloca.toValue());
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, declaration_alloca.toValue());
+                        try alloca_map.put_no_clobber(instruction_index, declaration_alloca.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, declaration_alloca.toValue());
                     },
                     .store => |store| {
                         const right = try llvm.emitRightValue(unit, context, store.source);
@@ -2706,7 +2721,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 const cast_type = LLVM.Value.Instruction.Cast.Type.int_to_pointer;
                                 const cast_name = @tagName(cast_type);
                                 const cast_instruction = llvm.builder.createCast(cast_type, value, value.getType(), cast_name.ptr, cast_name.len) orelse return LLVM.Value.Instruction.Error.cast;
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, cast_instruction);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, cast_instruction);
                             },
                             .array_bitcast_to_integer => unreachable,
                             // TODO: Poke metadata
@@ -2724,27 +2739,27 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .pointer_source_type_to_destination_type,
                             .pointer_none_terminated_to_zero,
                             => {
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, value);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, value);
                             },
                             .sign_extend => {
                                 const sign_extend = llvm.builder.createCast(.sign_extend, value, dest_type, "sign_extend", "sign_extend".len) orelse return LLVM.Value.Instruction.Error.cast;
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, sign_extend);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, sign_extend);
                             },
                             .zero_extend => {
                                 const zero_extend = llvm.builder.createCast(.zero_extend, value, dest_type, "zero_extend", "zero_extend".len) orelse return LLVM.Value.Instruction.Error.cast;
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, zero_extend);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, zero_extend);
                             },
                             .bitcast => {
                                 const bitcast = llvm.builder.createCast(.bitcast, value, dest_type, "bitcast", "bitcast".len) orelse return LLVM.Value.Instruction.Error.cast;
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, bitcast);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, bitcast);
                             },
                             .pointer_to_int => {
                                 const pointer_to_int = llvm.builder.createCast(.pointer_to_int, value, dest_type, "pointer_to_int", "pointer_to_int".len) orelse return LLVM.Value.Instruction.Error.cast;
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, pointer_to_int);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, pointer_to_int);
                             },
                             .truncate => {
                                 const truncate = llvm.builder.createCast(.truncate, value, dest_type, "truncate", "truncate".len) orelse return LLVM.Value.Instruction.Error.cast;
-                                try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, truncate);
+                                try llvm.llvm_instruction_map.put_no_clobber(instruction_index, truncate);
                             },
                             .error_union_type_int_to_pointer, .error_union_type_upcast, .error_union_type_downcast => unreachable,
                         }
@@ -2761,7 +2776,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                 },
                                 else => |t| @panic(@tagName(t)),
                             };
-                            try llvm.llvm_value_map.put_no_clobber(context.my_allocator, load.value, value);
+                            try llvm.llvm_value_map.put_no_clobber(load.value, value);
 
                             break :blk value;
                         };
@@ -2771,7 +2786,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const value_type = try llvm.getType(unit, context, load.type);
                         const is_volatile = false;
                         const load_i = llvm.builder.createLoad(value_type, value, is_volatile, "", "".len, alignment) orelse return LLVM.Value.Instruction.Error.load;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, load_i.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, load_i.toValue());
                     },
                     .integer_binary_operation => |binary_operation| {
                         assert(binary_operation.left.type == binary_operation.right.type);
@@ -2810,7 +2825,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             },
                             else => unreachable,
                         };
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, instruction);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, instruction);
                     },
                     .call => |sema_call| {
                         var argument_buffer: [32]*LLVM.Value = undefined;
@@ -2861,7 +2876,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             else => |t| @panic(@tagName(t)),
                         };
 
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, call.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, call.toValue());
 
                         try llvm.setCallOrFunctionAttributes(unit, context, function_prototype, .{
                             .call = call,
@@ -2918,14 +2933,14 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         };
 
                         const call_to_asm = llvm.builder.createCall(function_type, inline_asm.toValue(), syscall_arguments.ptr, syscall_arguments.len, "syscall", "syscall".len, null) orelse return LLVM.Value.Instruction.Error.call;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, call_to_asm.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, call_to_asm.toValue());
                     },
                     .@"unreachable" => {
                         _ = llvm.builder.createUnreachable() orelse return LLVM.Value.Instruction.Error.@"unreachable";
                     },
                     .abi_argument => |argument_index| {
                         const argument = llvm.function.getArgument(argument_index) orelse unreachable;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, argument.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, argument.toValue());
                     },
                     .debug_declare_argument => |debug_declare| {
                         if (generate_debug_information) {
@@ -3024,7 +3039,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const value = try llvm.emitRightValue(unit, context, insert_value.new_value);
                         const indices = [1]c_uint{insert_value.index};
                         const instruction = llvm.builder.createInsertValue(aggregate, value, &indices, indices.len, "", "".len) orelse unreachable;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, instruction);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, instruction);
                     },
                     .extract_value => |extract_value| {
                         switch (unit.types.get(extract_value.expression.type).*) {
@@ -3037,7 +3052,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         assert(!aggregate.getType().isPointer());
                         const indices = [1]c_uint{extract_value.index};
                         const instruction = llvm.builder.createExtractValue(aggregate, &indices, indices.len, "", "".len) orelse unreachable;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, instruction);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, instruction);
                     },
                     .integer_compare => |integer_compare| {
                         assert(integer_compare.left.type == integer_compare.right.type);
@@ -3057,7 +3072,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                             .signed_greater_equal => .sge,
                         };
                         const icmp = llvm.builder.createICmp(comparison_id, left, right, "", "".len) orelse unreachable;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, icmp);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, icmp);
                     },
                     .jump => |jump| {
                         const target_block = if (llvm.llvm_block_map.get(jump.to)) |target_block| target_block else blk: {
@@ -3070,7 +3085,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         };
 
                         const br = llvm.builder.createBranch(target_block) orelse unreachable;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, br.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, br.toValue());
                     },
                     .branch => |branch| {
                         const taken_node = try llvm.createBasicBlock(context, branch.taken, "taken_block");
@@ -3087,7 +3102,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const branch_weights = null;
                         const unpredictable = null;
                         const br = llvm.builder.createConditionalBranch(condition, taken_block, not_taken_block, branch_weights, unpredictable) orelse unreachable;
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, br.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, br.toValue());
                     },
                     .phi => |phi| {
                         const phi_type = try llvm.getType(unit, context, phi.type);
@@ -3095,9 +3110,9 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const phi_name = "phi";
                         const phi_node = llvm.builder.createPhi(phi_type, reserved_value_count, phi_name, phi_name.len) orelse unreachable;
 
-                        try phis.put_no_clobber(context.my_allocator, instruction_index, phi_node);
+                        try phis.put_no_clobber(instruction_index, phi_node);
 
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, phi_node.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, phi_node.toValue());
                     },
                     .umin => |umin| {
                         const intrinsic_type = try llvm.getType(unit, context, umin.type);
@@ -3106,7 +3121,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const right = try llvm.emitRightValue(unit, context, umin.right);
                         const arguments = [_]*LLVM.Value{ left, right };
                         const intrinsic_call = try llvm.callIntrinsic("llvm.umin", &parameter_types, &arguments);
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, intrinsic_call);
                     },
                     .get_element_pointer => {
                         _ = try llvm.createGEP(unit, context, instruction_index);
@@ -3115,7 +3130,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const parameter_types: []const *LLVM.Type = &.{};
                         const parameter_values: []const *LLVM.Value = &.{};
                         const intrinsic_call = try llvm.callIntrinsic("llvm.trap", parameter_types, parameter_values);
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, intrinsic_call);
                     },
                     .add_overflow => |add_overflow| {
                         const intrinsic_type = try llvm.getType(unit, context, add_overflow.type);
@@ -3124,7 +3139,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const right = try llvm.emitRightValue(unit, context, add_overflow.right);
                         const arguments = [_]*LLVM.Value{ left, right };
                         const intrinsic_call = try llvm.callIntrinsic("llvm.sadd.with.overflow", &parameter_types, &arguments);
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, intrinsic_call);
                     },
                     .trailing_zeroes => |v| {
                         const intrinsic_type = try llvm.getType(unit, context, v.type);
@@ -3133,7 +3148,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const is_poison = llvm.context.getConstantInt(1, 0, false) orelse unreachable;
                         const arguments = [_]*LLVM.Value{ value, is_poison.toValue() };
                         const intrinsic_call = try llvm.callIntrinsic("llvm.cttz", &parameter_types, &arguments);
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, intrinsic_call);
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, intrinsic_call);
                     },
                     .@"switch" => |switch_expression| {
                         const condition = try llvm.emitRightValue(unit, context, switch_expression.condition);
@@ -3165,7 +3180,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const branch_weights = null;
                         const unpredictable = null;
                         const switch_instruction = llvm.builder.createSwitch(condition, else_block, &condition_array.buffer, &basic_block_array.buffer, condition_array.len, branch_weights, unpredictable);
-                        try llvm.llvm_instruction_map.put_no_clobber(context.my_allocator, instruction_index, switch_instruction.toValue());
+                        try llvm.llvm_instruction_map.put_no_clobber(instruction_index, switch_instruction.toValue());
                     },
                     .memcpy => |memcpy| {
                         const destination = try llvm.emitLeftValue(unit, context, memcpy.destination);

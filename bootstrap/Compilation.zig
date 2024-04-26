@@ -19,7 +19,7 @@ const PinnedArray = library.PinnedArray;
 const UnpinnedArray = library.UnpinnedArray;
 const BlockList = library.BlockList;
 const MyAllocator = library.MyAllocator;
-const MyHashMap = library.MyHashMap;
+const PinnedHashMap = library.PinnedHashMap;
 const span = library.span;
 const format_int = library.format_int;
 const my_hash = library.my_hash;
@@ -130,6 +130,24 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
         .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
         .node_lists = try PinnedArray([]const Node.Index).init_with_default_granularity(),
         .data_to_emit = try PinnedArray(*Debug.Declaration.Global).init_with_default_granularity(),
+        .file_token_offsets = try PinnedHashMap(Token.Range, Debug.File.Index).init(std.mem.page_size),
+        .file_map = try PinnedHashMap([]const u8, Debug.File.Index).init(std.mem.page_size),
+        .identifiers = try PinnedHashMap(u32, []const u8).init(std.mem.page_size),
+        .string_literal_values = try PinnedHashMap(u32, [:0]const u8).init(std.mem.page_size),
+        .string_literal_globals = try PinnedHashMap(u32, *Debug.Declaration.Global).init(std.mem.page_size),
+        .optionals = try PinnedHashMap(Type.Index, Type.Index).init(std.mem.page_size),
+        .pointers = try PinnedHashMap(Type.Pointer, Type.Index).init(std.mem.page_size),
+        .slices = try PinnedHashMap(Type.Slice, Type.Index).init(std.mem.page_size),
+        .arrays = try PinnedHashMap(Type.Array, Type.Index).init(std.mem.page_size),
+        .integers = try PinnedHashMap(Type.Integer, Type.Index).init(std.mem.page_size),
+        .error_unions = try PinnedHashMap(Type.Error.Union.Descriptor, Type.Index).init(std.mem.page_size),
+        .two_structs = try PinnedHashMap([2]Type.Index, Type.Index).init(std.mem.page_size),
+        .fields_array = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .name_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .external_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .type_declarations = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .test_functions = try PinnedHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global).init(std.mem.page_size),
+        .code_to_emit = try PinnedHashMap(Function.Definition.Index, *Debug.Declaration.Global).init(std.mem.page_size),
     };
 
     try unit.compile(context);
@@ -2941,7 +2959,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
             if (i + 1 != arguments.len) {
                 i += 1;
 
-                c_source_files.appendSliceAssumeCapacity( arguments[i..]);
+                c_source_files.appendSliceAssumeCapacity(arguments[i..]);
                 i = arguments.len;
             } else {
                 reportUnterminatedArgumentError(current_argument);
@@ -3026,6 +3044,24 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
         .node_buffer = try PinnedArray(Node).init_with_default_granularity(),
         .node_lists = try PinnedArray([]const Node.Index).init_with_default_granularity(),
         .data_to_emit = try PinnedArray(*Debug.Declaration.Global).init_with_default_granularity(),
+        .file_token_offsets = try PinnedHashMap(Token.Range, Debug.File.Index).init(std.mem.page_size),
+        .file_map = try PinnedHashMap([]const u8, Debug.File.Index).init(std.mem.page_size),
+        .identifiers = try PinnedHashMap(u32, []const u8).init(std.mem.page_size),
+        .string_literal_values = try PinnedHashMap(u32, [:0]const u8).init(std.mem.page_size),
+        .string_literal_globals = try PinnedHashMap(u32, *Debug.Declaration.Global).init(std.mem.page_size),
+        .optionals = try PinnedHashMap(Type.Index, Type.Index).init(std.mem.page_size),
+        .pointers = try PinnedHashMap(Type.Pointer, Type.Index).init(std.mem.page_size),
+        .slices = try PinnedHashMap(Type.Slice, Type.Index).init(std.mem.page_size),
+        .arrays = try PinnedHashMap(Type.Array, Type.Index).init(std.mem.page_size),
+        .integers = try PinnedHashMap(Type.Integer, Type.Index).init(std.mem.page_size),
+        .error_unions = try PinnedHashMap(Type.Error.Union.Descriptor, Type.Index).init(std.mem.page_size),
+        .two_structs = try PinnedHashMap([2]Type.Index, Type.Index).init(std.mem.page_size),
+        .fields_array = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .name_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .external_functions = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .type_declarations = try PinnedHashMap(Type.Index, *Debug.Declaration.Global).init(std.mem.page_size),
+        .test_functions = try PinnedHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global).init(std.mem.page_size),
+        .code_to_emit = try PinnedHashMap(Function.Definition.Index, *Debug.Declaration.Global).init(std.mem.page_size),
     };
 
     try unit.compile(context);
@@ -3052,10 +3088,10 @@ pub const Package = struct {
     directory: Directory,
     /// Relative to the package main directory
     source_path: []const u8,
-    dependencies: MyHashMap([]const u8, *Package) = .{},
+    dependencies: PinnedHashMap([]const u8, *Package),
 
-    fn addDependency(package: *Package, allocator: *MyAllocator, package_name: []const u8, new_dependency: *Package) !void {
-        try package.dependencies.put_no_clobber(allocator, package_name, new_dependency);
+    fn addDependency(package: *Package, package_name: []const u8, new_dependency: *Package) !void {
+        try package.dependencies.put_no_clobber(package_name, new_dependency);
     }
 };
 
@@ -3298,6 +3334,7 @@ const _usize: Type.Index = .u64;
 const _ssize: Type.Index = .s64;
 
 fn serialize_comptime_parameters(unit: *Unit, context: *const Context, original_declaration: *Debug.Declaration, parameters: []const V.Comptime) !u32 {
+    _ = context; // autofix
     var name = BoundedArray(u8, 4096){};
     const original_name = unit.getIdentifier(original_declaration.name);
     name.appendSliceAssumeCapacity(original_name);
@@ -3339,7 +3376,7 @@ fn serialize_comptime_parameters(unit: *Unit, context: *const Context, original_
     const hash = my_hash(name.slice());
     // Don't allocate memory if not necessary
     if (unit.identifiers.get(hash) == null) {
-        try unit.identifiers.put_no_clobber(context.my_allocator, hash, name.slice());
+        try unit.identifiers.put_no_clobber(hash, name.slice());
     }
 
     return hash;
@@ -3364,7 +3401,7 @@ pub const Type = union(enum) {
 
     pub const Polymorphic = struct {
         parameters: []const Token.Index,
-        instantiations: MyHashMap(u32, *Debug.Declaration.Global) = .{},
+        instantiations: PinnedHashMap(u32, *Debug.Declaration.Global),
         node: Node.Index,
 
         pub fn get_instantiation(polymorphic: *Polymorphic, types: []const V.Comptime) ?*Debug.Declaration.Global {
@@ -3395,7 +3432,7 @@ pub const Type = union(enum) {
             const new_declaration = unit.global_declarations.get(new_declaration_index);
 
             const parameter_hash = hash(parameters);
-            try polymorphic.instantiations.put_no_clobber(context.my_allocator, parameter_hash, new_declaration);
+            try polymorphic.instantiations.put_no_clobber(parameter_hash, new_declaration);
         }
 
         fn hash(types: []const V.Comptime) u32 {
@@ -3735,7 +3772,7 @@ pub const Instruction = union(enum) {
 
         pub const max_value_count = 32;
 
-        const Value = struct{
+        const Value = struct {
             value: V,
             basic_block: BasicBlock.Index,
         };
@@ -4111,7 +4148,7 @@ pub fn joinPath(context: *const Context, a: []const u8, b: []const u8) ![]const 
 
 pub const PolymorphicFunction = struct {
     parameters: []const ComptimeParameterDeclaration,
-    instantiations: MyHashMap(u32, *Debug.Declaration.Global) = .{},
+    instantiations: PinnedHashMap(u32, *Debug.Declaration.Global),
     node: Node.Index,
     is_member_call: bool,
 
@@ -4150,7 +4187,7 @@ pub const PolymorphicFunction = struct {
         const new_declaration = unit.global_declarations.get(new_declaration_index);
 
         const parameter_hash = hash(parameters);
-        try polymorphic_function.instantiations.put_no_clobber(context.my_allocator, parameter_hash, new_declaration);
+        try polymorphic_function.instantiations.put_no_clobber(parameter_hash, new_declaration);
 
         return new_declaration;
     }
@@ -4298,7 +4335,7 @@ pub const Debug = struct {
     };
 
     pub const Scope = struct {
-        declarations: MyHashMap(u32, *Declaration) = .{},
+        declarations: PinnedHashMap(u32, *Declaration),
         parent: ?*Scope = null,
         file: File.Index,
         line: u32,
@@ -4314,7 +4351,7 @@ pub const Debug = struct {
 
         pub const Local = struct {
             scope: Scope,
-            local_declaration_map: MyHashMap(*Debug.Declaration.Local, Instruction.Index) = .{},
+            local_declaration_map: PinnedHashMap(*Debug.Declaration.Local, Instruction.Index),
         };
 
         pub const Global = struct {
@@ -4324,8 +4361,8 @@ pub const Debug = struct {
 
         pub const Function = struct {
             scope: Scope,
-            argument_map: MyHashMap(*Debug.Declaration.Argument, Instruction.Index) = .{},
-            // comptime_parameters: MyHashMap(*Debug.Declaration.Argument,
+            argument_map: PinnedHashMap(*Debug.Declaration.Argument, Instruction.Index),
+            // comptime_parameters: PinnedArray(*Debug.Declaration.Argument,
         };
 
         fn lookupDeclaration(s: *Scope, name: u32, look_in_parent_scopes: bool) ?Lookup {
@@ -4565,7 +4602,7 @@ pub const Builder = struct {
             const error_union_type_index = try unit.types.append(context.my_allocator, .{
                 .@"struct" = error_union_struct_index,
             });
-            try unit.error_unions.put_no_clobber(context.my_allocator, error_union, error_union_type_index);
+            try unit.error_unions.put_no_clobber(error_union, error_union_type_index);
 
             return error_union_type_index;
         }
@@ -4597,7 +4634,7 @@ pub const Builder = struct {
         } else {
             const string_name = try join_name(context, "__anon_str_", possible_id, 10);
             const identifier = try unit.processIdentifier(context, string_name);
-            try unit.string_literal_values.put_no_clobber(context.my_allocator, hash, string);
+            try unit.string_literal_values.put_no_clobber(hash, string);
 
             const string_global_index = try unit.global_declarations.append(context.my_allocator, .{
                 .declaration = .{
@@ -4637,7 +4674,7 @@ pub const Builder = struct {
 
             const string_global = unit.global_declarations.get(string_global_index);
 
-            try unit.string_literal_globals.put_no_clobber(context.my_allocator, hash, string_global);
+            try unit.string_literal_globals.put_no_clobber(hash, string_global);
 
             _ = unit.data_to_emit.append(string_global);
 
@@ -4825,7 +4862,7 @@ pub const Builder = struct {
                                             .destination = destination,
                                             .source = v,
                                         },
-                                        });
+                                    });
                                     try builder.appendInstruction(unit, context, store);
 
                                     const load = try unit.instructions.append(context.my_allocator, .{
@@ -4833,7 +4870,7 @@ pub const Builder = struct {
                                             .value = destination,
                                             .type = type_index,
                                         },
-                                        });
+                                    });
                                     try builder.appendInstruction(unit, context, load);
 
                                     return V{
@@ -5177,7 +5214,9 @@ pub const Builder = struct {
                         .kind = .function,
                         .local = true,
                         .level = builder.current_scope.level + 1,
+                        .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                     },
+                    .argument_map = try PinnedHashMap(*Debug.Declaration.Argument, Instruction.Index).init(std.mem.page_size),
                 },
                 .type = function_type_index,
                 .body = .null,
@@ -5212,7 +5251,7 @@ pub const Builder = struct {
             comptime assert(@TypeOf(argument_declaration_index) == Debug.Declaration.Argument.Index);
             const argument = unit.argument_declarations.get(argument_declaration_index);
 
-            try builder.current_scope.declarations.put_no_clobber(context.my_allocator, argument_name_hash, &argument.declaration);
+            try builder.current_scope.declarations.put_no_clobber(argument_name_hash, &argument.declaration);
 
             const entry_block = try builder.newBasicBlock(unit, context);
             const exit_block = try builder.newBasicBlock(unit, context);
@@ -5327,8 +5366,8 @@ pub const Builder = struct {
 
             const global = unit.global_declarations.get(global_index);
 
-            try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_index, global);
-            try unit.name_functions.put_no_clobber(context.my_allocator, type_index, global);
+            try unit.code_to_emit.put_no_clobber(function_definition_index, global);
+            try unit.name_functions.put_no_clobber(type_index, global);
 
             return global;
         }
@@ -5383,7 +5422,7 @@ pub const Builder = struct {
                         const global_declaration = unit.global_declarations.get(global_declaration_index);
                         _ = unit.data_to_emit.append(global_declaration);
 
-                        try unit.fields_array.put_no_clobber(context.my_allocator, container_type_index, global_declaration);
+                        try unit.fields_array.put_no_clobber(container_type_index, global_declaration);
 
                         return global_declaration;
                     },
@@ -5807,13 +5846,13 @@ pub const Builder = struct {
                         const function_definition_global = polymorphic_function.instantiations.values()[0];
                         assert(function_definition_global.initial_value == .function_definition);
 
-                        try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_global.initial_value.function_definition, function_definition_global);
+                        try unit.code_to_emit.put_no_clobber(function_definition_global.initial_value.function_definition, function_definition_global);
 
                         return function_definition_global;
                     },
                     .function_definition => |function_definition_index| {
                         switch (unit.getNode(declaration_node_index).id) {
-                            .function_definition => try unit.code_to_emit.put_no_clobber(context.my_allocator, function_definition_index, global_declaration),
+                            .function_definition => try unit.code_to_emit.put_no_clobber(function_definition_index, global_declaration),
                             else => {
                                 const actual_function_declaration = unit.code_to_emit.get(function_definition_index).?;
                                 global_declaration.initial_value = .{
@@ -5824,7 +5863,7 @@ pub const Builder = struct {
                     },
                     .function_declaration => |function_type| {
                         switch (unit.getNode(declaration_node_index).id) {
-                            .function_prototype => try unit.external_functions.put_no_clobber(context.my_allocator, function_type, global_declaration),
+                            .function_prototype => try unit.external_functions.put_no_clobber(function_type, global_declaration),
                             else => {
                                 const actual_function_declaration = unit.external_functions.get(function_type).?;
                                 global_declaration.initial_value = .{
@@ -5841,7 +5880,7 @@ pub const Builder = struct {
                                     unreachable;
                                 }
                             },
-                            else => unit.type_declarations.put(context.my_allocator, type_index, global_declaration) catch {
+                            else => unit.type_declarations.put(type_index, global_declaration) catch {
                                 assert(unit.type_declarations.get(type_index).? == global_declaration);
                             },
                         }
@@ -5856,7 +5895,7 @@ pub const Builder = struct {
             .polymorphic_function => |*polymorphic_function| {
                 const instantiation_value = try builder.resolveComptimeValue(unit, context, Type.Expect.none, global_declaration.attributes, polymorphic_function.node, global_declaration, .right, new_parameters, maybe_member_value, polymorphic_argument_nodes);
                 const instantiation_global = instantiation_value.global;
-                try unit.code_to_emit.put(context.my_allocator, instantiation_global.initial_value.function_definition, instantiation_global);
+                try unit.code_to_emit.put(instantiation_global.initial_value.function_definition, instantiation_global);
 
                 return instantiation_global;
             },
@@ -7274,6 +7313,7 @@ pub const Builder = struct {
                                             .local = false,
                                             .level = builder.current_scope.level + 1,
                                             .parent = &unit.scope.scope,
+                                            .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                                         },
                                     },
                                     .id = std.math.maxInt(u32),
@@ -7482,7 +7522,7 @@ pub const Builder = struct {
                                 });
 
                                 const comptime_parameter = unit.global_declarations.get(comptime_parameter_index);
-                                try builder.current_scope.declarations.put_no_clobber(context.my_allocator, name_hash, &comptime_parameter.declaration);
+                                try builder.current_scope.declarations.put_no_clobber(name_hash, &comptime_parameter.declaration);
                             },
                             else => |t| @panic(@tagName(t)),
                         },
@@ -7591,7 +7631,7 @@ pub const Builder = struct {
         comptime assert(@TypeOf(argument_declaration_index) == Debug.Declaration.Argument.Index);
         const argument = unit.argument_declarations.get(argument_declaration_index);
 
-        try builder.current_scope.declarations.put_no_clobber(context.my_allocator, argument_name_hash, &argument.declaration);
+        try builder.current_scope.declarations.put_no_clobber(argument_name_hash, &argument.declaration);
     }
 
     fn classify_argument_type_aarch64(builder: *Builder, unit: *Unit, context: *const Context, type_index: Type.Index) Function.AbiInfo {
@@ -7928,7 +7968,7 @@ pub const Builder = struct {
         function_prototype.abi.return_type_abi = return_abi;
         const abi_infos = try context.arena.new_array(Function.AbiInfo, parameter_types_abi.len);
         @memcpy(abi_infos, parameter_types_abi.slice());
-        function_prototype.abi.parameter_types_abi = abi_infos; 
+        function_prototype.abi.parameter_types_abi = abi_infos;
     }
 
     const Class_SystemVx86_64 = enum {
@@ -8482,6 +8522,7 @@ pub const Builder = struct {
                                     .level = builder.current_scope.level + 1,
                                     .local = false,
                                     .file = builder.current_file,
+                                    .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                                 },
                             },
                             .options = .{},
@@ -8572,7 +8613,7 @@ pub const Builder = struct {
                         .attributes = .{},
                     });
                     const global_declaration = unit.global_declarations.get(global_declaration_index);
-                    try struct_type.kind.@"struct".scope.scope.declarations.put_no_clobber(context.my_allocator, hash, &global_declaration.declaration);
+                    try struct_type.kind.@"struct".scope.scope.declarations.put_no_clobber(hash, &global_declaration.declaration);
                 }
 
                 const polymorphic_type_index = switch (parameter_types.len > 0) {
@@ -8585,6 +8626,7 @@ pub const Builder = struct {
                                     break :param heap_parameter_types;
                                 },
                                 .node = container_node_index,
+                                .instantiations = try PinnedHashMap(u32, *Debug.Declaration.Global).init(std.mem.page_size),
                             },
                         });
                         const polymorphic_type = &unit.types.get(polymorphic_type_index).polymorphic;
@@ -8648,6 +8690,7 @@ pub const Builder = struct {
                                         .level = builder.current_scope.level + 1,
                                         .local = false,
                                         .file = builder.current_file,
+                                        .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                                     },
                                 },
                             },
@@ -8694,6 +8737,7 @@ pub const Builder = struct {
                                         .level = builder.current_scope.level + 1,
                                         .local = false,
                                         .file = builder.current_file,
+                                        .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                                     },
                                 },
                             },
@@ -8853,7 +8897,7 @@ pub const Builder = struct {
                         });
 
                         const global_declaration = unit.global_declarations.get(global_declaration_index);
-                        try builder.current_scope.declarations.put_no_clobber(context.my_allocator, identifier_hash, &global_declaration.declaration);
+                        try builder.current_scope.declarations.put_no_clobber(identifier_hash, &global_declaration.declaration);
                     },
                     else => unreachable,
                 }
@@ -9078,15 +9122,15 @@ pub const Builder = struct {
 
                 const test_global = unit.global_declarations.get(test_global_index);
 
-                try scope.scope.declarations.put_no_clobber(context.my_allocator, name_hash, &test_global.declaration);
+                try scope.scope.declarations.put_no_clobber(name_hash, &test_global.declaration);
 
-                try unit.test_functions.put_no_clobber(context.my_allocator, test_name_global, test_global);
+                try unit.test_functions.put_no_clobber(test_name_global, test_global);
 
-                try unit.code_to_emit.put_no_clobber(context.my_allocator, comptime_value.function_definition, test_global);
+                try unit.code_to_emit.put_no_clobber(comptime_value.function_definition, test_global);
             }
         }
 
-        for (builder.current_scope.declarations.values()) |declaration|{
+        for (builder.current_scope.declarations.values()) |declaration| {
             const global_declaration: *Debug.Declaration.Global = @fieldParentPtr("declaration", declaration);
             if (global_declaration.attributes.contains(.@"export")) {
                 const result = try builder.referenceGlobalDeclaration(unit, context, &scope.scope, declaration, .{}, &.{}, null, &.{});
@@ -9175,7 +9219,9 @@ pub const Builder = struct {
                     .local = true,
                     .level = builder.current_scope.level + 1,
                     .file = builder.current_file,
+                    .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                 },
+                .argument_map = try PinnedHashMap(*Debug.Declaration.Argument, Instruction.Index).init(std.mem.page_size),
             },
             .has_debug_info = true,
         });
@@ -9498,7 +9544,7 @@ pub const Builder = struct {
                             // else => |t| @panic(@tagName(t)),
                         };
 
-                        try function.scope.argument_map.put_no_clobber(context.my_allocator, argument_declaration, stack);
+                        try function.scope.argument_map.put_no_clobber(argument_declaration, stack);
 
                         const debug_declare_argument = try unit.instructions.append(context.my_allocator, .{
                             .debug_declare_argument = .{
@@ -9672,6 +9718,7 @@ pub const Builder = struct {
                     .node = function_node_index,
                     .parameters = comptime_parameter_declarations,
                     .is_member_call = is_member_call,
+                    .instantiations = try PinnedHashMap(u32, *Debug.Declaration.Global).init(std.mem.page_size),
                 };
                 _ = try polymorphic_function.add_instantiation(unit, context, comptime_parameter_instantiations, maybe_global orelse unreachable, current_function);
                 return V.Comptime{
@@ -9909,6 +9956,7 @@ pub const Builder = struct {
                                         .local = false,
                                         .level = builder.current_scope.level + 1,
                                         .parent = builder.current_scope,
+                                        .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                                     },
                                 },
                                 .fields = try DynamicBoundedArray(Type.Error.Field.Index).init(context.arena, @intCast(nodes.len)),
@@ -10868,7 +10916,7 @@ pub const Builder = struct {
                                         .expression = expression_to_slice,
                                         .index = 0,
                                     },
-                                    });
+                                });
                                 try builder.appendInstruction(unit, context, extract_pointer);
 
                                 const gep = try unit.instructions.append(context.my_allocator, .{
@@ -10879,7 +10927,7 @@ pub const Builder = struct {
                                         .name = try unit.processIdentifier(context, "slice_comptime_expression_slice"),
                                         .is_struct = false,
                                     },
-                                    });
+                                });
                                 try builder.appendInstruction(unit, context, gep);
 
                                 break :slice V{
@@ -10950,7 +10998,7 @@ pub const Builder = struct {
                                                             .value = expression_to_slice,
                                                             .type = pointer.type,
                                                         },
-                                                        });
+                                                    });
                                                     try builder.appendInstruction(unit, context, load);
                                                     const gep = try unit.instructions.append(context.my_allocator, .{
                                                         .get_element_pointer = .{
@@ -10989,7 +11037,7 @@ pub const Builder = struct {
                                             .insert_value = .{
                                                 .expression = .{
                                                     .value = .{
-                                                        .@"comptime" = .@"undefined",
+                                                        .@"comptime" = .undefined,
                                                     },
                                                     .type = destination_type_index,
                                                 },
@@ -11667,7 +11715,7 @@ pub const Builder = struct {
                             .@"comptime" = .{
                                 .string_literal = hash,
                             },
-                            },
+                        },
                         .type = ty,
                     };
                 },
@@ -14225,14 +14273,14 @@ pub const Builder = struct {
 
         const local_declaration = unit.local_declarations.get(declaration_index);
         assert(builder.current_scope.kind == .block);
-        try builder.current_scope.declarations.put_no_clobber(context.my_allocator, identifier_hash, &local_declaration.declaration);
+        try builder.current_scope.declarations.put_no_clobber(identifier_hash, &local_declaration.declaration);
 
         if (emit) {
             const stack = try builder.createStackVariable(unit, context, declaration_type, null);
 
             assert(builder.current_scope.kind == .block);
             const local_scope: *Debug.Scope.Local = @fieldParentPtr("scope", builder.current_scope);
-            try local_scope.local_declaration_map.put_no_clobber(context.my_allocator, local_declaration, stack);
+            try local_scope.local_declaration_map.put_no_clobber(local_declaration, stack);
 
             const debug_declare_local = try unit.instructions.append(context.my_allocator, .{
                 .debug_declare_local_variable = .{
@@ -14276,7 +14324,9 @@ pub const Builder = struct {
                     .level = builder.current_scope.level + 1,
                     .local = builder.current_scope.local,
                     .file = builder.current_file,
+                    .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
                 },
+                .local_declaration_map = try PinnedHashMap(*Debug.Declaration.Local, Instruction.Index).init(std.mem.page_size),
             },
         });
 
@@ -16323,7 +16373,7 @@ pub const Builder = struct {
                                 .value = result,
                                 .type = ti,
                             },
-                            });
+                        });
                         try builder.appendInstruction(unit, context, zero_extend);
 
                         return .{
@@ -16933,28 +16983,27 @@ pub const Unit = struct {
     constant_arrays: V.Comptime.ConstantArray.List = .{},
     constant_slices: V.Comptime.ConstantSlice.List = .{},
     error_fields: Type.Error.Field.List = .{},
-    file_token_offsets: MyHashMap(Token.Range, Debug.File.Index) = .{},
-    file_map: MyHashMap([]const u8, Debug.File.Index) = .{},
-    identifiers: MyHashMap(u32, []const u8) = .{},
-    string_literal_values: MyHashMap(u32, [:0]const u8) = .{},
-    string_literal_globals: MyHashMap(u32, *Debug.Declaration.Global) = .{},
+    file_token_offsets: PinnedHashMap(Token.Range, Debug.File.Index),
+    file_map: PinnedHashMap([]const u8, Debug.File.Index),
+    identifiers: PinnedHashMap(u32, []const u8),
+    string_literal_values: PinnedHashMap(u32, [:0]const u8),
+    string_literal_globals: PinnedHashMap(u32, *Debug.Declaration.Global),
 
-    optionals: MyHashMap(Type.Index, Type.Index) = .{},
-    pointers: MyHashMap(Type.Pointer, Type.Index) = .{},
-    slices: MyHashMap(Type.Slice, Type.Index) = .{},
-    arrays: MyHashMap(Type.Array, Type.Index) = .{},
-    integers: MyHashMap(Type.Integer, Type.Index) = .{},
-    error_unions: MyHashMap(Type.Error.Union.Descriptor, Type.Index) = .{},
-    two_structs: MyHashMap([2]Type.Index, Type.Index) = .{},
-    fields_array: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
-    name_functions: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
-    error_count: u32 = 0,
+    optionals: PinnedHashMap(Type.Index, Type.Index),
+    pointers: PinnedHashMap(Type.Pointer, Type.Index),
+    slices: PinnedHashMap(Type.Slice, Type.Index),
+    arrays: PinnedHashMap(Type.Array, Type.Index),
+    integers: PinnedHashMap(Type.Integer, Type.Index),
+    error_unions: PinnedHashMap(Type.Error.Union.Descriptor, Type.Index),
+    two_structs: PinnedHashMap([2]Type.Index, Type.Index),
+    fields_array: PinnedHashMap(Type.Index, *Debug.Declaration.Global),
+    name_functions: PinnedHashMap(Type.Index, *Debug.Declaration.Global),
 
-    code_to_emit: MyHashMap(Function.Definition.Index, *Debug.Declaration.Global) = .{},
+    external_functions: PinnedHashMap(Type.Index, *Debug.Declaration.Global),
+    type_declarations: PinnedHashMap(Type.Index, *Debug.Declaration.Global),
+    test_functions: PinnedHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global),
+    code_to_emit: PinnedHashMap(Function.Definition.Index, *Debug.Declaration.Global),
     data_to_emit: PinnedArray(*Debug.Declaration.Global),
-    external_functions: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
-    type_declarations: MyHashMap(Type.Index, *Debug.Declaration.Global) = .{},
-    test_functions: MyHashMap(*Debug.Declaration.Global, *Debug.Declaration.Global) = .{},
     scope: Debug.Scope.Global = .{
         .scope = .{
             .file = .null,
@@ -16963,6 +17012,13 @@ pub const Unit = struct {
             .column = 0,
             .level = 0,
             .local = false,
+            .declarations = .{
+                .key_pointer = undefined,
+                .value_pointer = undefined,
+                .length = 0,
+                .granularity = 0,
+                .committed = 0,
+            },
         },
     },
     root_package: *Package = undefined,
@@ -16975,6 +17031,7 @@ pub const Unit = struct {
     discard_identifiers: usize = 0,
     anon_i: usize = 0,
     anon_arr: usize = 0,
+    error_count: u32 = 0,
 
     fn dumpInstruction(instruction_index: Instruction.Index) !void {
         try write(.ir, "%");
@@ -17309,7 +17366,7 @@ pub const Unit = struct {
                 .@"struct" = optional_struct_index,
             });
 
-            try unit.optionals.put_no_clobber(context.my_allocator, element_type, optional_type_index);
+            try unit.optionals.put_no_clobber(element_type, optional_type_index);
 
             return optional_type_index;
         }
@@ -17322,7 +17379,7 @@ pub const Unit = struct {
             const type_index = try unit.types.append(context.my_allocator, .{
                 .pointer = pointer,
             });
-            try unit.pointers.put_no_clobber(context.my_allocator, pointer, type_index);
+            try unit.pointers.put_no_clobber(pointer, type_index);
 
             return type_index;
         }
@@ -17335,7 +17392,7 @@ pub const Unit = struct {
             const type_index = try unit.types.append(context.my_allocator, .{
                 .slice = slice,
             });
-            try unit.slices.put_no_clobber(context.my_allocator, slice, type_index);
+            try unit.slices.put_no_clobber(slice, type_index);
 
             return type_index;
         }
@@ -17349,7 +17406,7 @@ pub const Unit = struct {
             const array_type = try unit.types.append(context.my_allocator, .{
                 .array = array,
             });
-            try unit.arrays.put_no_clobber(context.my_allocator, array, array_type);
+            try unit.arrays.put_no_clobber(array, array_type);
 
             return array_type;
         }
@@ -17381,7 +17438,7 @@ pub const Unit = struct {
                     const type_index = try unit.types.append(context.my_allocator, .{
                         .integer = integer,
                     });
-                    try unit.integers.put_no_clobber(context.my_allocator, integer, type_index);
+                    try unit.integers.put_no_clobber(integer, type_index);
                     return type_index;
                 }
             },
@@ -17391,9 +17448,10 @@ pub const Unit = struct {
     }
 
     fn processIdentifier(unit: *Unit, context: *const Context, string: []const u8) !u32 {
+        _ = context; // autofix
         const hash = my_hash(string);
         if (unit.identifiers.get_pointer(hash) == null) {
-            try unit.identifiers.put_no_clobber(context.my_allocator, hash, string);
+            try unit.identifiers.put_no_clobber(hash, string);
         }
         return hash;
     }
@@ -17434,7 +17492,7 @@ pub const Unit = struct {
         fixed_string.len += 1;
         fixed_string[zero_index] = 0;
 
-        const string = fixed_string[0 .. zero_index :0];
+        const string = fixed_string[0..zero_index :0];
 
         return string;
     }
@@ -17508,7 +17566,7 @@ pub const Unit = struct {
         file.lexer = try lexer.analyze(file.source_code, &unit.token_buffer);
         assert(file.status == .loaded_into_memory);
         file.status = .lexed;
-        try unit.file_token_offsets.put_no_clobber(context.my_allocator, .{
+        try unit.file_token_offsets.put_no_clobber(.{
             .start = file.lexer.offset,
             .count = file.lexer.count,
         }, file_index);
@@ -17582,18 +17640,21 @@ pub const Unit = struct {
             const file_index = try unit.files.append(context.my_allocator, Debug.File{
                 .relative_path = relative_path,
                 .package = package,
-                .scope = .{ .scope = .{
-                    .file = .null,
-                    .kind = .file,
-                    .line = 0,
-                    .column = 0,
-                    .local = false,
-                    .level = 1,
-                } },
+                .scope = .{
+                    .scope = .{
+                        .file = .null,
+                        .kind = .file,
+                        .line = 0,
+                        .column = 0,
+                        .local = false,
+                        .level = 1,
+                        .declarations = try PinnedHashMap(u32, *Debug.Declaration).init(std.mem.page_size),
+                    },
+                },
             });
             // logln(.compilation, .new_file, "Adding file #{}: {s}\n", .{ file_index, full_path });
 
-            try unit.file_map.put_no_clobber(context.my_allocator, full_path, file_index);
+            try unit.file_map.put_no_clobber(full_path, file_index);
 
             return .{
                 .index = file_index,
@@ -17642,6 +17703,7 @@ pub const Unit = struct {
                     .path = main_package_absolute_directory_path,
                 },
                 .source_path = try context.my_allocator.duplicate_bytes(std.fs.path.basename(unit.descriptor.main_package_path)),
+                .dependencies = try PinnedHashMap([]const u8, *Package).init(std.mem.page_size),
             };
             break :blk result;
         };
@@ -17655,6 +17717,7 @@ pub const Unit = struct {
                     .path = directory_path,
                 },
                 .source_path = "test_runner.nat",
+                .dependencies = try PinnedHashMap([]const u8, *Package).init(std.mem.page_size),
             };
             unit.main_package = main_package;
 
@@ -17689,9 +17752,10 @@ pub const Unit = struct {
                     .handle = try std.fs.openDirAbsolute(package_descriptor.directory_path, .{}),
                 },
                 .source_path = try std.mem.concat(context.allocator, u8, &.{ package_descriptor.name, ".nat" }),
+                .dependencies = try PinnedHashMap([]const u8, *Package).init(std.mem.page_size),
             };
 
-            try unit.root_package.addDependency(context.my_allocator, package_descriptor.name, package);
+            try unit.root_package.addDependency(package_descriptor.name, package);
 
             package_ptr.* = package;
         }
@@ -17763,7 +17827,7 @@ pub const Unit = struct {
                 .@"struct" = two_struct,
             });
 
-            try unit.two_structs.put_no_clobber(context.my_allocator, types, type_index);
+            try unit.two_structs.put_no_clobber(types, type_index);
 
             return type_index;
         }
@@ -17838,11 +17902,11 @@ pub const Token = struct {
     length: u32,
     id: Token.Id,
 
-    pub const Buffer = struct{
+    pub const Buffer = struct {
         line_offsets: PinnedArray(u32) = .{},
         tokens: PinnedArray(Token) = .{},
     };
-    
+
     pub const Id = enum {
         keyword_unsigned_integer,
         keyword_signed_integer,
