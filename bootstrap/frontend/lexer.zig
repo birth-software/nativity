@@ -3,10 +3,11 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log;
 
-const data_structures = @import("../library.zig");
-const enumFromString = data_structures.enumFromString;
-const MyAllocator = data_structures.MyAllocator;
-const UnpinnedArray = data_structures.UnpinnedArray;
+const library = @import("../library.zig");
+const byte_equal = library.byte_equal;
+const enumFromString = library.enumFromString;
+const MyAllocator = library.MyAllocator;
+const PinnedArray = library.PinnedArray;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
@@ -43,31 +44,31 @@ pub const Logger = enum {
     });
 };
 
-pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.Buffer) !Result {
+pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
     assert(text.len <= std.math.maxInt(u32));
     const len: u32 = @intCast(text.len);
 
     var lexer = Result{
-        .offset = token_buffer.getOffset(),
-        .line_offset = token_buffer.getLineOffset(),
+        .offset = @enumFromInt(token_buffer.tokens.length),
+        .line_offset = token_buffer.line_offsets.length,
         .count = 0,
         .line_count = 0,
     };
 
     const time_start = std.time.Instant.now() catch unreachable;
 
-    try token_buffer.line_offsets.append(allocator, 0);
+    _ = token_buffer.line_offsets.append(0);
 
     for (text, 0..) |byte, index| {
         if (byte == '\n') {
-            try token_buffer.line_offsets.append(allocator, @intCast(index + 1));
+            _ = token_buffer.line_offsets.append(@intCast(index + 1));
         }
     }
 
     var index: u32 = 0;
     var line_index: u32 = lexer.line_offset;
 
-    try token_buffer.ensure_with_capacity(allocator, len / 3);
+    // try token_buffer.ensure_with_capacity(allocator, len / 3);
 
     // logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
@@ -110,7 +111,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                 const string = text[start_index..][0 .. index - start_index];
                 break :blk if (enumFromString(Compilation.FixedKeyword, string)) |fixed_keyword| switch (fixed_keyword) {
                     inline else => |comptime_fixed_keyword| @field(Token.Id, "fixed_keyword_" ++ @tagName(comptime_fixed_keyword)),
-                } else if (data_structures.byte_equal(string, "_")) .discard else .identifier;
+                } else if (byte_equal(string, "_")) .discard else .identifier;
             },
             '0'...'9' => blk: {
                 // Detect other non-decimal literals
@@ -481,7 +482,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
             },
             // Asm statement (special treatment)
             '`' => {
-                token_buffer.append_with_capacity(.{
+                _ = token_buffer.tokens.append(.{
                     .id = .operator_backtick,
                     .line = line_index,
                     .offset = start_index,
@@ -495,6 +496,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                     const start_ch = text[start_i];
 
                     switch (start_ch) {
+                        '\r' => index += 1,
                         '\n' => {
                             index += 1;
                             line_index += 1;
@@ -508,7 +510,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                                 }
                             }
 
-                            token_buffer.append_with_capacity(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .identifier,
                                 .offset = start_i,
                                 .length = index - start_i,
@@ -516,7 +518,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                             });
                         },
                         ',' => {
-                            token_buffer.append_with_capacity(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_comma,
                                 .line = line_index,
                                 .offset = start_i,
@@ -525,7 +527,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                             index += 1;
                         },
                         ';' => {
-                            token_buffer.append_with_capacity(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_semicolon,
                                 .line = line_index,
                                 .offset = start_i,
@@ -534,7 +536,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                             index += 1;
                         },
                         '{' => {
-                            token_buffer.append_with_capacity(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_left_brace,
                                 .line = line_index,
                                 .offset = start_i,
@@ -543,7 +545,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                             index += 1;
                         },
                         '}' => {
-                            token_buffer.append_with_capacity(.{
+                            _ = token_buffer.tokens.append(.{
                                 .id = .operator_right_brace,
                                 .line = line_index,
                                 .offset = start_i,
@@ -572,7 +574,7 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                                         }
                                     }
 
-                                    token_buffer.append_with_capacity(.{
+                                    _ = token_buffer.tokens.append(.{
                                         .id = .number_literal,
                                         .line = line_index,
                                         .offset = start_i,
@@ -582,11 +584,18 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
                                 else => unreachable,
                             }
                         },
-                        else => unreachable,
+                        else => {
+                            var ch_array : [64]u8 = undefined;
+                            try Compilation.write(.panic, "TODO char: 0x");
+                            const ch_fmt = library.format_int(&ch_array, start_ch, 16, false);
+                            try Compilation.write(.panic, ch_fmt);
+                            try Compilation.write(.panic, "\n");
+                            std.posix.exit(0);
+                        },
                     }
                 }
 
-                token_buffer.append_with_capacity(.{
+                _ = token_buffer.tokens.append(.{
                     .id = .operator_backtick,
                     .line = line_index,
                     .length = 1,
@@ -606,21 +615,16 @@ pub fn analyze(allocator: *MyAllocator, text: []const u8, token_buffer: *Token.B
         const end_index = index;
         const token_length = end_index - start_index;
 
-        token_buffer.append_with_capacity(.{
+        _ = token_buffer.tokens.append(.{
             .id = token_id,
             .offset = start_index,
             .length = token_length,
             .line = line_index,
         });
-        // const line_offset = token_buffer.line_offsets.pointer[line_index];
-        // const column = start_index - line_offset;
-        // logln(.lexer, .new_token, "T at line {}, column {}, byte offset {}, with length {} -line offset: {}- ({s})", .{ line_index, column, start_index, token_length, line_offset, @tagName(token_id) });
     }
 
-    // logln(.lexer, .end, "END LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
-
-    lexer.count = Token.sub(token_buffer.getOffset(), lexer.offset);
-    lexer.line_count = token_buffer.getLineOffset() - lexer.line_offset;
+    lexer.count = token_buffer.tokens.length - @intFromEnum(lexer.offset);
+    lexer.line_count = token_buffer.line_offsets.length - lexer.line_offset;
 
     const time_end = std.time.Instant.now() catch unreachable;
     lexer.time = time_end.since(time_start);

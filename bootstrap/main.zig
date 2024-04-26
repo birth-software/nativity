@@ -26,26 +26,21 @@ var my_allocator = PageAllocator{};
 pub fn main() !void {
     var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena_allocator.allocator();
-    var arg_it = try std.process.ArgIterator.initWithAllocator(allocator);
-    var args = library.UnpinnedArray([]const u8){};
+    const arguments: []const []const u8 = try std.process.argsAlloc(allocator);
     const context = try Compilation.createContext(allocator, &my_allocator.allocator);
-    while (arg_it.next()) |arg| {
-        try args.append(context.my_allocator, arg);
-    }
-    const arguments = args.slice();
-    const debug_args = false;
-    if (debug_args and @import("builtin").os.tag != .windows) {
-        assert(arguments.len > 0);
-        const home_dir = std.posix.getenv("HOME") orelse unreachable;
-        const timestamp = std.time.milliTimestamp();
-        var argument_list = std.ArrayList(u8).init(std.heap.page_allocator);
-        for (arguments) |arg| {
-            argument_list.appendSlice(arg) catch {};
-            argument_list.append(' ') catch {};
-        }
-        argument_list.append('\n') catch {};
-        std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{ home_dir, timestamp }) catch unreachable, argument_list.items) catch {};
-    }
+    // const debug_args = false;
+    // if (debug_args and @import("builtin").os.tag != .windows) {
+    //     assert(arguments.len > 0);
+    //     const home_dir = std.posix.getenv("HOME") orelse unreachable;
+    //     const timestamp = std.time.milliTimestamp();
+    //     var argument_list = PinnedArray(u8){};
+    //     for (arguments) |arg| {
+    //         argument_list.append_slice(context.my_allocator, arg) catch {};
+    //         argument_list.append(context.my_allocator, ' ') catch {};
+    //     }
+    //     argument_list.append(context.my_allocator, '\n') catch {};
+    //     std.fs.cwd().writeFile(std.fmt.allocPrint(std.heap.page_allocator, "{s}/dev/nativity/nat/invocation_log_{}", .{ home_dir, timestamp }) catch unreachable, argument_list.slice()) catch {};
+    // }
 
     if (arguments.len <= 1) {
         return error.InvalidInput;

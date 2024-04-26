@@ -2,10 +2,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const data_structures = @import("../library.zig");
-const UnpinnedArray = data_structures.UnpinnedArray;
-const BlockList = data_structures.BlockList;
-const enumFromString = data_structures.enumFromString;
+const library = @import("../library.zig");
+const Arena = library.Arena;
+const byte_equal = library.byte_equal;
+const BlockList = library.BlockList;
+const BoundedArray = library.BoundedArray;
+const enumFromString = library.enumFromString;
+const PinnedArray = library.PinnedArray;
+const MyAllocator = library.MyAllocator;
 
 const lexer = @import("lexer.zig");
 
@@ -62,8 +66,10 @@ pub const Node = struct {
     token: Token.Index,
     id: Id,
 
-    pub const List = BlockList(@This(), enum {});
-    pub usingnamespace List.Index;
+    // TODO: this is dangerous
+    pub const StackList = BoundedArray(Node.Index, 512);
+
+    pub const Index = PinnedArray(Node).Index;
 
     pub const Range = struct {
         start: u32,
@@ -226,11 +232,12 @@ const Analyzer = struct {
     lexer: lexer.Result,
     token_i: Token.Index,
     token_buffer: *Token.Buffer,
-    nodes: *Node.List,
-    node_lists: *UnpinnedArray(UnpinnedArray(Node.Index)),
+    nodes: *PinnedArray(Node),
+    node_lists: *PinnedArray([]const Node.Index),
     source_file: []const u8,
     allocator: Allocator,
-    my_allocator: *data_structures.MyAllocator,
+    my_allocator: *MyAllocator,
+    arena: *Arena,
     suffix_depth: usize = 0,
 
     fn expectToken(analyzer: *Analyzer, expected_token_id: Token.Id) !Token.Index {
@@ -259,18 +266,14 @@ const Analyzer = struct {
     }
 
     fn getTokenOffset(analyzer: *Analyzer, token_index: Token.Index) u32 {
-        const index = Token.unwrap(token_index);
-        assert(index < analyzer.token_buffer.length);
-        const offset = analyzer.token_buffer.offsets[index];
-        return offset;
+        const token = analyzer.token_buffer.tokens.get(token_index);
+        return token.offset;
     }
 
     fn peekTokenAhead(analyzer: *Analyzer, ahead_offset: u32) Token.Id {
-        const token_index = Token.addInt(analyzer.token_i, ahead_offset);
-        const index = Token.unwrap(token_index);
-        assert(index < analyzer.token_buffer.length);
-        const token = analyzer.token_buffer.ids[index];
-        return token;
+        const index = @intFromEnum(analyzer.token_i) + ahead_offset;
+        const token = analyzer.token_buffer.tokens.get_unchecked(index);
+        return token.id;
     }
 
     fn peekToken(analyzer: *Analyzer) Token.Id {
@@ -280,11 +283,11 @@ const Analyzer = struct {
 
     fn hasTokens(analyzer: *Analyzer) bool {
         const token_end = analyzer.getTokenEnd();
-        return Token.unwrap(analyzer.token_i) < token_end;
+        return @intFromEnum(analyzer.token_i) < token_end;
     }
 
     fn getTokenEnd(analyzer: *const Analyzer) u32 {
-        return @intFromEnum(Token.addInt(analyzer.lexer.offset, analyzer.lexer.count));
+        return @intFromEnum(analyzer.lexer.offset) + analyzer.lexer.count;
     }
 
     fn consumeToken(analyzer: *Analyzer) void {
@@ -292,29 +295,26 @@ const Analyzer = struct {
     }
 
     fn consumeTokens(analyzer: *Analyzer, token_count: u32) void {
-        assert(Token.unwrap(Token.addInt(analyzer.token_i, token_count)) <= analyzer.getTokenEnd());
+        assert((@intFromEnum(analyzer.token_i) + token_count) <= analyzer.getTokenEnd());
         // log(.parser, .consume_token, "Consuming {} {s}: ", .{ token_count, if (token_count == 1) "token" else "tokens" });
 
-        for (0..token_count) |i_usize| {
-            const i: u32 = @intCast(i_usize);
-            const token_id = analyzer.peekTokenAhead(i);
-            _ = token_id; // autofix
-            const token_index = Token.addInt(analyzer.token_i, i);
-            const token_bytes = analyzer.bytes(token_index);
-            _ = token_bytes; // autofix
-            // log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token_id), token_bytes });
-        }
+        // for (0..token_count) |i_usize| {
+        //     const i: u32 = @intCast(i_usize);
+        //     const token_id = analyzer.peekTokenAhead(i);
+        //     _ = token_id; // autofix
+        //     const token_index = @intFromEnum(analyzer.token_i) + i;
+        //     const token_bytes = analyzer.bytes(token_index);
+        //     _ = token_bytes; // autofix
+        //     // log(.parser, .consume_token, "{s}, '{s}'", .{ @tagName(token_id), token_bytes });
+        // }
 
         // log(.parser, .consume_token, "\n", .{});
-        analyzer.token_i = Token.addInt(analyzer.token_i, token_count);
+        analyzer.token_i = @enumFromInt(@intFromEnum(analyzer.token_i) + token_count);
     }
 
     fn bytes(analyzer: *const Analyzer, token_index: Token.Index) []const u8 {
-        const index = Token.unwrap(token_index);
-        assert(index < analyzer.token_buffer.length);
-        const offset = analyzer.token_buffer.offsets[index];
-        const len = analyzer.token_buffer.lengths[index];
-        const slice = analyzer.source_file[offset..][0..len];
+        const token = analyzer.token_buffer.tokens.get(token_index);
+        const slice = analyzer.source_file[token.offset..][0..token.length];
         return slice;
     }
 
@@ -340,13 +340,14 @@ const Analyzer = struct {
                 const attribute_node_index: Node.Index = if (analyzer.peekToken() == .operator_colon) b: {
                     analyzer.consumeToken();
 
-                    var list = UnpinnedArray(Node.Index){};
+                    var stack_list = Node.StackList{};
+
                     while (analyzer.peekToken() != .operator_assign) {
                         const identifier = try analyzer.expectToken(.identifier);
                         const identifier_name = analyzer.bytes(identifier);
 
                         const attribute_node = inline for (@typeInfo(Compilation.Debug.Declaration.Global.Attribute).Enum.fields) |enum_field| {
-                            if (data_structures.byte_equal(identifier_name, enum_field.name)) {
+                            if (byte_equal(identifier_name, enum_field.name)) {
                                 const attribute = @field(Compilation.Debug.Declaration.Global.Attribute, enum_field.name);
                                 const attribute_node = switch (attribute) {
                                     .@"export",
@@ -361,7 +362,8 @@ const Analyzer = struct {
                                 break attribute_node;
                             }
                         } else @panic(identifier_name);
-                        try list.append(analyzer.my_allocator, attribute_node);
+
+                        stack_list.appendAssumeCapacity(attribute_node);
 
                         switch (analyzer.peekToken()) {
                             .operator_assign => {},
@@ -370,7 +372,7 @@ const Analyzer = struct {
                         }
                     }
 
-                    break :b try analyzer.nodeList(list);
+                    break :b try analyzer.nodeList(&stack_list);
                 } else .null;
 
                 break :blk try analyzer.addNode(.{
@@ -427,14 +429,14 @@ const Analyzer = struct {
 
     fn functionPrototype(analyzer: *Analyzer) !Node.Index {
         const token = analyzer.token_i;
-        var attribute_and_return_type_node_list = UnpinnedArray(Node.Index){};
+        var attribute_and_return_type_node_list = Node.StackList{};
 
         while (analyzer.peekToken() != .operator_left_parenthesis) {
             const identifier = try analyzer.expectToken(.identifier);
             const identifier_name = analyzer.bytes(identifier);
 
             const attribute_node = inline for (@typeInfo(Compilation.Function.Attribute).Enum.fields) |enum_field| {
-                if (data_structures.byte_equal(identifier_name, enum_field.name)) {
+                if (byte_equal(identifier_name, enum_field.name)) {
                     const attribute = @field(Compilation.Function.Attribute, enum_field.name);
                     const attribute_node = switch (attribute) {
                         .naked => try analyzer.addNode(.{
@@ -460,7 +462,7 @@ const Analyzer = struct {
                 }
             } else @panic(identifier_name);
 
-            try attribute_and_return_type_node_list.append(analyzer.my_allocator, attribute_node);
+            attribute_and_return_type_node_list.appendAssumeCapacity(attribute_node);
 
             if (analyzer.peekToken() == .operator_comma) analyzer.consumeToken();
         }
@@ -469,13 +471,13 @@ const Analyzer = struct {
 
         const arguments = try analyzer.argumentList(.operator_left_parenthesis, .operator_right_parenthesis);
         const return_type = try analyzer.typeExpression();
-        try attribute_and_return_type_node_list.append(analyzer.my_allocator, return_type);
+        attribute_and_return_type_node_list.appendAssumeCapacity(return_type);
 
         const function_prototype = try analyzer.addNode(.{
             .id = .function_prototype,
             .token = token,
             .left = arguments,
-            .right = try analyzer.nodeList(attribute_and_return_type_node_list),
+            .right = try analyzer.nodeList(&attribute_and_return_type_node_list),
         });
 
         return function_prototype;
@@ -486,7 +488,7 @@ const Analyzer = struct {
             _ = try analyzer.expectToken(start_token);
         }
 
-        var list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         while (analyzer.peekToken() != end_token) {
             const identifier_token = analyzer.token_i;
@@ -508,7 +510,7 @@ const Analyzer = struct {
                 analyzer.consumeToken();
             }
 
-            try list.append(analyzer.my_allocator, try analyzer.addNode(.{
+            list.appendAssumeCapacity(try analyzer.addNode(.{
                 .id = id,
                 .token = identifier_token,
                 .left = type_expression,
@@ -518,8 +520,8 @@ const Analyzer = struct {
 
         _ = try analyzer.expectToken(end_token);
 
-        if (list.length != 0) {
-            return try analyzer.nodeList(list);
+        if (list.len != 0) {
+            return try analyzer.nodeList(&list);
         } else {
             return Node.Index.null;
         }
@@ -533,7 +535,7 @@ const Analyzer = struct {
 
     fn block(analyzer: *Analyzer) anyerror!Node.Index {
         const left_brace = try analyzer.expectToken(.operator_left_brace);
-        var list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         while (analyzer.peekToken() != .operator_right_brace) {
             const first_statement_token = analyzer.peekToken();
@@ -550,7 +552,7 @@ const Analyzer = struct {
                 => try analyzer.symbolDeclaration(),
             };
 
-            try list.append(analyzer.my_allocator, statement_index);
+            list.appendAssumeCapacity(statement_index);
         }
 
         _ = try analyzer.expectToken(.operator_right_brace);
@@ -558,7 +560,7 @@ const Analyzer = struct {
         return try analyzer.addNode(.{
             .id = .block,
             .token = left_brace,
-            .left = try analyzer.nodeList(list),
+            .left = try analyzer.nodeList(&list),
             .right = Node.Index.null,
         });
     }
@@ -596,7 +598,7 @@ const Analyzer = struct {
         // logln(.parser, .@"switch", "Parsed switch expression...", .{});
         _ = try analyzer.expectToken(.operator_left_brace);
 
-        var list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         while (analyzer.peekToken() != .operator_right_brace) {
             const case_token = analyzer.token_i;
@@ -607,7 +609,7 @@ const Analyzer = struct {
                     break :blk Node.Index.null;
                 },
                 else => blk: {
-                    var array_list = UnpinnedArray(Node.Index){};
+                    var array_list = Node.StackList{};
                     while (true) {
                         const token = analyzer.token_i;
                         const left = try analyzer.expression();
@@ -625,7 +627,7 @@ const Analyzer = struct {
                             else => left,
                         };
 
-                        try array_list.append(analyzer.my_allocator, switch_case_node);
+                        array_list.appendAssumeCapacity(switch_case_node);
 
                         switch (analyzer.peekToken()) {
                             .operator_comma => analyzer.consumeToken(),
@@ -634,10 +636,10 @@ const Analyzer = struct {
                         }
                     }
 
-                    break :blk switch (array_list.length) {
+                    break :blk switch (array_list.len) {
                         0 => unreachable,
-                        1 => array_list.pointer[0],
-                        else => try analyzer.nodeList(array_list),
+                        1 => array_list.buffer[0],
+                        else => try analyzer.nodeList(&array_list),
                     };
                 },
             };
@@ -658,7 +660,7 @@ const Analyzer = struct {
                 .right = expr,
             });
 
-            try list.append(analyzer.my_allocator, node);
+            list.appendAssumeCapacity(node);
         }
 
         _ = try analyzer.expectToken(.operator_right_brace);
@@ -667,7 +669,7 @@ const Analyzer = struct {
             .id = .@"switch",
             .token = switch_token,
             .left = switch_expression,
-            .right = try analyzer.nodeList(list),
+            .right = try analyzer.nodeList(&list),
         });
     }
 
@@ -743,7 +745,7 @@ const Analyzer = struct {
         const token = try analyzer.expectToken(.fixed_keyword_for);
         _ = try analyzer.expectToken(.operator_left_parenthesis);
 
-        var for_expression_list = UnpinnedArray(Node.Index){};
+        var for_expression_list = Node.StackList{};
 
         while (analyzer.peekToken() != .operator_right_parenthesis) {
             const expression_token = analyzer.token_i;
@@ -768,7 +770,7 @@ const Analyzer = struct {
                 else => |t| @panic(@tagName(t)),
             };
 
-            try for_expression_list.append(analyzer.my_allocator, node_index);
+            for_expression_list.appendAssumeCapacity(node_index);
 
             switch (analyzer.peekToken()) {
                 .operator_comma => analyzer.consumeToken(),
@@ -781,7 +783,7 @@ const Analyzer = struct {
 
         _ = try analyzer.expectToken(.operator_bar);
 
-        var payload_nodes = UnpinnedArray(Node.Index){};
+        var payload_nodes = Node.StackList{};
 
         while (analyzer.peekToken() != .operator_bar) {
             const payload_token = analyzer.token_i;
@@ -799,7 +801,7 @@ const Analyzer = struct {
                 else => |t| @panic(@tagName(t)),
             }
 
-            try payload_nodes.append(analyzer.my_allocator, try analyzer.addNode(.{
+            payload_nodes.appendAssumeCapacity(try analyzer.addNode(.{
                 .id = id,
                 .token = payload_token,
                 .left = Node.Index.null,
@@ -809,15 +811,15 @@ const Analyzer = struct {
 
         _ = try analyzer.expectToken(.operator_bar);
 
-        if (payload_nodes.length != for_expression_list.length) {
+        if (payload_nodes.len != for_expression_list.len) {
             unreachable;
         }
 
         const for_condition_node = try analyzer.addNode(.{
             .id = .for_condition,
             .token = token,
-            .left = try analyzer.nodeList(for_expression_list),
-            .right = try analyzer.nodeList(payload_nodes),
+            .left = try analyzer.nodeList(&for_expression_list),
+            .right = try analyzer.nodeList(&payload_nodes),
         });
 
         const true_expression = switch (analyzer.peekToken()) {
@@ -933,22 +935,22 @@ const Analyzer = struct {
         const intrinsic_name = analyzer.bytes(intrinsic_token)[1..];
 
         const intrinsic_id = inline for (@typeInfo(Compilation.IntrinsicId).Enum.fields) |enum_field| {
-            if (data_structures.byte_equal(enum_field.name, intrinsic_name)) {
+            if (byte_equal(enum_field.name, intrinsic_name)) {
                 break @field(Compilation.IntrinsicId, enum_field.name);
             }
         } else @panic(intrinsic_name);
 
-        var list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         if (intrinsic_id == .@"asm") {
             const backtick = try analyzer.expectToken(.operator_backtick);
-            var instruction_list = UnpinnedArray(Node.Index){};
+            var instruction_list = Node.StackList{};
 
             while (analyzer.peekToken() != .operator_backtick) {
                 const instruction_token = analyzer.token_i;
                 const instruction_name = try analyzer.identifierNode();
 
-                var operand_list = UnpinnedArray(Node.Index){};
+                var operand_list = Node.StackList{};
                 while (analyzer.peekToken() != .operator_semicolon) {
                     const node = switch (analyzer.peekToken()) {
                         .identifier => try analyzer.addNode(.{
@@ -990,7 +992,7 @@ const Analyzer = struct {
                         .operator_semicolon => {},
                         else => |t| @panic(@tagName(t)),
                     }
-                    try operand_list.append(analyzer.my_allocator, node);
+                    operand_list.appendAssumeCapacity(node);
                 }
 
                 analyzer.consumeToken();
@@ -999,10 +1001,10 @@ const Analyzer = struct {
                     .id = .assembly_instruction,
                     .token = instruction_token,
                     .left = instruction_name,
-                    .right = try analyzer.nodeList(operand_list),
+                    .right = try analyzer.nodeList(&operand_list),
                 });
 
-                try instruction_list.append(analyzer.my_allocator, instruction);
+                instruction_list.appendAssumeCapacity(instruction);
             }
 
             _ = try analyzer.expectToken(.operator_backtick);
@@ -1011,15 +1013,15 @@ const Analyzer = struct {
             const assembly_block = try analyzer.addNode(.{
                 .id = .assembly_code_block,
                 .token = backtick,
-                .left = try analyzer.nodeList(instruction_list),
+                .left = try analyzer.nodeList(&instruction_list),
                 .right = .null,
             });
-            try list.append(analyzer.my_allocator, assembly_block);
+            list.appendAssumeCapacity(assembly_block);
 
             const intrinsic = try analyzer.addNode(.{
                 .id = .intrinsic,
                 .token = intrinsic_token,
-                .left = try analyzer.nodeList(list),
+                .left = try analyzer.nodeList(&list),
                 .right = @enumFromInt(@intFromEnum(intrinsic_id)),
             });
 
@@ -1027,7 +1029,7 @@ const Analyzer = struct {
         } else {
             while (analyzer.peekToken() != .operator_right_parenthesis) {
                 const parameter = try analyzer.expression();
-                try list.append(analyzer.my_allocator, parameter);
+                list.appendAssumeCapacity(parameter);
 
                 switch (analyzer.peekToken()) {
                     .operator_comma => analyzer.consumeToken(),
@@ -1043,7 +1045,7 @@ const Analyzer = struct {
         return try analyzer.addNode(.{
             .id = .intrinsic,
             .token = intrinsic_token,
-            .left = try analyzer.nodeList(list),
+            .left = try analyzer.nodeList(&list),
             .right = @enumFromInt(@intFromEnum(intrinsic_id)),
         });
     }
@@ -1454,7 +1456,7 @@ const Analyzer = struct {
     fn pointerOrArrayTypeExpression(analyzer: *Analyzer, expected: PointerOrArrayTypeExpectedExpression) !Node.Index {
         const first = analyzer.token_i;
 
-        var list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         const expression_type: Node.Id = switch (expected) {
             .single_pointer_type => blk: {
@@ -1463,7 +1465,7 @@ const Analyzer = struct {
                 break :blk .pointer_type;
             },
             .many_pointer_type => blk: {
-                try list.append(analyzer.my_allocator, try analyzer.addNode(.{
+                list.appendAssumeCapacity(try analyzer.addNode(.{
                     .id = .many_pointer_expression,
                     .token = analyzer.token_i,
                     .left = Node.Index.null,
@@ -1473,7 +1475,7 @@ const Analyzer = struct {
                 _ = try analyzer.expectToken(.operator_ampersand);
                 switch (analyzer.peekToken()) {
                     .operator_right_bracket => {},
-                    .operator_colon => try list.append(analyzer.my_allocator, try analyzer.parseTermination()),
+                    .operator_colon => list.appendAssumeCapacity(try analyzer.parseTermination()),
                     else => |t| @panic(@tagName(t)),
                 }
                 _ = try analyzer.expectToken(.operator_right_bracket);
@@ -1488,17 +1490,17 @@ const Analyzer = struct {
                         break :blk .slice_type;
                     },
                     .operator_colon => {
-                        try list.append(analyzer.my_allocator, try analyzer.parseTermination());
+                        list.appendAssumeCapacity(try analyzer.parseTermination());
                         _ = try analyzer.expectToken(.operator_right_bracket);
                         break :blk .slice_type;
                     },
                     else => {
                         const length_expression = try analyzer.expression();
-                        try list.append(analyzer.my_allocator, length_expression);
+                        list.appendAssumeCapacity(length_expression);
 
                         switch (analyzer.peekToken()) {
                             .operator_right_bracket => {},
-                            .operator_colon => try list.append(analyzer.my_allocator, try analyzer.parseTermination()),
+                            .operator_colon => list.appendAssumeCapacity(try analyzer.parseTermination()),
                             else => |t| @panic(@tagName(t)),
                         }
 
@@ -1523,17 +1525,17 @@ const Analyzer = struct {
             analyzer.consumeTokens(@intFromBool(analyzer.peekToken() == .fixed_keyword_const));
 
             if (const_node != .null) {
-                try list.append(analyzer.my_allocator, const_node);
+                list.appendAssumeCapacity(const_node);
             }
         } else {
-            assert(list.length > 0);
+            assert(list.len > 0);
         }
 
         const type_expression = try analyzer.typeExpression();
         assert(type_expression != .null);
-        try list.append(analyzer.my_allocator, type_expression);
+        list.appendAssumeCapacity(type_expression);
 
-        const node_list = try analyzer.nodeList(list);
+        const node_list = try analyzer.nodeList(&list);
 
         const node = Node{
             .id = expression_type,
@@ -1542,15 +1544,7 @@ const Analyzer = struct {
             .right = Node.Index.null,
         };
 
-        // logln(.parser, .pointer_like_type_expression, "ARRAY START\n===========", .{});
-        // for (list.slice()) |ni| {
-        // const n = analyzer.nodes.get(ni);
-        // logln(.parser, .pointer_like_type_expression, "{s} node element: {s}", .{ @tagName(expression_type), @tagName(n.id) });
-        // }
-        // logln(.parser, .pointer_like_type_expression, "ARRAY END\n=========", .{});
-
         const node_index = try analyzer.addNode(node);
-        // logln(.parser, .pointer_like_type_expression, "Pointer end", .{});
 
         switch (analyzer.peekToken()) {
             .operator_comma,
@@ -1642,7 +1636,7 @@ const Analyzer = struct {
                     const left_parenthesis = analyzer.token_i;
                     analyzer.consumeToken();
 
-                    var expression_list = UnpinnedArray(Node.Index){};
+                    var expression_list = Node.StackList{};
                     // logln(.parser, .suffix, "[DEPTH={}] Initializating suffix call-like expression", .{analyzer.suffix_depth});
                     while (analyzer.peekToken() != .operator_right_parenthesis) {
                         const current_token = analyzer.token_i;
@@ -1661,7 +1655,7 @@ const Analyzer = struct {
                             });
                         }
 
-                        try expression_list.append(analyzer.my_allocator, parameter);
+                        expression_list.appendAssumeCapacity(parameter);
 
                         switch (analyzer.peekToken()) {
                             .operator_right_parenthesis => {},
@@ -1681,7 +1675,7 @@ const Analyzer = struct {
                         .id = .call,
                         .token = left_parenthesis,
                         .left = result,
-                        .right = try analyzer.nodeList(expression_list),
+                        .right = try analyzer.nodeList(&expression_list),
                     });
                 } else {
                     return result;
@@ -1695,7 +1689,7 @@ const Analyzer = struct {
     fn containerLiteral(analyzer: *Analyzer, type_node: Node.Index) anyerror!Node.Index {
         const token = try analyzer.expectToken(.operator_left_brace);
 
-        var list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         const InitializationType = enum {
             anonymous,
@@ -1724,7 +1718,7 @@ const Analyzer = struct {
                                 .right = Node.Index.null,
                             });
 
-                            try list.append(analyzer.my_allocator, field_initialization);
+                            list.appendAssumeCapacity(field_initialization);
                             switch (analyzer.peekToken()) {
                                 .operator_comma => analyzer.consumeToken(),
                                 else => {},
@@ -1735,7 +1729,7 @@ const Analyzer = struct {
                         else => |t| @panic(@tagName(t)),
                     },
                     else => blk: {
-                        try list.append(analyzer.my_allocator, try analyzer.anonymousExpression());
+                        list.appendAssumeCapacity(try analyzer.anonymousExpression());
                         _ = try analyzer.expectToken(.operator_comma);
                         break :blk .anonymous;
                     },
@@ -1752,7 +1746,7 @@ const Analyzer = struct {
                         else => {},
                     }
 
-                    try list.append(analyzer.my_allocator, field_expression_initializer);
+                    list.appendAssumeCapacity(field_expression_initializer);
                     break :blk .anonymous;
                 },
                 else => |t| @panic(@tagName(t)),
@@ -1796,7 +1790,7 @@ const Analyzer = struct {
             },
             .token = token,
             .left = type_node,
-            .right = try analyzer.nodeList(list),
+            .right = try analyzer.nodeList(&list),
         });
     }
 
@@ -1814,7 +1808,7 @@ const Analyzer = struct {
 
     fn processContainerType(analyzer: *Analyzer, maybe_token_id: ?Token.Id) !Node.Index {
         const token_i = if (maybe_token_id) |tid| try analyzer.expectToken(tid) else analyzer.token_i;
-        assert(Token.unwrap(analyzer.token_i) < analyzer.token_buffer.length);
+        assert(@intFromEnum(analyzer.token_i) < analyzer.token_buffer.tokens.length);
         const token_id = maybe_token_id orelse .fixed_keyword_struct;
         const container_type: Compilation.ContainerType = switch (token_id) {
             .fixed_keyword_struct => .@"struct",
@@ -1832,10 +1826,10 @@ const Analyzer = struct {
 
         const parameters_node = if (analyzer.hasTokens() and analyzer.peekToken() == .operator_left_parenthesis) b: {
             analyzer.consumeToken();
-            var list = UnpinnedArray(Node.Index){};
+            var list = Node.StackList{};
             while (analyzer.peekToken() != .operator_right_parenthesis) {
                 const parameter_node = try analyzer.expression();
-                try list.append(analyzer.my_allocator, parameter_node);
+                list.appendAssumeCapacity(parameter_node);
                 switch (analyzer.peekToken()) {
                     .operator_comma => analyzer.consumeToken(),
                     else => {},
@@ -1844,11 +1838,11 @@ const Analyzer = struct {
 
             analyzer.consumeToken();
 
-            break :b try analyzer.nodeList(list);
+            break :b try analyzer.nodeList(&list);
         } else Node.Index.null;
 
         if (maybe_token_id) |_| _ = try analyzer.expectToken(.operator_left_brace);
-        var node_list = UnpinnedArray(Node.Index){};
+        var list = Node.StackList{};
 
         while (analyzer.hasTokens() and analyzer.peekToken() != .operator_right_brace) {
             const first = analyzer.token_i;
@@ -1933,7 +1927,7 @@ const Analyzer = struct {
             // logln(.parser, .container_members, "Container member {s}", .{@tagName(member_node.id)});
             assert(member_node.id != .identifier);
 
-            try node_list.append(analyzer.my_allocator, member_node_index);
+            list.appendAssumeCapacity(member_node_index);
         }
 
         if (maybe_token_id) |_| _ = try analyzer.expectToken(.operator_right_brace);
@@ -1953,7 +1947,7 @@ const Analyzer = struct {
         return try analyzer.addNode(.{
             .id = node_id,
             .token = token_i,
-            .left = try analyzer.nodeList(node_list),
+            .left = try analyzer.nodeList(&list),
             .right = parameters_node,
         });
     }
@@ -2141,7 +2135,7 @@ const Analyzer = struct {
                 } else Node.Index.null;
 
                 _ = try analyzer.expectToken(.operator_left_brace);
-                var list = UnpinnedArray(Node.Index){};
+                var list = Node.StackList{};
 
                 while (analyzer.peekToken() != .operator_right_brace) {
                     const tok_i = analyzer.token_i;
@@ -2167,7 +2161,7 @@ const Analyzer = struct {
                         .right = value_associated,
                     });
 
-                    try list.append(analyzer.my_allocator, error_field_node);
+                    list.appendAssumeCapacity(error_field_node);
                 }
 
                 analyzer.consumeToken();
@@ -2175,7 +2169,7 @@ const Analyzer = struct {
                 break :blk try analyzer.addNode(.{
                     .id = .error_type,
                     .token = token_i,
-                    .left = try analyzer.nodeList(list),
+                    .left = try analyzer.nodeList(&list),
                     .right = backing_type,
                 });
             },
@@ -2323,7 +2317,7 @@ const Analyzer = struct {
                     .right = blk: {
                         const t = analyzer.token_i;
                         analyzer.consumeToken();
-                        break :blk Node.wrap(Token.unwrap(t));
+                        break :blk @enumFromInt(@intFromEnum(t));
                     },
                 }),
                 else => |t| @panic(@tagName(t)),
@@ -2335,7 +2329,8 @@ const Analyzer = struct {
     }
 
     fn addNode(analyzer: *Analyzer, node: Node) !Node.Index {
-        const node_index = try analyzer.nodes.append(analyzer.my_allocator, node);
+        const node_pointer = analyzer.nodes.append(node);
+        const node_index = analyzer.nodes.get_index(node_pointer);
         // logln(.parser, .node_creation, "Adding node #{} {s} to file #{} (left: {}, right: {})", .{ Node.unwrap(node_index), @tagName(node.id), File.unwrap(analyzer.file_index), switch (node.left) {
         //     .null => 0xffff_ffff,
         //     else => Node.unwrap(node.left),
@@ -2358,12 +2353,14 @@ const Analyzer = struct {
         return node_index;
     }
 
-    fn nodeList(analyzer: *Analyzer, node_list: UnpinnedArray(Node.Index)) !Node.Index {
+    fn nodeList(analyzer: *Analyzer, stack_list: *Node.StackList) !Node.Index {
+        const heap_list = try analyzer.arena.new_array(Node.Index, stack_list.len);
+        @memcpy(heap_list, stack_list.slice());
         const index = analyzer.node_lists.length;
-        try analyzer.node_lists.append(analyzer.my_allocator, node_list);
+        _ = analyzer.node_lists.append(heap_list);
         return try analyzer.addNode(.{
             .id = .node_list,
-            .token = Token.wrap(0),
+            .token = @enumFromInt(0),
             .left = @enumFromInt(index),
             .right = Node.Index.null,
         });
@@ -2384,7 +2381,7 @@ const Analyzer = struct {
 };
 
 // Here it is assumed that left brace is consumed
-pub fn analyze(allocator: Allocator, my_allocator: *data_structures.MyAllocator, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *Node.List, node_lists: *UnpinnedArray(UnpinnedArray(Node.Index))) !Result {
+pub fn analyze(allocator: Allocator, my_allocator: *MyAllocator, arena: *Arena, lexer_result: lexer.Result, source_file: []const u8, token_buffer: *Token.Buffer, node_list: *PinnedArray(Node), node_lists: *PinnedArray([]const Node.Index)) !Result {
     const start = std.time.Instant.now() catch unreachable;
     var analyzer = Analyzer{
         .lexer = lexer_result,
@@ -2396,6 +2393,7 @@ pub fn analyze(allocator: Allocator, my_allocator: *data_structures.MyAllocator,
         .my_allocator = my_allocator,
         .nodes = node_list,
         .node_lists = node_lists,
+        .arena = arena,
     };
     const main_node_index = try analyzer.processContainerType(null);
 
