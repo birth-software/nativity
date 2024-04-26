@@ -496,6 +496,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                     const start_ch = text[start_i];
 
                     switch (start_ch) {
+                        '\r' => index += 1,
                         '\n' => {
                             index += 1;
                             line_index += 1;
@@ -583,7 +584,14 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                                 else => unreachable,
                             }
                         },
-                        else => unreachable,
+                        else => {
+                            var ch_array : [64]u8 = undefined;
+                            try Compilation.write(.panic, "TODO char: 0x");
+                            const ch_fmt = library.format_int(&ch_array, start_ch, 16, false);
+                            try Compilation.write(.panic, ch_fmt);
+                            try Compilation.write(.panic, "\n");
+                            std.posix.exit(0);
+                        },
                     }
                 }
 
