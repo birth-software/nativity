@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Build and test
-        run: sh ci/linux_gnu_runner.sh
+        run: ./ci/linux_gnu_runner.sh
   macos:
     runs-on: macos-latest
     timeout-minutes: 15
@@ -24,4 +24,4 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Build and test
-        run: sh ci/macos_runner.sh
+        run: ./ci/macos_runner.sh
