@@ -648,12 +648,22 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                                 "/usr/lib/clang/17/include",
                                 "/usr/include",
                                 "/usr/include/x86_64-linux-gnu",
-                            } else &.{
-                                "/usr/include/c++/13.2.1",
-                                "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
-                                "/usr/lib/clang/17/include",
-                                "/usr/include",
-                                "/usr/include/linux",
+                            } else switch (@import("builtin").cpu.arch) {
+                                .x86_64 => &.{
+                                    "/usr/include/c++/13.2.1",
+                                    "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
+                                    "/usr/lib/clang/17/include",
+                                    "/usr/include",
+                                    "/usr/include/linux",
+                                },
+                                .aarch64 => &.{
+                                    "/usr/include/c++/13",
+                                    "/usr/include/c++/13/aarch64-redhat-linux",
+                                    "/usr/lib/clang/17/include",
+                                    "/usr/include",
+                                    "/usr/include/linux",
+                                },
+                                else => unreachable,
                             },
                             else => unreachable, //@compileError("ABI not supported"),
                         },
@@ -2771,28 +2781,25 @@ const Abi = enum {
 pub fn buildExecutable(context: *const Context, arguments: []const []const u8, options: ExecutableOptions) !void {
     var maybe_executable_path: ?[]const u8 = null;
     var maybe_main_package_path: ?[]const u8 = null;
-    var arch: Arch = undefined;
-    var os: Os = undefined;
-    var abi: Abi = undefined;
 
-    switch (@import("builtin").os.tag) {
-        .linux => {
-            arch = .x86_64;
-            os = .linux;
-            abi = .gnu;
-        },
-        .macos => {
-            arch = .aarch64;
-            os = .macos;
-            abi = .none;
-        },
-        .windows => {
-            arch = .x86_64;
-            os = .windows;
-            abi = .gnu;
-        },
+    // TODO: make these mutable
+    const arch: Arch = switch (@import("builtin").cpu.arch) {
+        .aarch64 => .aarch64,
+        .x86_64 => .x86_64,
         else => unreachable,
-    }
+    };
+    const os: Os = switch (@import("builtin").os.tag) {
+        .linux => .linux,
+        .macos => .macos,
+        .windows => .windows,
+        else => unreachable,
+    };
+    const abi: Abi = switch (@import("builtin").os.tag) {
+        .linux => .gnu,
+        .macos => .none,
+        .windows => .gnu,
+        else => unreachable,
+    };
 
     var maybe_only_parse: ?bool = null;
     var link_libc = false;
@@ -2982,7 +2989,7 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
     try unit.compile(context);
 }
 
-fn createUnit(context: *const Context, arguments: struct{
+fn createUnit(context: *const Context, arguments: struct {
     main_package_path: []const u8,
     executable_path: []const u8,
     object_path: []const u8,
@@ -2996,7 +3003,7 @@ fn createUnit(context: *const Context, arguments: struct{
     name: []const u8,
     is_test: bool,
     c_source_files: []const []const u8,
-}) !*Unit{
+}) !*Unit {
     const unit = try context.allocator.create(Unit);
     unit.* = .{
         .descriptor = .{
@@ -4687,86 +4694,89 @@ pub const Builder = struct {
                 };
             },
             .@"asm" => {
-                const architecture = InlineAssembly.x86_64;
+                switch (unit.descriptor.arch) {
+                    inline else => |arch| {
+                        const architecture = @field(InlineAssembly, @tagName(arch));
+                        assert(argument_node_list.len == 1);
+                        const assembly_block_node = unit.getNode(argument_node_list[0]);
+                        const instruction_node_list = unit.getNodeList(assembly_block_node.left);
+                        var instructions = try context.arena.new_array(InlineAssembly.Instruction.Index, instruction_node_list.len);
+                        instructions.len = 0;
 
-                assert(argument_node_list.len == 1);
-                const assembly_block_node = unit.getNode(argument_node_list[0]);
-                const instruction_node_list = unit.getNodeList(assembly_block_node.left);
-                var instructions = try context.arena.new_array(InlineAssembly.Instruction.Index, instruction_node_list.len);
-                instructions.len = 0;
+                        for (instruction_node_list) |assembly_statement_node_index| {
+                            const assembly_instruction_node = unit.getNode(assembly_statement_node_index);
+                            const assembly_instruction_name_node = unit.getNode(assembly_instruction_node.left);
+                            const instruction_name = unit.getExpectedTokenBytes(assembly_instruction_name_node.token, .identifier);
+                            const instruction = inline for (@typeInfo(architecture.Instruction).Enum.fields) |instruction_enum_field| {
+                                if (byte_equal(instruction_name, instruction_enum_field.name)) {
+                                    break @field(architecture.Instruction, instruction_enum_field.name);
+                                }
+                            } else unreachable;
+                            const operand_nodes = unit.getNodeList(assembly_instruction_node.right);
 
-                for (instruction_node_list) |assembly_statement_node_index| {
-                    const assembly_instruction_node = unit.getNode(assembly_statement_node_index);
-                    const assembly_instruction_name_node = unit.getNode(assembly_instruction_node.left);
-                    const instruction_name = unit.getExpectedTokenBytes(assembly_instruction_name_node.token, .identifier);
-                    const instruction = inline for (@typeInfo(architecture.Instruction).Enum.fields) |instruction_enum_field| {
-                        if (byte_equal(instruction_name, instruction_enum_field.name)) {
-                            break @field(architecture.Instruction, instruction_enum_field.name);
-                        }
-                    } else unreachable;
-                    const operand_nodes = unit.getNodeList(assembly_instruction_node.right);
+                            var operands = try context.arena.new_array(InlineAssembly.Operand, operand_nodes.len);
+                            operands.len = 0;
 
-                    var operands = try context.arena.new_array(InlineAssembly.Operand, operand_nodes.len);
-                    operands.len = 0;
+                            for (operand_nodes) |operand_node_index| {
+                                const operand_node = unit.getNode(operand_node_index);
+                                const operand: InlineAssembly.Operand = switch (operand_node.id) {
+                                    .assembly_register => blk: {
+                                        const register_name = unit.getExpectedTokenBytes(operand_node.token, .identifier);
 
-                    for (operand_nodes) |operand_node_index| {
-                        const operand_node = unit.getNode(operand_node_index);
-                        const operand: InlineAssembly.Operand = switch (operand_node.id) {
-                            .assembly_register => blk: {
-                                const register_name = unit.getExpectedTokenBytes(operand_node.token, .identifier);
-
-                                const register = inline for (@typeInfo(architecture.Register).Enum.fields) |register_enum_field| {
-                                    if (byte_equal(register_name, register_enum_field.name)) {
-                                        break @field(architecture.Register, register_enum_field.name);
-                                    }
-                                } else unreachable;
-                                break :blk .{
-                                    .register = @intFromEnum(register),
+                                        const register = inline for (@typeInfo(architecture.Register).Enum.fields) |register_enum_field| {
+                                            if (byte_equal(register_name, register_enum_field.name)) {
+                                                break @field(architecture.Register, register_enum_field.name);
+                                            }
+                                        } else unreachable;
+                                        break :blk .{
+                                            .register = @intFromEnum(register),
+                                        };
+                                    },
+                                    .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(operand_node.token, .number_literal))) {
+                                        .int => |integer| .{
+                                            .number_literal = integer,
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    },
+                                    .assembly_code_expression => .{
+                                        .value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, operand_node.left, .left),
+                                    },
+                                    else => |t| @panic(@tagName(t)),
                                 };
+
+                                const index = operands.len;
+                                operands.len += 1;
+                                operands[index] = operand;
+                            }
+
+                            const instruction_index = unit.assembly_instructions.append_index(.{
+                                .id = @intFromEnum(instruction),
+                                .operands = operands,
+                            });
+
+                            const index = instructions.len;
+                            instructions.len += 1;
+                            instructions[index] = instruction_index;
+                        }
+
+                        const inline_assembly = unit.inline_assembly.append_index(.{
+                            .instructions = instructions,
+                        });
+
+                        const inline_asm = unit.instructions.append_index(.{
+                            .inline_assembly = inline_assembly,
+                        });
+                        try builder.appendInstruction(unit, inline_asm);
+
+                        return .{
+                            .value = .{
+                                .runtime = inline_asm,
                             },
-                            .number_literal => switch (std.zig.parseNumberLiteral(unit.getExpectedTokenBytes(operand_node.token, .number_literal))) {
-                                .int => |integer| .{
-                                    .number_literal = integer,
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            },
-                            .assembly_code_expression => .{
-                                .value = try builder.resolveRuntimeValue(unit, context, Type.Expect.none, operand_node.left, .left),
-                            },
-                            else => |t| @panic(@tagName(t)),
+                            // TODO: WARN fix
+                            .type = .noreturn,
                         };
-
-                        const index = operands.len;
-                        operands.len += 1;
-                        operands[index] = operand;
-                    }
-
-                    const instruction_index = unit.assembly_instructions.append_index(.{
-                        .id = @intFromEnum(instruction),
-                        .operands = operands,
-                    });
-
-                    const index = instructions.len;
-                    instructions.len += 1;
-                    instructions[index] = instruction_index;
-                }
-
-                const inline_assembly = unit.inline_assembly.append_index(.{
-                    .instructions = instructions,
-                });
-
-                const inline_asm = unit.instructions.append_index(.{
-                    .inline_assembly = inline_assembly,
-                });
-                try builder.appendInstruction(unit, inline_asm);
-
-                return .{
-                    .value = .{
-                        .runtime = inline_asm,
                     },
-                    // TODO: WARN fix
-                    .type = .noreturn,
-                };
+                }
             },
             .cast => {
                 assert(argument_node_list.len == 1);
@@ -6289,7 +6299,7 @@ pub const Builder = struct {
                     const pointer_to_global = try unit.getPointerType(.{
                         .type = global.declaration.type,
                         .termination = switch (type_expect) {
-                            .none => .none,
+                            .none, .cast => .none,
                             .type => |type_index| switch (unit.types.get(type_index).*) {
                                 .pointer => |pointer| pointer.termination,
                                 else => .none,
@@ -6297,7 +6307,7 @@ pub const Builder = struct {
                             else => unreachable,
                         },
                         .mutability = switch (type_expect) {
-                            .none => .@"var",
+                            .none, .cast => .@"var",
                             .type => |type_index| switch (unit.types.get(type_index).*) {
                                 .pointer => |pointer| pointer.mutability,
                                 else => .@"var",
@@ -10034,6 +10044,73 @@ pub const Builder = struct {
                 }
             },
             .character_literal => return try unit.resolve_character_literal(node_index),
+            .negation => {
+                assert(node.left != .null);
+                assert(node.right == .null);
+
+                const value = try builder.resolveComptimeValue(unit, context, type_expect, .{}, node.left, null, .right, &.{}, null, &.{});
+                switch (value) {
+                    .constant_int => |constant_int| switch (type_expect) {
+                        .type => |type_index| {
+                            assert(type_index == value.type);
+                            const expected_type = unit.types.get(type_index);
+                            switch (expected_type.*) {
+                                .integer => |integer| switch (integer.kind) {
+                                    .materialized_int => {
+                                        assert(integer.signedness == .signed);
+                                        var v: i64 = @intCast(constant_int.value);
+                                        v = 0 - v;
+
+                                        return .{
+                                            .constant_int = .{
+                                                .value = @bitCast(v),
+                                            },
+                                        };
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    .comptime_int => |ct_int| switch (type_expect) {
+                        .type => |type_index| switch (unit.types.get(type_index).*) {
+                            .integer => |integer| switch (integer.kind) {
+                                .materialized_int => {
+                                    assert(integer.signedness == .signed);
+                                    var v = switch (ct_int.signedness) {
+                                        .signed => 0 - @as(i64, @intCast(ct_int.value)),
+                                        .unsigned => @as(i64, @intCast(ct_int.value)),
+                                    };
+                                    v = 0 - v;
+
+                                    return .{
+                                        .constant_int = .{
+                                            .value = @bitCast(v),
+                                        },
+                                    };
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        },
+                        .none => {
+                            return .{
+                                .comptime_int = .{
+                                    .value = ct_int.value,
+                                    .signedness = switch (ct_int.signedness) {
+                                        .unsigned => .signed,
+                                        .signed => .unsigned,
+                                    },
+                                },
+                            };
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
             else => |t| @panic(@tagName(t)),
         }
     }
@@ -12299,6 +12376,7 @@ pub const Builder = struct {
             .negation => block: {
                 assert(node.left != .null);
                 assert(node.right == .null);
+
                 const value = try builder.resolveRuntimeValue(unit, context, type_expect, node.left, .right);
 
                 switch (value.value) {
@@ -18093,6 +18171,51 @@ pub const InlineAssembly = struct {
             ebp,
             rsp,
             rdi,
+        };
+    };
+
+    pub const aarch64 = struct {
+        pub const Instruction = enum {
+            b,
+            mov,
+        };
+
+        pub const Register = enum {
+            fp,
+            lr,
+            sp,
+            x0,
+            x1,
+            x2,
+            x3,
+            x4,
+            x5,
+            x6,
+            x7,
+            x8,
+            x9,
+            x10,
+            x11,
+            x12,
+            x13,
+            x14,
+            x15,
+            x16,
+            x17,
+            x18,
+            x19,
+            x20,
+            x21,
+            x22,
+            x23,
+            x24,
+            x25,
+            x26,
+            x27,
+            x28,
+            x29,
+            x30,
+            x31,
         };
     };
 };

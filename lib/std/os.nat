@@ -24,8 +24,7 @@ const unwrap_syscall = system.unwrap_syscall;
 
 const exit = fn(exit_code: s32) noreturn {
     switch (current) {
-        .linux => _ = #syscall(#cast(linux.Syscall.exit_group), #cast(exit_code)),
-        .macos => system.exit(exit_code),
+        .linux, .macos => system.exit(exit_code),
         .windows => windows.ExitProcess(#cast(exit_code)),
     }
 }
@@ -323,6 +322,7 @@ const duplicate_process = fn () DuplicateProcessError!Process.Id {
 const ExecveError = error{
     execve_failed,
 };
+
 const execute = fn(path: [&:0]const u8, argv: [&:null]const ?[&:0]const u8, env: [&:null]const ?[&:null]const u8) ExecveError!noreturn {
     switch (current) {
         .linux, .macos =>  {

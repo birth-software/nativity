@@ -131,7 +131,7 @@ fn runBuildTests(allocator: Allocator, args: struct {
     const test_dir_path = "test/build";
     const test_names = try collectDirectoryDirEntries(allocator, test_dir_path);
     const test_dir_realpath = try std.fs.cwd().realpathAlloc(allocator, test_dir_path);
-    const compiler_realpath = try std.fs.cwd().realpathAlloc(allocator, args.compiler_path);
+
     try std.posix.chdir(test_dir_realpath);
 
     const total_compilation_count = test_names.len;
@@ -142,16 +142,23 @@ fn runBuildTests(allocator: Allocator, args: struct {
     var failed_test_count: usize = 0;
     const total_test_count = test_names.len;
 
+    errdefer {
+        std.posix.chdir(previous_cwd) catch unreachable;
+    }
+
     for (test_names) |test_name| {
         std.debug.print("{s}... ", .{test_name});
         try std.posix.chdir(test_name);
 
-        const compile_run = try std.ChildProcess.run(.{
+        const compile_run = std.ChildProcess.run(.{
             .allocator = allocator,
-            // TODO: delete -main_source_file?
-            .argv = &.{ compiler_realpath, "build" },
+            .argv = &.{ args.compiler_path, "build" },
             .max_output_bytes = std.math.maxInt(u64),
-        });
+        }) catch |err| {
+            const compilation_success = false;
+            std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+            return err;
+        };
 
         ran_compilation_count += 1;
 
@@ -177,12 +184,20 @@ fn runBuildTests(allocator: Allocator, args: struct {
 
         if (compilation_success and !args.self_hosted) {
             const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", test_name });
-            const test_run = try std.ChildProcess.run(.{
+            const test_run = std.ChildProcess.run(.{
                 .allocator = allocator,
                 // TODO: delete -main_source_file?
                 .argv = &.{test_path},
                 .max_output_bytes = std.math.maxInt(u64),
-            });
+            }) catch |err| {
+                const test_success = false;
+                std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+                std.debug.print("{}\n", .{err});
+                if (@errorReturnTrace()) |error_trace| {
+                    std.debug.dumpStackTrace(error_trace.*);
+                }
+                return err;
+            };
             ran_test_count += 1;
             const test_result: TestError!bool = switch (test_run.term) {
                 .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
@@ -213,6 +228,9 @@ fn runBuildTests(allocator: Allocator, args: struct {
     std.debug.print("TOTAL TESTS: {}. RAN: {}. FAILED: {}\n", .{ total_test_count, ran_test_count, failed_test_count });
 
     try std.posix.chdir(previous_cwd);
+    const current_cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    std.debug.assert(std.mem.eql(u8, current_cwd, previous_cwd));
+    std.debug.print("Hello \n", .{});
 
     if (failed_compilation_count > 0 or failed_test_count > 0) {
         return error.fail;
@@ -226,11 +244,21 @@ fn runStdTests(allocator: Allocator, args: struct {
     var errors = false;
     std.debug.print("std... ", .{});
 
-    const result = try std.ChildProcess.run(.{
+    std.debug.print("CWD: {s}\n", .{std.fs.cwd().realpathAlloc(allocator, ".") catch unreachable});
+
+    const argv = &.{ args.compiler_path, "test", "-main_source_file", "lib/std/std.nat", "-name", "std" };
+
+    const result = std.ChildProcess.run(.{
         .allocator = allocator,
-        .argv = &.{ args.compiler_path, "test", "-main_source_file", "lib/std/std.nat", "-name", "std" },
+        .argv = argv,
         .max_output_bytes = std.math.maxInt(u64),
-    });
+    }) catch |err| {
+        std.debug.print("Error: {}", .{err});
+        if (@errorReturnTrace()) |error_trace| {
+            std.debug.dumpStackTrace(error_trace.*);
+        }
+        return err;
+    };
     const compilation_result: TestError!bool = switch (result.term) {
         .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
         .Signal => error.signaled,
@@ -290,7 +318,6 @@ fn runCmakeTests(allocator: Allocator, args: struct {
     const cc_dir = try std.fs.cwd().openDir(args.dir_path, .{
         .iterate = true,
     });
-    const compiler_realpath = try std.fs.cwd().realpathAlloc(allocator, args.compiler_path);
 
     const cc_dir_path = try cc_dir.realpathAlloc(allocator, ".");
     try std.posix.chdir(cc_dir_path);
@@ -316,9 +343,9 @@ fn runCmakeTests(allocator: Allocator, args: struct {
                         "-G",
                         "Ninja",
                         // "-DCMAKE_VERBOSE_MAKEFILE=On",
-                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_C_COMPILER=", compiler_realpath, ";cc" }),
-                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_CXX_COMPILER=", compiler_realpath, ";c++" }),
-                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_ASM_COMPILER=", compiler_realpath, ";cc" }),
+                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_C_COMPILER=", args.compiler_path, ";cc" }),
+                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_CXX_COMPILER=", args.compiler_path, ";c++" }),
+                        try std.mem.concat(allocator, u8, &.{ "-DCMAKE_ASM_COMPILER=", args.compiler_path, ";cc" }),
                     },
                     .max_output_bytes = std.math.maxInt(u64),
                 });
@@ -474,19 +501,21 @@ fn run_test_suite(allocator: Allocator, args: struct {
     std.debug.print("TESTING {s} COMPILER: {s}...\n=================\n", .{ if (self_hosted) "SELF-HOSTED" else "BOOTSTRAP", args.compiler_path });
     var errors = false;
 
+    const compiler_path = std.fs.cwd().realpathAlloc(allocator, args.compiler_path) catch unreachable;
+
     runStandalone(allocator, .{
         .directory_path = "test/standalone",
         .group_name = "STANDALONE",
         .is_test = false,
         .self_hosted = self_hosted,
-        .compiler_path = args.compiler_path,
+        .compiler_path = compiler_path,
     }) catch {
         errors = true;
     };
 
     runBuildTests(allocator, .{
         .self_hosted = self_hosted,
-        .compiler_path = args.compiler_path,
+        .compiler_path = compiler_path,
     }) catch {
         errors = true;
     };
@@ -496,14 +525,14 @@ fn run_test_suite(allocator: Allocator, args: struct {
         .group_name = "TEST EXECUTABLE",
         .is_test = true,
         .self_hosted = self_hosted,
-        .compiler_path = args.compiler_path,
+        .compiler_path = compiler_path,
     }) catch {
         errors = true;
     };
 
     runStdTests(allocator, .{
         .self_hosted = self_hosted,
-        .compiler_path = args.compiler_path,
+        .compiler_path = compiler_path,
     }) catch {
         errors = true;
     };
@@ -511,37 +540,41 @@ fn run_test_suite(allocator: Allocator, args: struct {
     if (!self_hosted) {
         runCmakeTests(allocator, .{
             .dir_path = "test/cc",
-            .compiler_path = args.compiler_path,
+            .compiler_path = compiler_path,
         }) catch {
             errors = true;
         };
 
         runCmakeTests(allocator, .{
             .dir_path = "test/c++",
-            .compiler_path = args.compiler_path,
+            .compiler_path = compiler_path,
         }) catch {
             errors = true;
         };
 
-        switch (@import("builtin").os.tag) {
-            .macos => runCmakeTests(allocator, .{
-                .dir_path = "test/cc_macos",
-                .compiler_path = args.compiler_path,
-            }) catch {
-                errors = true;
-            },
-            .windows => {},
-            .linux => switch (@import("builtin").abi) {
-                .gnu => runCmakeTests(allocator, .{
-                    .dir_path = "test/cc_linux",
-                    .compiler_path = args.compiler_path,
+        switch (@import("builtin").cpu.arch) {
+            .aarch64 => switch (@import("builtin").os.tag) {
+                .linux => runCmakeTests(allocator, .{
+                    .dir_path = "test/cc_aarch64_linux",
+                    .compiler_path = compiler_path,
                 }) catch {
                     errors = true;
                 },
-                .musl => {},
-                else => @compileError("ABI not supported"),
+                .macos => runCmakeTests(allocator, .{
+                    .dir_path = "test/cc_aarch64_macos",
+                    .compiler_path = compiler_path,
+                }) catch {
+                    errors = true;
+                },
+                else => unreachable,
             },
-            else => @compileError("OS not supported"),
+            .x86_64 => runCmakeTests(allocator, .{
+                .dir_path = "test/cc_x86_64",
+                .compiler_path = compiler_path,
+            }) catch {
+                errors = true;
+            },
+            else => @compileError("Arch not supported"),
         }
     }
 
