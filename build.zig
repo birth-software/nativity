@@ -446,7 +446,7 @@ pub fn build(b: *std.Build) !void {
                     const result = try std.ChildProcess.run(.{
                         .allocator = b.allocator,
                         .argv = &.{
-                            "cc", "--version",
+                            "c++", "--version",
                         },
                         .max_output_bytes = 0xffffffffffffff,
                     });
@@ -470,11 +470,27 @@ pub fn build(b: *std.Build) !void {
                         unreachable;
                     };
 
-                    const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
-                    compiler.addObjectFile(.{ .cwd_relative = "/usr/lib/libstdc++.so" });
+                    const cxx_include_base = switch (@import("builtin").cpu.arch) {
+                        .x86_64 => try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version }),
+                        .aarch64 => "/usr/include/c++/13",
+                        else => @compileError("Arch not supported"),
+                    };
+                    compiler.addObjectFile(.{
+                        .cwd_relative = switch (@import("builtin").cpu.arch) {
+                            .aarch64 => "/lib64/libstdc++.so.6",
+                            .x86_64 => "/usr/lib/libstdc++.so",
+                            else => @compileError("Arch not supported"),
+                        },
+                    });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
-                    compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/x86_64-pc-linux-gnu" }) });
+                    compiler.addIncludePath(.{
+                        .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, switch (@import("builtin").cpu.arch) {
+                            .x86_64 => "/x86_64-pc-linux-gnu",
+                            .aarch64 => "/aarch64-redhat-linux",
+                            else => @compileError("Arch not supported"),
+                        } }),
+                    });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
                 }
             },

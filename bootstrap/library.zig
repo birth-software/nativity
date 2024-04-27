@@ -239,7 +239,7 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
             array.ensure_capacity(1);
             const src = array.slice()[index..];
             array.length += 1;
-            const dst = array.slice()[index + 1..];
+            const dst = array.slice()[index + 1 ..];
             copy_backwards(T, dst, src);
             array.slice()[index] = item;
         }
@@ -706,4 +706,9 @@ pub fn last_byte(bytes: []const u8, byte: u8) ?usize {
 pub fn align_forward(value: u64, alignment: u64) u64 {
     const mask = alignment - 1;
     return (value + mask) & ~mask;
+}
+
+pub fn exit_with_error() noreturn {
+    @breakpoint();
+    std.posix.exit(1);
 }

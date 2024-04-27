@@ -2674,12 +2674,72 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                                         _ = assembly_statements.pop();
                                     }
 
-                                    assembly_statements.appendSliceAssumeCapacity("\n\t");
+                                    assembly_statements.appendSliceAssumeCapacity("\n");
                                 }
+
+                                _ = assembly_statements.pop();
 
                                 // try constraints.append_slice(context.allocator, ",~{dirflag},~{fpsr},~{flags}");
                             },
-                            else => |t| @panic(@tagName(t)),
+                            .aarch64 => {
+                                for (assembly_block.instructions) |assembly_instruction_index| {
+                                    const instruction = unit.assembly_instructions.get(assembly_instruction_index);
+                                    const instruction_id: Compilation.InlineAssembly.aarch64.Instruction = @enumFromInt(instruction.id);
+                                    assembly_statements.appendSliceAssumeCapacity(@tagName(instruction_id));
+                                    assembly_statements.appendAssumeCapacity(' ');
+
+                                    if (instruction.operands.len > 0) {
+                                        for (instruction.operands) |operand| {
+                                            switch (operand) {
+                                                .register => |register_value| {
+                                                    const register: Compilation.InlineAssembly.aarch64.Register = @enumFromInt(register_value);
+                                                    assembly_statements.appendSliceAssumeCapacity(@tagName(register));
+                                                },
+                                                .number_literal => |literal| {
+                                                    var buffer: [65]u8 = undefined;
+                                                    const number_literal = format_int(&buffer, literal, 10, false);
+                                                    const slice_ptr = number_literal.ptr - 1;
+                                                    const literal_slice = slice_ptr[0 .. number_literal.len + 1];
+                                                    literal_slice[0] = '#';
+                                                    assembly_statements.appendSliceAssumeCapacity(try context.arena.duplicate_bytes(literal_slice));
+                                                },
+                                                .value => |sema_value| {
+                                                    if (llvm.llvm_value_map.get(sema_value)) |v| {
+                                                        _ = v; // autofix
+                                                        unreachable;
+                                                    } else {
+                                                        const value = try llvm.emitLeftValue(unit, context, sema_value);
+                                                        var buffer: [65]u8 = undefined;
+                                                        const operand_number = format_int(&buffer, operand_values.len, 16, false);
+                                                        const slice_ptr = operand_number.ptr - 2;
+                                                        const operand_slice = slice_ptr[0 .. operand_number.len + 2];
+                                                        operand_slice[0] = '$';
+                                                        operand_slice[1] = '{';
+                                                        var new_buffer: [65]u8 = undefined;
+                                                        @memcpy(new_buffer[0..operand_slice.len], operand_slice);
+                                                        new_buffer[operand_slice.len] = '}';
+                                                        const new_slice = try context.arena.duplicate_bytes(new_buffer[0 .. operand_slice.len + 1]);
+                                                        assembly_statements.appendSliceAssumeCapacity(new_slice);
+                                                        operand_values.appendAssumeCapacity(value);
+                                                        const value_type = value.getType();
+                                                        operand_types.appendAssumeCapacity(value_type);
+                                                        constraints.appendAssumeCapacity('X');
+                                                    }
+                                                },
+                                            }
+
+                                            assembly_statements.appendSliceAssumeCapacity(", ");
+                                        }
+
+                                        _ = assembly_statements.pop();
+                                        _ = assembly_statements.pop();
+                                    }
+
+                                    assembly_statements.appendSliceAssumeCapacity("\n");
+                                }
+
+                                _ = assembly_statements.pop();
+                            },
                         }
 
                         const is_var_args = false;
@@ -2908,31 +2968,41 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
                         const function_type = LLVM.Context.getFunctionType(return_type, syscall_argument_types.ptr, syscall_argument_types.len, is_var_args) orelse unreachable;
                         var constraints = BoundedArray(u8, 4096){};
 
-                        const inline_asm = switch (unit.descriptor.arch) {
-                            .x86_64 => blk: {
-                                constraints.appendSliceAssumeCapacity("={rax}");
-
-                                const syscall_registers = [7][]const u8{ "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" };
-                                for (syscall_registers[0..syscall_argument_count]) |syscall_register| {
-                                    constraints.appendAssumeCapacity(',');
-                                    constraints.appendAssumeCapacity('{');
-                                    constraints.appendSliceAssumeCapacity(syscall_register);
-                                    constraints.appendAssumeCapacity('}');
-                                }
-
-                                constraints.appendSliceAssumeCapacity(",~{rcx},~{r11},~{memory}");
-
-                                const assembly = "syscall";
-                                const has_side_effects = true;
-                                const is_align_stack = true;
-                                const can_throw = false;
-                                const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, assembly, assembly.len, &constraints.buffer, constraints.len, has_side_effects, is_align_stack, LLVM.Value.InlineAssembly.Dialect.@"at&t", can_throw) orelse return LLVM.Value.Error.inline_assembly;
-                                break :blk inline_assembly;
-                            },
-                            else => |t| @panic(@tagName(t)),
+                        const syscall_registers: [7][]const u8 = switch (unit.descriptor.arch) {
+                            .x86_64 => .{ "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" },
+                            .aarch64 => .{ "x8", "x0", "x1", "x2", "x3", "x4", "x5" },
+                        };
+                        const syscall_instruction: []const u8 = switch (unit.descriptor.arch) {
+                            .x86_64 => "syscall",
+                            .aarch64 => "svc #0",
+                        };
+                        const return_constraints: []const u8 = switch (unit.descriptor.arch) {
+                            .x86_64 => "={rax}",
+                            .aarch64 => "={x0}",
                         };
 
-                        const call_to_asm = llvm.builder.createCall(function_type, inline_asm.toValue(), syscall_arguments.ptr, syscall_arguments.len, "syscall", "syscall".len, null) orelse return LLVM.Value.Instruction.Error.call;
+                        const clobber_constraints: []const u8 = switch (unit.descriptor.arch) {
+                            .x86_64 => ",~{rcx},~{r11},~{memory}",
+                            .aarch64 => ",~{memory},~{cc}",
+                        };
+
+                        constraints.appendSliceAssumeCapacity(return_constraints);
+
+                        for (syscall_registers[0..syscall_argument_count]) |syscall_register| {
+                            constraints.appendAssumeCapacity(',');
+                            constraints.appendAssumeCapacity('{');
+                            constraints.appendSliceAssumeCapacity(syscall_register);
+                            constraints.appendAssumeCapacity('}');
+                        }
+                        constraints.appendSliceAssumeCapacity(clobber_constraints);
+
+                        const has_side_effects = true;
+                        const is_align_stack = true;
+                        const can_throw = false;
+                        const inline_assembly = LLVM.Value.InlineAssembly.get(function_type, syscall_instruction.ptr, syscall_instruction.len, &constraints.buffer, constraints.len, has_side_effects, is_align_stack, LLVM.Value.InlineAssembly.Dialect.@"at&t", can_throw) orelse return LLVM.Value.Error.inline_assembly;
+
+                        const call_to_asm = llvm.builder.createCall(function_type, inline_assembly.toValue(), syscall_arguments.ptr, syscall_arguments.len, "syscall", "syscall".len, null) orelse return LLVM.Value.Instruction.Error.call;
+
                         try llvm.llvm_instruction_map.put_no_clobber(instruction_index, call_to_asm.toValue());
                     },
                     .@"unreachable" => {
@@ -3298,7 +3368,10 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
     // TODO: proper target selection
     const target_triple = switch (unit.descriptor.os) {
-        .linux => "x86_64-linux-none",
+        .linux => switch (unit.descriptor.arch) {
+            .aarch64 => "aarch64-linux-none",
+            .x86_64 => "x86_64-linux-none",
+        },
         .macos => "aarch64-apple-macosx-none",
         .windows => "x86_64-windows-gnu",
     };

@@ -6,6 +6,7 @@ const log = std.log;
 const library = @import("../library.zig");
 const byte_equal = library.byte_equal;
 const enumFromString = library.enumFromString;
+const exit_with_error = library.exit_with_error;
 const MyAllocator = library.MyAllocator;
 const PinnedArray = library.PinnedArray;
 
@@ -505,7 +506,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                         'A'...'Z', 'a'...'z' => {
                             while (true) {
                                 switch (text[index]) {
-                                    'A'...'Z', 'a'...'z' => index += 1,
+                                    'A'...'Z', 'a'...'z', '0'...'9' => index += 1,
                                     else => break,
                                 }
                             }
@@ -559,12 +560,13 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                                 hex,
                                 bin,
                                 octal,
+                                decimal,
                             };
                             const representation: Representation = switch (text[index]) {
                                 'x' => .hex,
-                                else => unreachable,
+                                else => .decimal,
                             };
-                            index += 1;
+                            index += @intFromBool(representation != .decimal);
                             switch (representation) {
                                 .hex => {
                                     while (true) {
@@ -573,6 +575,20 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                                             else => break,
                                         }
                                     }
+
+                                    _ = token_buffer.tokens.append(.{
+                                        .id = .number_literal,
+                                        .line = line_index,
+                                        .offset = start_i,
+                                        .length = index - start_i,
+                                    });
+                                },
+                                .decimal => {
+                                    switch (text[index]) {
+                                        '0'...'9' => unreachable,
+                                        else => {},
+                                    }
+
 
                                     _ = token_buffer.tokens.append(.{
                                         .id = .number_literal,
@@ -590,8 +606,15 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                             const ch_fmt = library.format_int(&ch_array, start_ch, 16, false);
                             try Compilation.write(.panic, ch_fmt);
                             try Compilation.write(.panic, "\n");
-                            std.posix.exit(0);
+                            exit_with_error();
                         },
+                    }
+
+                    const debug_asm_tokens = false;
+                    if (debug_asm_tokens) {
+                        try Compilation.write(.panic, "ASM token: '");
+                        try Compilation.write(.panic, text[start_i..index]);
+                        try Compilation.write(.panic, "'\n");
                     }
                 }
 

@@ -9,12 +9,21 @@ comptime {
 }
 
 const _start = fn naked cc(.c) () noreturn {
-    #asm(`
-        xor ebp, ebp;
-        mov rdi, rsp;
-        and rsp, 0xfffffffffffffff0;
-        call {start};
-    `);
+    switch (builtin.cpu) {
+        .x86_64 => #asm(`
+            xor ebp, ebp;
+            mov rdi, rsp;
+            and rsp, 0xfffffffffffffff0;
+            call {start};
+        `),
+        .aarch64 => #asm(`
+            mov fp, 0;
+            mov lr, 0;
+            mov x0, sp;
+            b {start};
+        `),
+        else => #error("Architecture not supported"),
+    }
 }
 
 var argument_count: usize = 0;

@@ -20,6 +20,17 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     _ = argv.append(driver_program);
     _ = argv.append("--error-limit=0");
 
+    switch (@import("builtin").cpu.arch) {
+        .aarch64 => switch (@import("builtin").os.tag) {
+            .linux => {
+                _ = argv.append("-znow");
+                _ = argv.append_slice(&.{ "-m", "aarch64linux"});
+            },
+            else => {},
+        },
+        else => {},
+    }
+
     // const output_path = out_path orelse "a.out";
     _ = argv.append("-o");
     _ = argv.append(options.output_file_path);
@@ -78,14 +89,30 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
             } else {
                 if (options.link_libcpp) {
                     assert(options.link_libc);
-                    _ = argv.append("/usr/lib/libstdc++.so");
+                    switch (@import("builtin").cpu.arch) {
+                        .x86_64 => _ = argv.append("/usr/lib/libstdc++.so"),
+                        .aarch64 => _ = argv.append("/usr/lib64/libstdc++.so.6"),
+                        else => unreachable,
+                    }
                 }
 
                 if (options.link_libc) {
-                    _ = argv.append("/usr/lib/crt1.o");
-                    _ = argv.append("/usr/lib/crti.o");
-                    argv.append_slice(&.{ "-L", "/usr/lib" });
-                    argv.append_slice(&.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                    switch (@import("builtin").cpu.arch) {
+                        .x86_64 => {
+                            _ = argv.append("/usr/lib/crt1.o");
+                            _ = argv.append("/usr/lib/crti.o");
+                            argv.append_slice(&.{ "-L", "/usr/lib" });
+                            argv.append_slice(&.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                        },
+                        .aarch64 => {
+                            _ = argv.append("/usr/lib64/crt1.o");
+                            _ = argv.append("/usr/lib64/crti.o");
+                            argv.append_slice(&.{ "-L", "/usr/lib64" });
+                            argv.append_slice(&.{ "-dynamic-linker", "/lib/ld-linux-aarch64.so.1" });
+                        },
+                        else => unreachable,
+                    }
+
                     _ = argv.append("--as-needed");
                     _ = argv.append("-lm");
                     _ = argv.append("-lpthread");
@@ -93,7 +120,16 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
                     _ = argv.append("-ldl");
                     _ = argv.append("-lrt");
                     _ = argv.append("-lutil");
-                    _ = argv.append("/usr/lib/crtn.o");
+
+                    switch (@import("builtin").cpu.arch) {
+                        .x86_64 => {
+                            _ = argv.append("/usr/lib/crtn.o");
+                        },
+                        .aarch64 => {
+                            _ = argv.append("/usr/lib64/crtn.o");
+                        },
+                        else => unreachable,
+                    }
                 }
             }
         },
