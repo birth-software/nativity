@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Compilation = @import("../Compilation.zig");
 const write = Compilation.write;
@@ -2043,7 +2042,7 @@ pub const LLVM = struct {
 
     fn createBasicBlock(llvm: *LLVM, context: *const Compilation.Context, basic_block_index: Compilation.BasicBlock.Index, name: []const u8) !*BasicBlockList.Node {
         const basic_block = llvm.context.createBasicBlock(name.ptr, name.len, llvm.function, null) orelse return Error.basic_block;
-        const basic_block_node = try context.allocator.create(BasicBlockList.Node);
+        const basic_block_node = try context.arena.new(BasicBlockList.Node);
         basic_block_node.* = .{
             .data = basic_block_index,
         };
@@ -2435,7 +2434,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     };
 
     if (unit.descriptor.generate_debug_information) {
-        const full_path = try std.fs.cwd().realpathAlloc(context.allocator, unit.descriptor.main_package_path);
+        const full_path = try Compilation.realpath(context.arena, std.fs.cwd(), unit.descriptor.main_package_path);
         const filename = std.fs.path.basename(full_path);
         const directory = full_path[0 .. full_path.len - filename.len];
         const debug_info_file = llvm.debug_info_builder.createFile(filename.ptr, filename.len, directory.ptr, directory.len) orelse unreachable;
@@ -2679,7 +2678,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
                                 _ = assembly_statements.pop();
 
-                                // try constraints.append_slice(context.allocator, ",~{dirflag},~{fpsr},~{flags}");
+                                // try constraints.append_slice(context.arena, ",~{dirflag},~{fpsr},~{flags}");
                             },
                             .aarch64 => {
                                 for (assembly_block.instructions) |assembly_instruction_index| {
@@ -3427,7 +3426,7 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     llvm.module.setTargetTriple(target_triple.ptr, target_triple.len);
     const file_path = unit.descriptor.executable_path;
     const object_file_path = blk: {
-        const slice = try context.allocator.alloc(u8, file_path.len + 3);
+        const slice = try context.arena.new_array(u8, file_path.len + 3);
         @memcpy(slice[0..file_path.len], file_path);
         slice[file_path.len] = '.';
         slice[file_path.len + 1] = 'o';

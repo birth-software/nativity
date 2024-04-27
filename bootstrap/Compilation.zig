@@ -17,7 +17,6 @@ const first_slice = library.first_slice;
 const starts_with_slice = library.starts_with_slice;
 const PinnedArray = library.PinnedArray;
 const PinnedArrayAdvanced = library.PinnedArrayAdvanced;
-const MyAllocator = library.MyAllocator;
 const PinnedHashMap = library.PinnedHashMap;
 const span = library.span;
 const format_int = library.format_int;
@@ -68,18 +67,18 @@ const Optimization = enum {
     aggressively_optimize_for_size,
 };
 
-pub fn createContext(allocator: Allocator) !*const Context {
-    const context: *Context = try allocator.create(Context);
+pub fn createContext() !*const Context {
+    const arena = try Arena.init(4 * 1024 * 1024);
+    const context = try arena.new(Context);
 
-    const self_exe_path = try std.fs.selfExePathAlloc(allocator);
-    const self_exe_dir_path = std.fs.path.dirname(self_exe_path).?;
+    const self_exe_absolute_path = try self_exe_path(arena);
+    const self_exe_dir_path = std.fs.path.dirname(self_exe_absolute_path).?;
     context.* = .{
-        .allocator = allocator,
-        .cwd_absolute_path = try realpathAlloc(allocator, "."),
-        .executable_absolute_path = self_exe_path,
+        .cwd_absolute_path = try realpath(arena, std.fs.cwd(), "."),
+        .executable_absolute_path = self_exe_absolute_path,
         .directory_absolute_path = self_exe_dir_path,
         .build_directory = try std.fs.cwd().makeOpenPath("nat", .{}),
-        .arena = try Arena.init(4 * 1024 * 1024),
+        .arena = arena,
     };
 
     try context.build_directory.makePath(cache_dir_name);
@@ -120,9 +119,14 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
     });
 
     try unit.compile(context);
+
     const argv: []const []const u8 = &.{ "nat/build", "-compiler_path", context.executable_absolute_path };
+
+    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const allocator = arena_allocator.allocator();
+
     const result = try std.ChildProcess.run(.{
-        .allocator = context.allocator,
+        .allocator = allocator,
         .argv = argv,
     });
 
@@ -147,8 +151,8 @@ pub fn compileBuildExecutable(context: *const Context, arguments: []const []cons
     }
 }
 
-fn clang_job(arguments: []const []const u8) !void {
-    const exit_code = try clangMain(std.heap.page_allocator, arguments);
+fn clang_job(arena: *Arena, arguments: []const []const u8) !void {
+    const exit_code = try clangMain(arena, arguments);
     if (exit_code != 0) unreachable;
 }
 
@@ -167,7 +171,7 @@ const MuslContext = struct {
     fn init(context: *const Context) !MuslContext {
         const home_dir = std.posix.getenv("HOME") orelse unreachable;
         return .{
-            .global_cache_dir = try std.mem.concat(context.allocator, u8, &.{ home_dir, "/.cache/nat/musl/" }),
+            .global_cache_dir = try context.arena.join(&.{ home_dir, "/.cache/nat/musl/" }),
             .arch_include_path = try context.pathFromCompiler(musl_lib_dir_relative_path ++ "arch/x86_64"),
             .arch_generic_include_path = try context.pathFromCompiler(musl_lib_dir_relative_path ++ "arch/generic"),
             .src_include_path = try context.pathFromCompiler(musl_lib_dir_relative_path ++ "src/include"),
@@ -189,7 +193,7 @@ const MuslContext = struct {
             context.executable_absolute_path, "--no-default-config",  "-fno-caret-diagnostics", "-target",                      "x86_64-unknown-linux-musl", "-std=c99",            "-ffreestanding", "-mred-zone",           "-fno-omit-frame-pointer", "-fno-stack-protector", "-O2", "-fno-unwind-tables",     "-fno-asynchronous-unwind-tables", "-ffunction-sections",     "-fdata-sections", "-gdwarf-4",   "-gdwarf32", "-Wa,--noexecstack", "-D_XOPEN_SOURCE=700",
             "-I",                             musl.arch_include_path, "-I",                     musl.arch_generic_include_path, "-I",                        musl.src_include_path, "-I",             musl.src_internal_path, "-I",                      musl.include_path,      "-I",  musl.triple_include_path, "-I",                              musl.generic_include_path, "-c",              src_file_path, "-o",        target_path,
         };
-        const exit_code = try clangMain(context.allocator, args);
+        const exit_code = try clangMain(context.arena, args);
         if (exit_code != 0) unreachable;
     }
 };
@@ -218,15 +222,15 @@ fn compileMusl(context: *const Context) MuslContext {
         var ar_args = BoundedArray([]const u8, 4096){};
         ar_args.appendAssumeCapacity("ar");
         ar_args.appendAssumeCapacity("rcs");
-        ar_args.appendAssumeCapacity(try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, "libc.a" }));
+        ar_args.appendAssumeCapacity(try context.arena.join(&.{ musl.global_cache_dir, "libc.a" }));
 
         for (generic_musl_source_files) |src_file_relative_path| {
             const basename = std.fs.path.basename(src_file_relative_path);
-            const target = try context.allocator.dupe(u8, basename);
+            const target = try context.arena.duplicate_bytes(basename);
             target[target.len - 1] = 'o';
             const hash = my_hash(src_file_relative_path);
             const hash_string = format_int(&buffer, hash, 16, false);
-            const target_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, hash_string, target });
+            const target_path = try context.arena.join(&.{ musl.global_cache_dir, hash_string, target });
             try musl.compileFileWithClang(context, src_file_relative_path, target_path);
 
             ar_args.appendAssumeCapacity(target_path);
@@ -234,41 +238,41 @@ fn compileMusl(context: *const Context) MuslContext {
 
         for (musl_x86_64_source_files) |src_file_relative_path| {
             const basename = std.fs.path.basename(src_file_relative_path);
-            const target = try context.allocator.dupe(u8, basename);
+            const target = try context.arena.duplicate_bytes(u8, basename);
             target[target.len - 1] = 'o';
             const hash = my_hash(src_file_relative_path);
             const hash_string = format_int(&buffer, hash, 16, false);
-            const target_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, hash_string, target });
+            const target_path = try context.arena.join(&.{ musl.global_cache_dir, hash_string, target });
 
             try musl.compileFileWithClang(context, src_file_relative_path, target_path);
             ar_args.appendAssumeCapacity(target_path);
         }
 
-        if (try arMain(context.allocator, ar_args.slice()) != 0) {
+        if (try arMain(context.arena, ar_args.slice()) != 0) {
             unreachable;
         }
 
-        const crt1_output_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, "crt1.o" });
+        const crt1_output_path = try context.arena.join(&.{ musl.global_cache_dir, "crt1.o" });
         {
             const crt_path = try context.pathFromCompiler("lib/libc/musl/crt/crt1.c");
             const args: []const []const u8 = &.{
                 context.executable_absolute_path, "--no-default-config",  "-fno-caret-diagnostics", "-target",                      "x86_64-unknown-linux-musl", "-std=c99",            "-ffreestanding", "-mred-zone",           "-fno-omit-frame-pointer", "-fno-stack-protector", "-O2", "-fno-unwind-tables",     "-fno-asynchronous-unwind-tables", "-ffunction-sections",     "-fdata-sections", "-gdwarf-4", "-gdwarf32", "-Wa,--noexecstack", "-D_XOPEN_SOURCE=700", "-DCRT",
                 "-I",                             musl.arch_include_path, "-I",                     musl.arch_generic_include_path, "-I",                        musl.src_include_path, "-I",             musl.src_internal_path, "-I",                      musl.include_path,      "-I",  musl.triple_include_path, "-I",                              musl.generic_include_path, "-c",              crt_path,    "-o",        crt1_output_path,
             };
-            const exit_code = try clangMain(context.allocator, args);
+            const exit_code = try clangMain(context.arena, args);
             if (exit_code != 0) {
                 unreachable;
             }
         }
 
-        const crti_output_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, "crti.o" });
+        const crti_output_path = try context.arena.join(&.{ musl.global_cache_dir, "crti.o" });
         {
             const crt_path = try context.pathFromCompiler("lib/libc/musl/crt/crti.c");
             const args: []const []const u8 = &.{
                 context.executable_absolute_path, "--no-default-config",  "-fno-caret-diagnostics", "-target",                      "x86_64-unknown-linux-musl", "-std=c99",            "-ffreestanding", "-mred-zone",           "-fno-omit-frame-pointer", "-fno-stack-protector", "-O2", "-fno-unwind-tables",     "-fno-asynchronous-unwind-tables", "-ffunction-sections",     "-fdata-sections", "-gdwarf-4", "-gdwarf32", "-Wa,--noexecstack", "-D_XOPEN_SOURCE=700", "-DCRT",
                 "-I",                             musl.arch_include_path, "-I",                     musl.arch_generic_include_path, "-I",                        musl.src_include_path, "-I",             musl.src_internal_path, "-I",                      musl.include_path,      "-I",  musl.triple_include_path, "-I",                              musl.generic_include_path, "-c",              crt_path,    "-o",        crti_output_path,
             };
-            const exit_code = try clangMain(context.allocator, args);
+            const exit_code = try clangMain(context.arena, args);
             if (exit_code != 0) {
                 unreachable;
             }
@@ -276,12 +280,12 @@ fn compileMusl(context: *const Context) MuslContext {
 
         {
             const crt_path = try context.pathFromCompiler("lib/libc/musl/crt/x86_64/crtn.s");
-            const crt_output_path = try std.mem.concat(context.allocator, u8, &.{ musl.global_cache_dir, "crtn.o" });
+            const crt_output_path = try context.arena.join(&.{ musl.global_cache_dir, "crtn.o" });
             const args: []const []const u8 = &.{
                 context.executable_absolute_path, "--no-default-config",  "-fno-caret-diagnostics", "-target",                      "x86_64-unknown-linux-musl", "-std=c99",            "-ffreestanding", "-mred-zone",           "-fno-omit-frame-pointer", "-fno-stack-protector", "-O2", "-fno-unwind-tables",     "-fno-asynchronous-unwind-tables", "-ffunction-sections",     "-fdata-sections", "-gdwarf-4", "-gdwarf32", "-Wa,--noexecstack", "-D_XOPEN_SOURCE=700",
                 "-I",                             musl.arch_include_path, "-I",                     musl.arch_generic_include_path, "-I",                        musl.src_include_path, "-I",             musl.src_internal_path, "-I",                      musl.include_path,      "-I",  musl.triple_include_path, "-I",                              musl.generic_include_path, "-c",              crt_path,    "-o",        crt_output_path,
             };
-            const exit_code = try clangMain(context.allocator, args);
+            const exit_code = try clangMain(context.arena, args);
             if (exit_code != 0) {
                 unreachable;
             }
@@ -598,7 +602,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
 
             const object_path = switch (mode) {
                 .object => out_path.?,
-                .link => try std.mem.concat(context.allocator, u8, &.{ if (out_path) |op| op else "a.o", ".o" }),
+                .link => try context.arena.join(&.{ if (out_path) |op| op else "a.o", ".o" }),
             };
 
             link_objects.appendAssumeCapacity(.{
@@ -753,7 +757,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
             if (debug_clang_args) {
                 std.debug.print("Argv: {s}\n", .{argv.slice()});
             }
-            const result = try clangMain(context.allocator, argv.slice());
+            const result = try clangMain(context.arena, argv.slice());
             if (result != 0) {
                 unreachable;
             }
@@ -763,7 +767,7 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
         argv.appendAssumeCapacity("clang");
         argv.appendAssumeCapacity("--no-default-config");
         argv.appendSliceAssumeCapacity(cc_argv.slice());
-        const result = try clangMain(context.allocator, argv.slice());
+        const result = try clangMain(context.arena, argv.slice());
         if (result != 0) {
             unreachable;
         }
@@ -884,13 +888,13 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
     //     try clang_args.appendAssumeCapacity(span(arg));
     // }
     //
-    // const result = try clangMain(context.allocator, clang_args.slice());
+    // const result = try clangMain(context.arena, clang_args.slice());
     // if (result != 0) {
     //     unreachable;
     // }
 
     // const output_object_file = "nat/main.o";
-    // const exit_code = try clangMain(context.allocator, &.{ context.executable_absolute_path, "--no-default-config", "-target", "x86_64-unknown-linux-musl", "-nostdinc", "-fno-spell-checking", "-isystem", "lib/include", "-isystem", "lib/libc/include/x86_64-linux-musl", "-isystem", "lib/libc/include/generic-musl", "-isystem", "lib/libc/include/x86-linux-any", "-isystem", "lib/libc/include/any-linux-any", "-c", argument, "-o", output_object_file });
+    // const exit_code = try clangMain(context.arena, &.{ context.executable_absolute_path, "--no-default-config", "-target", "x86_64-unknown-linux-musl", "-nostdinc", "-fno-spell-checking", "-isystem", "lib/include", "-isystem", "lib/libc/include/x86_64-linux-musl", "-isystem", "lib/libc/include/generic-musl", "-isystem", "lib/libc/include/x86-linux-any", "-isystem", "lib/libc/include/any-linux-any", "-c", argument, "-o", output_object_file });
     // if (exit_code != 0) {
     //     unreachable;
     // }
@@ -910,12 +914,12 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
     //     try lld_args.appendAssumeCapacity("-static");
     //     try lld_args.appendAssumeCapacity("-o");
     //     try lld_args.appendAssumeCapacity("nat/main");
-    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crt1.o" }));
-    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crti.o" }));
+    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.arena, "", &.{ musl.global_cache_dir, "crt1.o" }));
+    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.arena, "", &.{ musl.global_cache_dir, "crti.o" }));
     //     try lld_args.appendAssumeCapacity(output_object_file);
     //     try lld_args.appendAssumeCapacity("--as-needed");
-    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "libc.a" }));
-    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.allocator, "", &.{ musl.global_cache_dir, "crtn.o" }));
+    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.arena, "", &.{ musl.global_cache_dir, "libc.a" }));
+    //     try lld_args.appendAssumeCapacity(try std.mem.joinZ(context.arena, "", &.{ musl.global_cache_dir, "crtn.o" }));
     //
     //     var stdout_ptr: [*]const u8 = undefined;
     //     var stdout_len: usize = 0;
@@ -2735,24 +2739,27 @@ const musl_arch_files = [_][]const u8{
     musl_lib_dir_relative_path ++ "src/unistd/x32/lseek.c",
 };
 
-pub fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
-    var argv = try alloc.allocSentinel(?[*:0]u8, args.len, null);
-    for (args, 0..) |arg, i| {
-        argv[i] = try alloc.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
+pub fn argsCopyZ(arena: *Arena, args: []const []const u8) ![:null]?[*:0]u8 {
+    var result = try arena.new_array(?[*:0]u8, args.len + 1);
+    result[args.len] = null;
+
+    for (args, 0..) |argument, i| {
+        result[i] = try arena.duplicate_bytes_zero_terminated(argument);
     }
-    return argv;
+
+    return result[0..args.len:null];
 }
 
 extern "c" fn NativityLLVMArchiverMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-fn arMain(allocator: Allocator, arguments: []const []const u8) !u8 {
-    const argv = try argsCopyZ(allocator, arguments);
+fn arMain(arena: *Arena, arguments: []const []const u8) !u8 {
+    const argv = try argsCopyZ(arena, arguments);
     const exit_code = NativityLLVMArchiverMain(@as(c_int, @intCast(arguments.len)), argv.ptr);
     return @as(u8, @bitCast(@as(i8, @truncate(exit_code))));
 }
 
 extern "c" fn NativityClangMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-pub fn clangMain(allocator: Allocator, arguments: []const []const u8) !u8 {
-    const argv = try argsCopyZ(allocator, arguments);
+pub fn clangMain(arena: *Arena, arguments: []const []const u8) !u8 {
+    const argv = try argsCopyZ(arena, arguments);
     const exit_code = NativityClangMain(@as(c_int, @intCast(arguments.len)), argv.ptr);
     return @as(u8, @bitCast(@as(i8, @truncate(exit_code))));
 }
@@ -2958,12 +2965,12 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
 
     const executable_path = maybe_executable_path orelse blk: {
         assert(executable_name.len > 0);
-        const result = try std.mem.concat(context.allocator, u8, &.{ "nat/", executable_name });
+        const result = try context.arena.join(&.{ "nat/", executable_name });
         break :blk result;
     };
 
     const object_file_path = blk: {
-        const slice = try context.allocator.alloc(u8, executable_path.len + 2);
+        const slice = try context.arena.new_array(u8, executable_path.len + 2);
         @memcpy(slice[0..executable_path.len], executable_path);
         slice[executable_path.len] = '.';
         slice[executable_path.len + 1] = 'o';
@@ -3004,7 +3011,7 @@ fn createUnit(context: *const Context, arguments: struct {
     is_test: bool,
     c_source_files: []const []const u8,
 }) !*Unit {
-    const unit = try context.allocator.create(Unit);
+    const unit = try context.arena.new(Unit);
     unit.* = .{
         .descriptor = .{
             .main_package_path = arguments.main_package_path,
@@ -3080,10 +3087,17 @@ fn createUnit(context: *const Context, arguments: struct {
     return unit;
 }
 
-fn realpathAlloc(allocator: Allocator, pathname: []const u8) ![]const u8 {
-    var path_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const realpathInStack = try std.posix.realpath(pathname, &path_buffer);
-    return allocator.dupe(u8, realpathInStack);
+pub fn self_exe_path(arena: *Arena) ![]const u8 {
+    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    return try arena.duplicate_bytes(try std.fs.selfExePath(&buffer));
+}
+
+pub fn realpath(arena: *Arena, dir: std.fs.Dir, relative_path: []const u8) ![]const u8 {
+    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const stack_realpath = try dir.realpath(relative_path, &buffer);
+    const heap_realpath = try arena.new_array(u8, stack_realpath.len);
+    @memcpy(heap_realpath, stack_realpath);
+    return heap_realpath;
 }
 
 pub const ContainerType = enum {
@@ -4129,7 +4143,6 @@ pub const Struct = struct {
 };
 
 pub const Context = struct {
-    allocator: Allocator,
     arena: *Arena,
     cwd_absolute_path: []const u8,
     directory_absolute_path: []const u8,
@@ -4146,7 +4159,7 @@ pub const Context = struct {
 };
 
 pub fn joinPath(context: *const Context, a: []const u8, b: []const u8) ![]const u8 {
-    return if (a.len != 0 and b.len != 0) try std.mem.concat(context.allocator, u8, &.{ a, "/", b }) else b;
+    return if (a.len != 0 and b.len != 0) try context.arena.join(&.{ a, "/", b }) else b;
 }
 
 pub const PolymorphicFunction = struct {
@@ -4427,8 +4440,8 @@ pub const Debug = struct {
             analyzed,
         };
 
-        pub fn getPath(file: *File, allocator: Allocator) ![]const u8 {
-            return try std.mem.concat(allocator, u8, &.{ file.package.directory.path, "/", file.relative_path });
+        pub fn getPath(file: *File, arena: *Arena) ![]const u8 {
+            return try arena.join(&.{ file.package.directory.path, "/", file.relative_path });
         }
     };
 };
@@ -5103,7 +5116,7 @@ pub const Builder = struct {
                         .enum_value => |enum_field_index| {
                             const enum_field = unit.enum_fields.get(enum_field_index);
                             const enum_name = unit.getIdentifier(enum_field.name);
-                            const enum_name_z = try context.allocator.dupeZ(u8, enum_name);
+                            const enum_name_z = try context.arena.duplicate_bytes_zero_terminated(enum_name);
                             const string_literal = try builder.processStringLiteralFromStringAndDebugInfo(unit, context, enum_name_z, .{
                                 .line = 0,
                                 .column = 0,
@@ -5288,7 +5301,7 @@ pub const Builder = struct {
                             const case_block = try builder.newBasicBlock(unit);
                             builder.current_basic_block = case_block;
                             const identifier = unit.getIdentifier(enum_field.name);
-                            const identifier_z = try context.allocator.dupeZ(u8, identifier);
+                            const identifier_z = try context.arena.duplicate_bytes_zero_terminated(identifier);
                             const string_literal = try builder.processStringLiteralFromStringAndDebugInfo(unit, context, identifier_z, .{
                                 .line = 0,
                                 .column = 0,
@@ -5345,7 +5358,12 @@ pub const Builder = struct {
             const global = unit.global_declarations.append(.{
                 .declaration = .{
                     .scope = builder.current_scope,
-                    .name = try unit.processIdentifier(context, try std.fmt.allocPrint(context.allocator, "get_enum_name_{}", .{@intFromEnum(type_index)})),
+                    .name = b: {
+                        var buffer: [65]u8 = undefined;
+                        const slice = format_int(&buffer, @intFromEnum(type_index), 10, false);
+                        const name = try context.arena.join(&.{"get_enum_name_", slice});
+                        break :b try unit.processIdentifier(context, name);
+                    },
                     .type = function_type_index,
                     .line = 0,
                     .column = 0,
@@ -7601,7 +7619,7 @@ pub const Builder = struct {
             .discard => b: {
                 var buffer: [65]u8 = undefined;
                 const formatted_int = format_int(&buffer, argument_index, 10, false);
-                break :b try std.mem.concat(context.allocator, u8, &.{ "_anon_arg_", formatted_int });
+                break :b try context.arena.join(&.{ "_anon_arg_", formatted_int });
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -8926,7 +8944,7 @@ pub const Builder = struct {
                 const identifier = switch (unit.token_buffer.tokens.get(field_node.token).id) {
                     .identifier => unit.getExpectedTokenBytes(field_node.token, .identifier),
                     .string_literal => try unit.fixupStringLiteral(context, field_node.token),
-                    .discard => try std.mem.concat(context.allocator, u8, &.{ "_", &.{'0' + b: {
+                    .discard => try context.arena.join(&.{ "_", &.{'0' + b: {
                         const ch = '0' + ignore_field_count;
                         ignore_field_count += 1;
                         break :b ch;
@@ -16815,7 +16833,7 @@ pub const Builder = struct {
         const token_debug_info = builder.getTokenDebugInfo(unit, err_node.token);
         const line = token_debug_info.line + 1;
         const column = token_debug_info.column + 1;
-        const file_path = file.getPath(context.allocator) catch unreachable;
+        const file_path = file.getPath(context.arena) catch unreachable;
         write(.panic, file_path) catch unreachable;
         write(.panic, ":") catch unreachable;
         Unit.dumpInt(line, 10, false) catch unreachable;
@@ -16836,7 +16854,7 @@ pub const Builder = struct {
         _ = file; // autofix
         const token_debug_info = builder.getTokenDebugInfo(unit, err_node.token);
         _ = token_debug_info; // autofix
-        // std.io.getStdOut().writer().print("{s}:{}:{}: \x1b[31merror:\x1b[0m ", .{ file.getPath(context.allocator) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1 }) catch unreachable;
+        // std.io.getStdOut().writer().print("{s}:{}:{}: \x1b[31merror:\x1b[0m ", .{ file.getPath(context.arena) catch unreachable, token_debug_info.line + 1, token_debug_info.column + 1 }) catch unreachable;
         // std.io.getStdOut().writer().print(format, args) catch unreachable;
         // std.io.getStdOut().writer().writeByte('\n') catch unreachable;
         std.os.abort();
@@ -17607,7 +17625,7 @@ pub const Unit = struct {
         };
 
         const file_size = try source_file.getEndPos();
-        var file_buffer = try context.allocator.alloc(u8, file_size);
+        var file_buffer = try context.arena.new_array(u8, file_size);
 
         const read_byte_count = try source_file.readAll(file_buffer);
         assert(read_byte_count == file_size);
@@ -17632,7 +17650,7 @@ pub const Unit = struct {
     }
 
     fn importPackage(unit: *Unit, context: *const Context, package: *Package) !ImportPackageResult {
-        const full_path = try package.directory.handle.realpathAlloc(context.allocator, package.source_path); //try std.fs.path.resolve(context.allocator, &.{ package.directory.path, package.source_path });
+        const full_path = try realpath(context.arena, package.directory.handle, package.source_path); //try std.fs.path.resolve(context.arena, &.{ package.directory.path, package.source_path });
         // logln(.compilation, .import, "Import full path: {s}\n", .{full_path});
         const import_file = try unit.getFile(full_path, package.source_path, package);
 
@@ -17762,7 +17780,7 @@ pub const Unit = struct {
         };
 
         unit.root_package = if (unit.descriptor.is_test) blk: {
-            const package = try context.allocator.create(Package);
+            const package = try context.arena.new(Package);
             const directory_path = try context.pathFromCompiler("lib");
             package.* = .{
                 .directory = .{
@@ -17789,7 +17807,7 @@ pub const Unit = struct {
             .{
                 .name = "builtin",
                 .directory_path = blk: {
-                    const result = try cache_dir.realpathAlloc(context.allocator, ".");
+                    const result = try realpath(context.arena, cache_dir, ".");
                     cache_dir.close();
                     break :blk result;
                 },
@@ -17798,13 +17816,13 @@ pub const Unit = struct {
 
         var packages: [package_descriptors.len]*Package = undefined;
         for (package_descriptors, &packages) |package_descriptor, *package_ptr| {
-            const package = try context.allocator.create(Package);
+            const package = try context.arena.new(Package);
             package.* = .{
                 .directory = .{
                     .path = package_descriptor.directory_path,
                     .handle = try std.fs.openDirAbsolute(package_descriptor.directory_path, .{}),
                 },
-                .source_path = try std.mem.concat(context.allocator, u8, &.{ package_descriptor.name, ".nat" }),
+                .source_path = try context.arena.join(&.{ package_descriptor.name, ".nat" }),
                 .dependencies = try PinnedHashMap([]const u8, *Package).init(std.mem.page_size),
             };
 
@@ -17839,11 +17857,8 @@ pub const Unit = struct {
                 const dot_index = last_byte(c_source_file, '.') orelse unreachable;
                 const path_without_extension = c_source_file[0..dot_index];
                 const basename = std.fs.path.basename(path_without_extension);
-                const o_file = try std.mem.concat(context.allocator, u8, &.{ basename, ".o" });
-                const object_path = try std.mem.concat(context.allocator, u8, &.{
-                    "nat/",
-                    o_file,
-                });
+                const o_file = try context.arena.join(&.{ basename, ".o" });
+                const object_path = try context.arena.join(&.{ "nat/", o_file });
 
                 var arguments = [_][]const u8{ "-c", c_source_file, "-o", object_path, "-g", "-fno-stack-protector" };
                 try compileCSourceFile(context, &arguments, .c);

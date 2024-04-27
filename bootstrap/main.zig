@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 const Compilation = @import("Compilation.zig");
@@ -7,8 +6,6 @@ pub const panic = Compilation.panic;
 
 const library = @import("library.zig");
 const byte_equal = library.byte_equal;
-const MyAllocator = library.MyAllocator;
-const PageAllocator = library.PageAllocator;
 
 const env_detecting_libc_paths = "NATIVITY_IS_DETECTING_LIBC_PATHS";
 
@@ -22,10 +19,13 @@ fn todo() noreturn {
 }
 
 pub fn main() !void {
-    var arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    const allocator = arena_allocator.allocator();
-    const arguments: []const []const u8 = try std.process.argsAlloc(allocator);
-    const context = try Compilation.createContext(allocator);
+    var arg_iterator = std.process.ArgIterator.init();
+    var buffer = library.BoundedArray([]const u8, 512){};
+    while (arg_iterator.next()) |argument| {
+        buffer.appendAssumeCapacity(argument);
+    }
+    const arguments = buffer.slice();
+    const context = try Compilation.createContext();
 
     if (arguments.len <= 1) {
         return error.InvalidInput;
@@ -41,7 +41,7 @@ pub fn main() !void {
     if (byte_equal(command, "build")) {
         try Compilation.compileBuildExecutable(context, command_arguments);
     } else if (byte_equal(command, "clang") or byte_equal(command, "-cc1") or byte_equal(command, "-cc1as")) {
-        const exit_code = try Compilation.clangMain(allocator, arguments);
+        const exit_code = try Compilation.clangMain(context.arena, arguments);
         std.process.exit(exit_code);
     } else if (byte_equal(command, "cc")) {
         try Compilation.compileCSourceFile(context, command_arguments, .c);

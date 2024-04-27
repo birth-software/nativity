@@ -1,5 +1,4 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log;
 
@@ -7,14 +6,12 @@ const library = @import("../library.zig");
 const byte_equal = library.byte_equal;
 const enumFromString = library.enumFromString;
 const exit_with_error = library.exit_with_error;
-const MyAllocator = library.MyAllocator;
 const PinnedArray = library.PinnedArray;
 
 const Compilation = @import("../Compilation.zig");
 const File = Compilation.File;
 const logln = Compilation.logln;
 const Token = Compilation.Token;
-const fs = @import("../fs.zig");
 
 // Needed information
 // Token: u8
@@ -68,10 +65,6 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
 
     var index: u32 = 0;
     var line_index: u32 = lexer.line_offset;
-
-    // try token_buffer.ensure_with_capacity(allocator, len / 3);
-
-    // logln(.lexer, .end, "START LEXER - TOKEN OFFSET: {} - LINE OFFSET: {}", .{ Token.unwrap(lexer.offset), lexer.line_offset });
 
     while (index < len) {
         const start_index = index;
