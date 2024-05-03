@@ -582,7 +582,6 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                                         else => {},
                                     }
 
-
                                     _ = token_buffer.tokens.append(.{
                                         .id = .number_literal,
                                         .line = line_index,
@@ -594,7 +593,7 @@ pub fn analyze(text: []const u8, token_buffer: *Token.Buffer) !Result {
                             }
                         },
                         else => {
-                            var ch_array : [64]u8 = undefined;
+                            var ch_array: [64]u8 = undefined;
                             try Compilation.write(.panic, "TODO char: 0x");
                             const ch_fmt = library.format_int(&ch_array, start_ch, 16, false);
                             try Compilation.write(.panic, ch_fmt);

@@ -90,7 +90,7 @@ pub const Arena = struct {
         const slice = try arena.new_array(u8, bytes.len + 1);
         slice[bytes.len] = 0;
         @memcpy(slice[0..bytes.len], bytes);
-        return slice[0..bytes.len:0];
+        return slice[0..bytes.len :0];
     }
 
     pub fn join(arena: *Arena, slices: []const []const u8) ![]u8 {

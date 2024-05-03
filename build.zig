@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) !void {
     const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
+    const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse !is_ci;
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
@@ -35,6 +36,7 @@ pub fn build(b: *std.Build) !void {
     const compiler_options = b.addOptions();
     compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
     compiler_options.addOption(bool, "ci", is_ci);
+    compiler_options.addOption(bool, "editor", use_editor);
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
@@ -475,7 +477,7 @@ pub fn build(b: *std.Build) !void {
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/lib64/llvm17/include/" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
-                    compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-redhat-linux"}) });
+                    compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-redhat-linux" }) });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64/llvm17/lib" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
                 }
@@ -508,6 +510,28 @@ pub fn build(b: *std.Build) !void {
             },
             .windows => {},
             else => |tag| @panic(@tagName(tag)),
+        }
+
+        if (!is_ci) {
+            compiler.linkSystemLibrary("glfw");
+            compiler.linkSystemLibrary("GL");
+            compiler.addCSourceFiles(.{
+                .root = b.path("dependencies/imgui"),
+                .files = &.{
+                    "imgui.cpp",
+                    "imgui_draw.cpp",
+                    "imgui_tables.cpp",
+                    "imgui_widgets.cpp",
+                    "backends/imgui_impl_glfw.cpp",
+                    "backends/imgui_impl_opengl3.cpp",
+                },
+                .flags = &.{},
+            });
+            compiler.addCSourceFile(.{
+                .file = b.path("bootstrap/editor.cpp"),
+                .flags = &.{ "-g" },
+            });
+            compiler.addIncludePath(b.path("dependencies/imgui"));
         }
     }
 
