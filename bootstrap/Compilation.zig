@@ -2747,7 +2747,7 @@ pub fn argsCopyZ(arena: *Arena, args: []const []const u8) ![:null]?[*:0]u8 {
         result[i] = try arena.duplicate_bytes_zero_terminated(argument);
     }
 
-    return result[0..args.len:null];
+    return result[0..args.len :null];
 }
 
 extern "c" fn NativityLLVMArchiverMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
@@ -5361,7 +5361,7 @@ pub const Builder = struct {
                     .name = b: {
                         var buffer: [65]u8 = undefined;
                         const slice = format_int(&buffer, @intFromEnum(type_index), 10, false);
-                        const name = try context.arena.join(&.{"get_enum_name_", slice});
+                        const name = try context.arena.join(&.{ "get_enum_name_", slice });
                         break :b try unit.processIdentifier(context, name);
                     },
                     .type = function_type_index,

@@ -24,7 +24,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
         .aarch64 => switch (@import("builtin").os.tag) {
             .linux => {
                 _ = argv.append("-znow");
-                _ = argv.append_slice(&.{ "-m", "aarch64linux"});
+                _ = argv.append_slice(&.{ "-m", "aarch64linux" });
             },
             else => {},
         },
@@ -121,7 +121,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     }
 
     for (options.libraries) |lib| {
-        _ = argv.append(try context.arena.join(&.{"-l", lib.path}));
+        _ = argv.append(try context.arena.join(&.{ "-l", lib.path }));
     }
 
     const argv_zero_terminated = try Compilation.argsCopyZ(context.arena, argv.const_slice());
