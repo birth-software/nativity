@@ -462,35 +462,21 @@ pub fn build(b: *std.Build) !void {
                     var tokenizer = std.mem.tokenize(u8, result.stdout, " ");
                     const cxx_version = while (tokenizer.next()) |chunk| {
                         if (std.ascii.isDigit(chunk[0])) {
-                            if (std.SemanticVersion.parse(chunk)) |_| {
-                                break chunk;
+                            if (std.SemanticVersion.parse(chunk)) |sema_version| {
+                                break try std.fmt.allocPrint(b.allocator, "{}", .{sema_version.major});
                             } else |err| err catch {};
                         }
                     } else {
                         unreachable;
                     };
 
-                    const cxx_include_base = switch (@import("builtin").cpu.arch) {
-                        .x86_64 => try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version }),
-                        .aarch64 => "/usr/include/c++/13",
-                        else => @compileError("Arch not supported"),
-                    };
-                    compiler.addObjectFile(.{
-                        .cwd_relative = switch (@import("builtin").cpu.arch) {
-                            .aarch64 => "/lib64/libstdc++.so.6",
-                            .x86_64 => "/usr/lib/libstdc++.so",
-                            else => @compileError("Arch not supported"),
-                        },
-                    });
+                    const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
+                    compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/lib64/llvm17/include/" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
-                    compiler.addIncludePath(.{
-                        .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, switch (@import("builtin").cpu.arch) {
-                            .x86_64 => "/x86_64-pc-linux-gnu",
-                            .aarch64 => "/aarch64-redhat-linux",
-                            else => @compileError("Arch not supported"),
-                        } }),
-                    });
+                    compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-redhat-linux"}) });
+                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64/llvm17/lib" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
                 }
             },
