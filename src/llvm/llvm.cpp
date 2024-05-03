@@ -1,10 +1,15 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/LegacyPassManager.h"
-#include "llvm/Passes/PassBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/DIBuilder.h"
+
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
+
+#include "llvm/Linker/Linker.h"
+
+#include "llvm/Passes/PassBuilder.h"
 
 #include "llvm/MC/TargetRegistry.h"
 
@@ -17,6 +22,8 @@
 
 
 using namespace llvm;
+using llvm::orc::ThreadSafeContext;
+using llvm::orc::ThreadSafeModule;
 
 extern "C" LLVMContext* NativityLLVMCreateContext()
 {
@@ -280,6 +287,13 @@ extern "C" StructType* NativityLLVMGetStructType(LLVMContext& context, Type** ty
     auto* struct_type = StructType::get(context, types, is_packed);
     return struct_type;
 }
+
+extern "C" LLVMContext* NativityLLVMTypeGetContext(Type& type)
+{
+    auto& context = type.getContext();
+    return &context;
+}
+
 extern "C" Function* NativityLLVMModuleGetFunction(Module& module, const char* name_ptr, size_t name_len)
 {
     auto name = StringRef(name_ptr, name_len);
@@ -737,15 +751,14 @@ extern "C" bool NativityLLVMVerifyModule(const Module& module, const char** mess
     return !result;
 }
 
-extern "C" const char* NativityLLVMFunctionToString(const Function& function, size_t* len)
+extern "C" void NativityLLVMFunctionToString(const Function& function, const char** ptr, size_t* len)
 {
   std::string buf;
   raw_string_ostream os(buf);
   function.print(os);
   os.flush();
   *len = buf.size();
-  auto* result = strdup(buf.c_str());
-  return result;
+  *ptr = strdup(buf.c_str());
 }
 
 extern "C" Type* NativityLLVMAllocatGetAllocatedType(AllocaInst& alloca)
@@ -829,26 +842,24 @@ extern "C" Type* NativityLLVMArrayTypeGetElementType(ArrayType* array_type)
     return element_type;
 }
 
-extern "C" const char* NativityLLVMModuleToString(const Module& module, size_t* len)
+extern "C" void NativityLLVMModuleToString(const Module& module, const char** ptr, size_t* len)
 {
   std::string buf;
   raw_string_ostream os(buf);
   module.print(os, nullptr);
   os.flush();
   *len = buf.size();
-  auto* result = strdup(buf.c_str());
-  return result;
+  *ptr = strdup(buf.c_str());
 }
 
-extern "C" const char* NativityLLVMValueToString(const Value& value, size_t* len)
+extern "C" void NativityLLVMValueToString(const Value& value, const char** ptr, size_t* len)
 {
   std::string buf;
   raw_string_ostream os(buf);
   value.print(os, true);
   os.flush();
   *len = buf.size();
-  auto* result = strdup(buf.c_str());
-  return result;
+  *ptr = strdup(buf.c_str());
 }
 
 extern "C" BasicBlock* NativityLLVMBuilderGetInsertBlock(IRBuilder<>& builder)
@@ -910,19 +921,20 @@ extern "C" const Target* NativityLLVMGetTarget(const char* target_triple_ptr, si
     return target;
 }
 
-extern "C" TargetMachine* NativityLLVMTargetCreateTargetMachine(Target& target, const char* target_triple_ptr, size_t target_triple_len, const char* cpu_ptr, size_t cpu_len, const char* features_ptr, size_t features_len, Reloc::Model relocation_model, CodeModel::Model maybe_code_model, bool is_code_model_present, CodeGenOpt::Level optimization_level, bool jit)
-{
-    auto target_triple = StringRef(target_triple_ptr, target_triple_len);
-    auto cpu = StringRef(cpu_ptr, cpu_len);
-    auto features = StringRef(features_ptr, features_len);
-    TargetOptions target_options;
-    std::optional<CodeModel::Model> code_model = std::nullopt;
-    if (is_code_model_present) {
-        code_model = maybe_code_model;
-    }
-    TargetMachine* target_machine = target.createTargetMachine(target_triple, cpu, features, target_options, relocation_model, code_model, optimization_level, jit);
-    return target_machine;
-}
+// TODO:
+// extern "C" TargetMachine* NativityLLVMTargetCreateTargetMachine(Target& target, const char* target_triple_ptr, size_t target_triple_len, const char* cpu_ptr, size_t cpu_len, const char* features_ptr, size_t features_len, Reloc::Model relocation_model, CodeModel::Model maybe_code_model, bool is_code_model_present, CodeGenOpt::Level optimization_level, bool jit)
+// {
+//     auto target_triple = StringRef(target_triple_ptr, target_triple_len);
+//     auto cpu = StringRef(cpu_ptr, cpu_len);
+//     auto features = StringRef(features_ptr, features_len);
+//     TargetOptions target_options;
+//     std::optional<CodeModel::Model> code_model = std::nullopt;
+//     if (is_code_model_present) {
+//         code_model = maybe_code_model;
+//     }
+//     TargetMachine* target_machine = target.createTargetMachine(target_triple, cpu, features, target_options, relocation_model, code_model, optimization_level, jit);
+//     return target_machine;
+// }
 
 extern "C" void NativityLLVMModuleSetTargetMachineDataLayout(Module& module, TargetMachine& target_machine)
 {
@@ -1065,6 +1077,13 @@ extern "C" CallInst* NativityLLVMBuilderCreateMemcpy(IRBuilder<>& builder, Value
     return memcpy;
 }
 
+extern "C" bool NativityLLVMLinkModules(Module& destination, Module* source)
+{
+    auto src = std::unique_ptr<Module>(source);
+    bool result = Linker::linkModules(destination, std::move(src));
+    // Invert the condition because LLVM boolean concept is lame
+    return !result;
+}
 extern "C" void NativityLLVMTypeAssertEqual(Type* a, Type* b)
 {
     assert(a == b);

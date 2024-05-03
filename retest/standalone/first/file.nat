@@ -1,0 +1,4 @@
+fn foo() s32
+{
+    return 0;
+}

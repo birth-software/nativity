@@ -26,7 +26,8 @@ pub fn build(b: *std.Build) !void {
     const print_stack_trace = b.option(bool, "print_stack_trace", "This option enables printing stack traces inside the compiler") orelse is_ci;
     const native_target = b.resolveTargetQuery(.{});
     const optimization = b.standardOptimizeOption(.{});
-    const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse !is_ci;
+    const enable_editor = false;
+    const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse (!is_ci and enable_editor);
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
@@ -40,7 +41,7 @@ pub fn build(b: *std.Build) !void {
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
-        .root_source_file = .{ .path = "build/fetcher.zig" },
+        .root_source_file = b.path("build/fetcher.zig"),
         .target = native_target,
         .optimize = .Debug,
         .single_threaded = true,
@@ -82,18 +83,18 @@ pub fn build(b: *std.Build) !void {
 
     const compiler = b.addExecutable(.{
         .name = "nat",
-        .root_source_file = .{ .path = "bootstrap/main.zig" },
+        .root_source_file = b.path("bootstrap/main.zig"),
         .target = target,
         .optimize = optimization,
     });
 
     const cpp_files = .{
         "src/llvm/llvm.cpp",
-        "src/llvm/lld.cpp",
-        "src/llvm/clang_main.cpp",
-        "src/llvm/clang_cc1.cpp",
-        "src/llvm/clang_cc1as.cpp",
-        "src/llvm/ar.cpp",
+        // "src/llvm/lld.cpp",
+        // "src/llvm/clang_main.cpp",
+        // "src/llvm/clang_cc1.cpp",
+        // "src/llvm/clang_cc1as.cpp",
+        // "src/llvm/ar.cpp",
     };
 
     compiler.addCSourceFiles(.{
@@ -408,8 +409,8 @@ pub fn build(b: *std.Build) !void {
                 break :blk llvm_directory.items;
             } else {
                 break :blk switch (use_debug) {
-                    true => "../llvm-17-static-debug",
-                    false => "../llvm-17-static-release",
+                    true => "../zig-bootstrap/out/x86_64-linux-musl-native-debug-static",
+                    false => "../zig-bootstrap/out/x86_64-linux-musl-native-release-static",
                 };
             }
         };
@@ -422,16 +423,16 @@ pub fn build(b: *std.Build) !void {
             compiler.addObjectFile(std.Build.path(b, try std.mem.concat(b.allocator, u8, &.{ llvm_lib_dir, "/", llvm_library })));
         }
     } else {
-        compiler.linkSystemLibrary("LLVM-17");
-        compiler.linkSystemLibrary("clang-cpp");
-        compiler.linkSystemLibrary("lldCommon");
-        compiler.linkSystemLibrary("lldCOFF");
-        compiler.linkSystemLibrary("lldELF");
-        compiler.linkSystemLibrary("lldMachO");
-        compiler.linkSystemLibrary("lldWasm");
-        compiler.linkSystemLibrary("unwind");
-        compiler.linkSystemLibrary(if (is_ci) "z" else "zlib");
-        compiler.linkSystemLibrary("zstd");
+        compiler.linkSystemLibrary("LLVM");
+        // compiler.linkSystemLibrary("clang-cpp");
+        // compiler.linkSystemLibrary("lldCommon");
+        // compiler.linkSystemLibrary("lldCOFF");
+        // compiler.linkSystemLibrary("lldELF");
+        // compiler.linkSystemLibrary("lldMachO");
+        // compiler.linkSystemLibrary("lldWasm");
+        // compiler.linkSystemLibrary("unwind");
+        // compiler.linkSystemLibrary(if (is_ci) "z" else "zlib");
+        // compiler.linkSystemLibrary("zstd");
 
         switch (target.result.os.tag) {
             .linux => {
@@ -475,11 +476,11 @@ pub fn build(b: *std.Build) !void {
                     const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
                     const cxx_include_arch = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-pc-linux-gnu" });
                     compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/lib64/llvm17/include/" });
+                    compiler.addIncludePath(.{ .cwd_relative = "../../local/llvm18-debug/include" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_arch });
-                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64/llvm17/lib" });
+                    compiler.addLibraryPath(.{ .cwd_relative = "../../local/llvm18-debug/lib" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64" });
                 }
             },
@@ -557,6 +558,7 @@ pub fn build(b: *std.Build) !void {
     const debug_command = switch (os) {
         .linux => blk: {
             const result = b.addSystemCommand(&.{"gf2"});
+            result.addArgs(&.{ "-ex", "set debuginfod enabled off" });
             result.addArgs(&.{ "-ex", "set disassembly-flavor intel" });
             result.addArg("-ex=r");
             result.addArgs(&.{ "-ex", "up" });
@@ -581,7 +583,7 @@ pub fn build(b: *std.Build) !void {
 
     const test_runner = b.addExecutable(.{
         .name = "test_runner",
-        .root_source_file = .{ .path = "build/test_runner.zig" },
+        .root_source_file = b.path("build/test_runner.zig"),
         .target = native_target,
         .optimize = optimization,
         .single_threaded = true,
@@ -609,3 +611,5 @@ pub fn build(b: *std.Build) !void {
     const test_all = b.step("test_all", "Test all");
     test_all.dependOn(&test_command.step);
 }
+
+

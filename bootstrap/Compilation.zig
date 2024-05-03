@@ -18,6 +18,8 @@ const starts_with_slice = library.starts_with_slice;
 const PinnedArray = library.PinnedArray;
 const PinnedArrayAdvanced = library.PinnedArrayAdvanced;
 const PinnedHashMap = library.PinnedHashMap;
+const realpath = library.realpath;
+const self_exe_path = library.self_exe_path;
 const span = library.span;
 const format_int = library.format_int;
 const my_hash = library.my_hash;
@@ -3085,19 +3087,6 @@ fn createUnit(context: *const Context, arguments: struct {
     };
 
     return unit;
-}
-
-pub fn self_exe_path(arena: *Arena) ![]const u8 {
-    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    return try arena.duplicate_bytes(try std.fs.selfExePath(&buffer));
-}
-
-pub fn realpath(arena: *Arena, dir: std.fs.Dir, relative_path: []const u8) ![]const u8 {
-    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const stack_realpath = try dir.realpath(relative_path, &buffer);
-    const heap_realpath = try arena.new_array(u8, stack_realpath.len);
-    @memcpy(heap_realpath, stack_realpath);
-    return heap_realpath;
 }
 
 pub const ContainerType = enum {
