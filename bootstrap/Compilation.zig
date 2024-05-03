@@ -654,8 +654,8 @@ pub fn compileCSourceFile(context: *const Context, arguments: []const []const u8
                                 "/usr/include/x86_64-linux-gnu",
                             } else switch (@import("builtin").cpu.arch) {
                                 .x86_64 => &.{
-                                    "/usr/include/c++/13.2.1",
-                                    "/usr/include/c++/13.2.1/x86_64-pc-linux-gnu",
+                                    "/usr/include/c++/14",
+                                    "/usr/include/c++/14/x86_64-redhat-linux",
                                     "/usr/lib/clang/17/include",
                                     "/usr/include",
                                     "/usr/include/linux",

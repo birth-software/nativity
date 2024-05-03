@@ -89,27 +89,18 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
             } else {
                 if (options.link_libcpp) {
                     assert(options.link_libc);
-                    switch (@import("builtin").cpu.arch) {
-                        .x86_64 => _ = argv.append("/usr/lib/libstdc++.so"),
-                        .aarch64 => _ = argv.append("/usr/lib64/libstdc++.so.6"),
-                        else => unreachable,
-                    }
+                    _ = argv.append("/usr/lib64/libstdc++.so.6");
                 }
 
                 if (options.link_libc) {
+                    _ = argv.append("/usr/lib64/crt1.o");
+                    _ = argv.append("/usr/lib64/crti.o");
+                    argv.append_slice(&.{ "-L", "/usr/lib64" });
+
+                    _ = argv.append("-dynamic-linker");
                     switch (@import("builtin").cpu.arch) {
-                        .x86_64 => {
-                            _ = argv.append("/usr/lib/crt1.o");
-                            _ = argv.append("/usr/lib/crti.o");
-                            argv.append_slice(&.{ "-L", "/usr/lib" });
-                            argv.append_slice(&.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
-                        },
-                        .aarch64 => {
-                            _ = argv.append("/usr/lib64/crt1.o");
-                            _ = argv.append("/usr/lib64/crti.o");
-                            argv.append_slice(&.{ "-L", "/usr/lib64" });
-                            argv.append_slice(&.{ "-dynamic-linker", "/lib/ld-linux-aarch64.so.1" });
-                        },
+                        .x86_64 => _ = argv.append("/lib64/ld-linux-x86-64.so.2"),
+                        .aarch64 => _ = argv.append("/lib/ld-linux-aarch64.so.1"),
                         else => unreachable,
                     }
 
@@ -121,15 +112,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
                     _ = argv.append("-lrt");
                     _ = argv.append("-lutil");
 
-                    switch (@import("builtin").cpu.arch) {
-                        .x86_64 => {
-                            _ = argv.append("/usr/lib/crtn.o");
-                        },
-                        .aarch64 => {
-                            _ = argv.append("/usr/lib64/crtn.o");
-                        },
-                        else => unreachable,
-                    }
+                    _ = argv.append("/usr/lib64/crtn.o");
                 }
             }
         },
