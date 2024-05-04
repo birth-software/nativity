@@ -479,7 +479,7 @@ pub fn build(b: *std.Build) !void {
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
                     compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-redhat-linux" }) });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64/llvm17/lib" });
-                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64" });
                 }
             },
             .macos => {
@@ -512,7 +512,7 @@ pub fn build(b: *std.Build) !void {
             else => |tag| @panic(@tagName(tag)),
         }
 
-        if (!is_ci) {
+        if (use_editor) {
             compiler.linkSystemLibrary("glfw");
             compiler.linkSystemLibrary("GL");
             compiler.addCSourceFiles(.{
