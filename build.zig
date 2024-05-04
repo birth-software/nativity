@@ -465,7 +465,7 @@ pub fn build(b: *std.Build) !void {
                     const cxx_version = while (tokenizer.next()) |chunk| {
                         if (std.ascii.isDigit(chunk[0])) {
                             if (std.SemanticVersion.parse(chunk)) |sema_version| {
-                                break try std.fmt.allocPrint(b.allocator, "{}", .{sema_version.major});
+                                break try std.fmt.allocPrint(b.allocator, "{}.{}.{}", .{sema_version.major, sema_version.minor, sema_version.patch});
                             } else |err| err catch {};
                         }
                     } else {
@@ -473,11 +473,12 @@ pub fn build(b: *std.Build) !void {
                     };
 
                     const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
+                    const cxx_include_arch = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-pc-linux-gnu" });
                     compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/lib64/llvm17/include/" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
-                    compiler.addIncludePath(.{ .cwd_relative = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-redhat-linux" }) });
+                    compiler.addIncludePath(.{ .cwd_relative = cxx_include_arch });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64/llvm17/lib" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64" });
                 }
