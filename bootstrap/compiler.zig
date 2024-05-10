@@ -886,72 +886,72 @@ pub fn make() void {
     }
 
     // TODO: Prune
-    // if (do_codegen) {
-    //     for (threads) |*thread| {
-    //         thread.add_thread_work(Job{
-    //             .id = switch (codegen_backend) {
-    //                 .llvm => .llvm_codegen_thread_module,
-    //             },
-    //         });
-    //     }
-    //
-    //     while (true) {
-    //         var to_do: u64 = 0;
-    //         for (threads) |*thread| {
-    //             const jobs_to_do = thread.task_system.job.to_do - thread.task_system.job.completed;
-    //             const asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-    //             assert(asks_to_do == 0);
-    //
-    //             to_do += jobs_to_do;
-    //         }
-    //
-    //         if (to_do == 0) {
-    //             break;
-    //         }
-    //     }
-    //
-    //     var modules_present = PinnedArray(usize){};
-    //     for (threads, 0..) |*thread, i| {
-    //         if (thread.functions.length > 0) {
-    //             _ = modules_present.append(i);
-    //         }
-    //     }
-    //
-    //     switch (modules_present.length) {
-    //         0 => unreachable,
-    //         1 => unreachable,
-    //         2 => {
-    //             const first = modules_present.slice()[0];
-    //             const second = modules_present.slice()[1];
-    //             const destination = threads[first].llvm.module;
-    //             {
-    //                 var message: []const u8 = undefined;
-    //                 destination.toString(&message.ptr, &message.len);
-    //                 std.debug.print("{s}\n", .{message});
-    //             }
-    //             const source = threads[second].llvm.module;
-    //             {
-    //                 var message: []const u8 = undefined;
-    //                 source.toString(&message.ptr, &message.len);
-    //                 std.debug.print("{s}\n", .{message});
-    //             }
-    //
-    //             if (!destination.link(source, .{
-    //                 .override_from_source = true,
-    //                 .link_only_needed = false,
-    //             })) {
-    //                 exit(1);
-    //             }
-    //
-    //             var message: []const u8 = undefined;
-    //             destination.toString(&message.ptr, &message.len);
-    //             std.debug.print("============\n===========\n{s}\n", .{message});
-    //         },
-    //         else => unreachable,
-    //     }
-    // }
+    if (do_codegen) {
+        for (threads) |*thread| {
+            thread.add_thread_work(Job{
+                .id = switch (codegen_backend) {
+                    .llvm => .llvm_codegen_thread_module,
+                },
+            });
+        }
 
-    // while (true) {}
+        while (true) {
+            var to_do: u64 = 0;
+            for (threads) |*thread| {
+                const jobs_to_do = thread.task_system.job.to_do - thread.task_system.job.completed;
+                const asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
+                assert(asks_to_do == 0);
+
+                to_do += jobs_to_do;
+            }
+
+            if (to_do == 0) {
+                break;
+            }
+        }
+
+        var modules_present = PinnedArray(usize){};
+        for (threads, 0..) |*thread, i| {
+            if (thread.functions.length > 0) {
+                _ = modules_present.append(i);
+            }
+        }
+
+        switch (modules_present.length) {
+            0 => unreachable,
+            1 => {},
+            2 => {
+                // const first = modules_present.slice()[0];
+                // const second = modules_present.slice()[1];
+                // const destination = threads[first].llvm.module;
+                // {
+                //     var message: []const u8 = undefined;
+                //     destination.toString(&message.ptr, &message.len);
+                //     std.debug.print("{s}\n", .{message});
+                // }
+                // const source = threads[second].llvm.module;
+                // {
+                //     var message: []const u8 = undefined;
+                //     source.toString(&message.ptr, &message.len);
+                //     std.debug.print("{s}\n", .{message});
+                // }
+                //
+                // if (!destination.link(source, .{
+                //     .override_from_source = true,
+                //     .link_only_needed = false,
+                // })) {
+                //     exit(1);
+                // }
+                //
+                // var message: []const u8 = undefined;
+                // destination.toString(&message.ptr, &message.len);
+                // std.debug.print("============\n===========\n{s}\n", .{message});
+            },
+            else => unreachable,
+        }
+    }
+
+    while (true) {}
 }
 
 fn intern_identifier(pool: *PinnedHashMap(u32, []const u8), identifier: []const u8) u32 {
@@ -1252,109 +1252,113 @@ fn thread_callback(thread_index: u32) void {
                     },
                     .llvm_codegen_thread_module => {
                         if (thread.functions.length > 0) {
-                            const debug_info = true;
-
-                            const ExternalRef = struct{
-                                gsr: GlobalSymbolReference,
-                                thread: u16,
-                            };
-                            var external_hashmap = PinnedHashMap(ExternalRef, *LLVM.Value.Constant.Function){};
-
-                            for (thread.external_functions.slice()) |*nat_function| {
-                                _ = llvm_get_function(thread, nat_function, true);
-                            }
-
-                            _ = &external_hashmap; // autofix
-                            for (thread.functions.slice()) |*nat_function| {
-                                _ = llvm_get_function(thread, &nat_function.declaration, false);
-                            }
-
-                            for (thread.functions.slice()) |*nat_function| {
-                                const function = nat_function.declaration.llvm.?;
-                                const nat_entry_basic_block = thread.basic_blocks.get(nat_function.entry_block);
-                                assert(nat_entry_basic_block.predecessors.length == 0);
-                                const entry_block_name = "entry_block_name";
-                                const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
-                                thread.llvm.builder.setInsertPoint(entry_block);
-
-                                for (nat_entry_basic_block.instructions.slice()) |instruction| {
-                                    const value: *LLVM.Value = switch (instruction.id) {
-                                        .ret => block: {
-                                            const return_instruction = thread.returns.get(@enumFromInt(instruction.index));
-                                            const return_value = llvm_get_value(thread, return_instruction.value);
-                                            const ret = thread.llvm.builder.createRet(return_value);
-                                            break :block ret.toValue();
-                                        },
-                                        .call => block: {
-                                            const call = thread.calls.get(@enumFromInt(instruction.index));
-                                            const callee = if (call.value.sema.thread == thread.get_index()) switch (call.value.sema.id) {
-                                                .global_symbol => blk: {
-                                                    const global_symbol: GlobalSymbolReference = @bitCast(call.value.sema.index);
-                                                    break :blk switch (global_symbol.id) {
-                                                        .function_declaration => b: {
-                                                            const external_function = thread.external_functions.slice()[global_symbol.index];
-                                                            break :b external_function.llvm.?;
-                                                        },
-                                                        else => |t| @panic(@tagName(t)),
-                                                    };
-                                                },
-                                                else => |t| @panic(@tagName(t)),
-                                            } else exit(1);
-                                            const function_type = callee.getType();
-
-                                            const arguments: []const *LLVM.Value = &.{};
-                                            const call_i = thread.llvm.builder.createCall(function_type, callee.toValue(), arguments.ptr, arguments.len, "", "".len, null);
-                                            break :block call_i.toValue();
-                                        },
-                                        else => |t| @panic(@tagName(t)),
-                                    };
-
-                                    instruction.llvm = value;
-                                }
-
-                                if (debug_info) {
-                                    const file_index = nat_function.declaration.file;
-                                    const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
-                                    const subprogram = function.getSubprogram();
-                                    llvm_file.builder.finalizeSubprogram(subprogram, function);
-                                }
-
-                                const verify_function = true;
-                                if (verify_function) {
-                                    var message: []const u8 = undefined;
-                                    const verification_success = function.verify(&message.ptr, &message.len);
-                                    if (!verification_success) {
-                                        var function_msg: []const u8 = undefined;
-                                        function.toString(&function_msg.ptr, &function_msg.len);
-                                        write(function_msg);
-                                        write("\n");
-                                        exit_with_error(message);
-                                    }
-                                }
-                            }
-
-                            if (debug_info) {
-                                const file_index = thread.functions.slice()[0].declaration.file;
-                                const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
-                                llvm_file.builder.finalize();
-                            }
-
-                            const verify_module = true;
-                            if (verify_module) {
-                                var verification_message: []const u8 = undefined;
-                                const verification_success = thread.llvm.module.verify(&verification_message.ptr, &verification_message.len);
-                                if (!verification_success) {
-                                    const print_module = true;
-                                    if (print_module) {
-                                        var module_content: []const u8 = undefined;
-                                        thread.llvm.module.toString(&module_content.ptr, &module_content.len);
-                                        write(module_content);
-                                        write("\n");
-                                    }
-
-                                    exit_with_error(verification_message);
-                                }
-                            }
+                            const context = LLVM.Context.create();
+                            const result = context.parse_bitcode("foo");
+                            _ = result; // autofix
+                            exit(0);
+                            // const debug_info = true;
+                            //
+                            // const ExternalRef = struct{
+                            //     gsr: GlobalSymbolReference,
+                            //     thread: u16,
+                            // };
+                            // var external_hashmap = PinnedHashMap(ExternalRef, *LLVM.Value.Constant.Function){};
+                            //
+                            // for (thread.external_functions.slice()) |*nat_function| {
+                            //     _ = llvm_get_function(thread, nat_function, true);
+                            // }
+                            //
+                            // _ = &external_hashmap; // autofix
+                            // for (thread.functions.slice()) |*nat_function| {
+                            //     _ = llvm_get_function(thread, &nat_function.declaration, false);
+                            // }
+                            //
+                            // for (thread.functions.slice()) |*nat_function| {
+                            //     const function = nat_function.declaration.llvm.?;
+                            //     const nat_entry_basic_block = thread.basic_blocks.get(nat_function.entry_block);
+                            //     assert(nat_entry_basic_block.predecessors.length == 0);
+                            //     const entry_block_name = "entry_block_name";
+                            //     const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
+                            //     thread.llvm.builder.setInsertPoint(entry_block);
+                            //
+                            //     for (nat_entry_basic_block.instructions.slice()) |instruction| {
+                            //         const value: *LLVM.Value = switch (instruction.id) {
+                            //             .ret => block: {
+                            //                 const return_instruction = thread.returns.get(@enumFromInt(instruction.index));
+                            //                 const return_value = llvm_get_value(thread, return_instruction.value);
+                            //                 const ret = thread.llvm.builder.createRet(return_value);
+                            //                 break :block ret.toValue();
+                            //             },
+                            //             .call => block: {
+                            //                 const call = thread.calls.get(@enumFromInt(instruction.index));
+                            //                 const callee = if (call.value.sema.thread == thread.get_index()) switch (call.value.sema.id) {
+                            //                     .global_symbol => blk: {
+                            //                         const global_symbol: GlobalSymbolReference = @bitCast(call.value.sema.index);
+                            //                         break :blk switch (global_symbol.id) {
+                            //                             .function_declaration => b: {
+                            //                                 const external_function = thread.external_functions.slice()[global_symbol.index];
+                            //                                 break :b external_function.llvm.?;
+                            //                             },
+                            //                             else => |t| @panic(@tagName(t)),
+                            //                         };
+                            //                     },
+                            //                     else => |t| @panic(@tagName(t)),
+                            //                 } else exit(1);
+                            //                 const function_type = callee.getType();
+                            //
+                            //                 const arguments: []const *LLVM.Value = &.{};
+                            //                 const call_i = thread.llvm.builder.createCall(function_type, callee.toValue(), arguments.ptr, arguments.len, "", "".len, null);
+                            //                 break :block call_i.toValue();
+                            //             },
+                            //             else => |t| @panic(@tagName(t)),
+                            //         };
+                            //
+                            //         instruction.llvm = value;
+                            //     }
+                            //
+                            //     if (debug_info) {
+                            //         const file_index = nat_function.declaration.file;
+                            //         const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
+                            //         const subprogram = function.getSubprogram();
+                            //         llvm_file.builder.finalizeSubprogram(subprogram, function);
+                            //     }
+                            //
+                            //     const verify_function = true;
+                            //     if (verify_function) {
+                            //         var message: []const u8 = undefined;
+                            //         const verification_success = function.verify(&message.ptr, &message.len);
+                            //         if (!verification_success) {
+                            //             var function_msg: []const u8 = undefined;
+                            //             function.toString(&function_msg.ptr, &function_msg.len);
+                            //             write(function_msg);
+                            //             write("\n");
+                            //             exit_with_error(message);
+                            //         }
+                            //     }
+                            // }
+                            //
+                            // if (debug_info) {
+                            //     const file_index = thread.functions.slice()[0].declaration.file;
+                            //     const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
+                            //     llvm_file.builder.finalize();
+                            // }
+                            //
+                            // const verify_module = true;
+                            // if (verify_module) {
+                            //     var verification_message: []const u8 = undefined;
+                            //     const verification_success = thread.llvm.module.verify(&verification_message.ptr, &verification_message.len);
+                            //     if (!verification_success) {
+                            //         const print_module = true;
+                            //         if (print_module) {
+                            //             var module_content: []const u8 = undefined;
+                            //             thread.llvm.module.toString(&module_content.ptr, &module_content.len);
+                            //             write(module_content);
+                            //             write("\n");
+                            //         }
+                            //
+                            //         exit_with_error(verification_message);
+                            //     }
+                            // }
                         }
                     },
                 }
@@ -1939,6 +1943,17 @@ pub const LLVM = struct {
         const getAttributeFromString = bindings.NativityLLVMContextGetAttributeFromString;
         const getAttributeFromType = bindings.NativityLLVMContextGetAttributeFromType;
         const getAttributeSet = bindings.NativityLLVMContextGetAttributeSet;
+
+
+        pub fn parse_bitcode(context: *LLVM.Context, bytes: []const u8) ?*LLVM.Module {
+            const memory_buffer = bindings.LLVMCreateMemoryBufferWithMemoryRange(bytes.ptr, bytes.len, null, 0);
+            var out_module: *LLVM.Module = undefined;
+            if (bindings.LLVMParseBitcodeInContext2(context, memory_buffer, &out_module) != 0) {
+                return out_module;
+            } else {
+                return null;
+            }
+        }
     };
 
     pub const Module = opaque {
@@ -2578,6 +2593,8 @@ pub const LLVM = struct {
         };
 
     };
+
+    pub const MemoryBuffer = opaque{};
 
     pub const Value = opaque {
         const setName = bindings.NativityLLVMValueSetName;

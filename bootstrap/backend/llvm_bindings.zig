@@ -157,6 +157,9 @@ pub extern fn NativityLLVMModuleSetTargetMachineDataLayout(module: *LLVM.Module,
 pub extern fn NativityLLVMModuleSetTargetTriple(module: *LLVM.Module, target_triple_ptr: [*]const u8, target_triple_len: usize) void;
 pub extern fn NativityLLVMTypeAssertEqual(a: *LLVM.Type, b: *LLVM.Type) void;
 
+pub extern fn LLVMCreateMemoryBufferWithMemoryRange(InputData: [*]const u8, InputDataLength: usize, BufferName: ?[*:0]const u8, RequiresNullTerminator: c_int) *LLVM.MemoryBuffer;
+pub extern fn LLVMParseBitcodeInContext2(context: *LLVM.Context, memory_buffer: *LLVM.MemoryBuffer, out_module: **LLVM.Module) c_int;
+
 pub extern fn LLVMInitializeAArch64TargetInfo() void;
 pub extern fn LLVMInitializeAMDGPUTargetInfo() void;
 pub extern fn LLVMInitializeARMTargetInfo() void;

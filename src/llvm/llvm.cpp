@@ -4,6 +4,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/DIBuilder.h"
+#include "llvm/Bitcode/BitcodeReader.h"
 
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 
@@ -22,8 +23,6 @@
 
 
 using namespace llvm;
-using llvm::orc::ThreadSafeContext;
-using llvm::orc::ThreadSafeModule;
 
 extern "C" LLVMContext* NativityLLVMCreateContext()
 {
@@ -1077,13 +1076,6 @@ extern "C" CallInst* NativityLLVMBuilderCreateMemcpy(IRBuilder<>& builder, Value
     return memcpy;
 }
 
-extern "C" bool NativityLLVMLinkModules(Module& destination, Module* source)
-{
-    auto src = std::unique_ptr<Module>(source);
-    bool result = Linker::linkModules(destination, std::move(src));
-    // Invert the condition because LLVM boolean concept is lame
-    return !result;
-}
 extern "C" void NativityLLVMTypeAssertEqual(Type* a, Type* b)
 {
     assert(a == b);
