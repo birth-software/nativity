@@ -886,70 +886,70 @@ pub fn make() void {
     }
 
     // TODO: Prune
-    if (do_codegen) {
-        for (threads) |*thread| {
-            thread.add_thread_work(Job{
-                .id = switch (codegen_backend) {
-                    .llvm => .llvm_codegen_thread_module,
-                },
-            });
-        }
-
-        while (true) {
-            var to_do: u64 = 0;
-            for (threads) |*thread| {
-                const jobs_to_do = thread.task_system.job.to_do - thread.task_system.job.completed;
-                const asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-                assert(asks_to_do == 0);
-
-                to_do += jobs_to_do;
-            }
-
-            if (to_do == 0) {
-                break;
-            }
-        }
-
-        var modules_present = PinnedArray(usize){};
-        for (threads, 0..) |*thread, i| {
-            if (thread.functions.length > 0) {
-                _ = modules_present.append(i);
-            }
-        }
-
-        switch (modules_present.length) {
-            0 => unreachable,
-            1 => unreachable,
-            2 => {
-                const first = modules_present.slice()[0];
-                const second = modules_present.slice()[1];
-                const destination = threads[first].llvm.module;
-                {
-                    var message: []const u8 = undefined;
-                    destination.toString(&message.ptr, &message.len);
-                    std.debug.print("{s}\n", .{message});
-                }
-                const source = threads[second].llvm.module;
-                {
-                    var message: []const u8 = undefined;
-                    source.toString(&message.ptr, &message.len);
-                    std.debug.print("{s}\n", .{message});
-                }
-
-                if (!destination.link(source, .{
-                    .override_from_source = true,
-                    .link_only_needed = false,
-                })) {
-                    exit(1);
-                }
-
-                var message: []const u8 = undefined;
-                destination.toString(&message.ptr, &message.len);
-                std.debug.print("============\n===========\n{s}\n", .{message});
-            },
-            else => unreachable,
-        }
-    }
+    // if (do_codegen) {
+    //     for (threads) |*thread| {
+    //         thread.add_thread_work(Job{
+    //             .id = switch (codegen_backend) {
+    //                 .llvm => .llvm_codegen_thread_module,
+    //             },
+    //         });
+    //     }
+    //
+    //     while (true) {
+    //         var to_do: u64 = 0;
+    //         for (threads) |*thread| {
+    //             const jobs_to_do = thread.task_system.job.to_do - thread.task_system.job.completed;
+    //             const asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
+    //             assert(asks_to_do == 0);
+    //
+    //             to_do += jobs_to_do;
+    //         }
+    //
+    //         if (to_do == 0) {
+    //             break;
+    //         }
+    //     }
+    //
+    //     var modules_present = PinnedArray(usize){};
+    //     for (threads, 0..) |*thread, i| {
+    //         if (thread.functions.length > 0) {
+    //             _ = modules_present.append(i);
+    //         }
+    //     }
+    //
+    //     switch (modules_present.length) {
+    //         0 => unreachable,
+    //         1 => unreachable,
+    //         2 => {
+    //             const first = modules_present.slice()[0];
+    //             const second = modules_present.slice()[1];
+    //             const destination = threads[first].llvm.module;
+    //             {
+    //                 var message: []const u8 = undefined;
+    //                 destination.toString(&message.ptr, &message.len);
+    //                 std.debug.print("{s}\n", .{message});
+    //             }
+    //             const source = threads[second].llvm.module;
+    //             {
+    //                 var message: []const u8 = undefined;
+    //                 source.toString(&message.ptr, &message.len);
+    //                 std.debug.print("{s}\n", .{message});
+    //             }
+    //
+    //             if (!destination.link(source, .{
+    //                 .override_from_source = true,
+    //                 .link_only_needed = false,
+    //             })) {
+    //                 exit(1);
+    //             }
+    //
+    //             var message: []const u8 = undefined;
+    //             destination.toString(&message.ptr, &message.len);
+    //             std.debug.print("============\n===========\n{s}\n", .{message});
+    //         },
+    //         else => unreachable,
+    //     }
+    // }
 
     // while (true) {}
 }
@@ -1095,24 +1095,6 @@ fn thread_callback(thread_index: u32) void {
             for (jobs) |job| {
                 switch (job.id) {
                     .llvm_setup => {
-                        const context = LLVM.Context.create();
-                        const module_name: []const u8 = "thread";
-                        const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
-                        const builder = LLVM.Builder.create(context);
-                        const attributes = LLVM.Attributes{
-                            .naked = context.getAttributeFromEnum(.Naked, 0),
-                            .noreturn = context.getAttributeFromEnum(.NoReturn, 0),
-                            .nounwind = context.getAttributeFromEnum(.NoUnwind, 0),
-                            .inreg = context.getAttributeFromEnum(.InReg, 0),
-                            .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
-                        };
-                        thread.llvm = .{
-                            .context = context,
-                            .module = module,
-                            .builder = builder,
-                            .attributes = attributes,
-                        };
-
                         for ([_]Type.Integer.Signedness{.unsigned, .signed}) |signedness| {
                             for (0..64+1) |bit_count| {
                                 const integer_type = Type.Integer{
