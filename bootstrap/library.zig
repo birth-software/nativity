@@ -253,7 +253,7 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type, comptim
             return ptr;
         }
 
-        pub fn add_one(array: *Array) *T{
+        pub fn add_one(array: *Array) *T {
             array.ensure_capacity(1);
             return array.add_one_with_capacity();
         }
@@ -783,7 +783,6 @@ pub fn read_file(arena: *Arena, directory: std.fs.Dir, file_relative_path: []con
     //TODO: adjust file maximum size
     return file_buffer[0..read_byte_count];
 }
-
 
 pub fn self_exe_path(arena: *Arena) ![]const u8 {
     var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
