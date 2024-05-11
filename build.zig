@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) !void {
     const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse (!is_ci and enable_editor);
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
-        else => use_debug,
+        else => false,
         .windows => true,
         // .macos => true,
     };
@@ -476,11 +476,19 @@ pub fn build(b: *std.Build) !void {
                     const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
                     const cxx_include_arch = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-pc-linux-gnu" });
                     compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
-                    compiler.addIncludePath(.{ .cwd_relative = "../../local/llvm18-debug/include" });
+                    if (use_debug) {
+                        compiler.addIncludePath(.{ .cwd_relative = "../../local/llvm18-debug/include" });
+                    } else {
+                        compiler.addIncludePath(.{ .cwd_relative = "../../local/llvm18-release/include" });
+                    }
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_arch });
-                    compiler.addLibraryPath(.{ .cwd_relative = "../../local/llvm18-debug/lib" });
+                    if (use_debug) {
+                        compiler.addLibraryPath(.{ .cwd_relative = "../../local/llvm18-debug/lib" });
+                    } else {
+                        compiler.addLibraryPath(.{ .cwd_relative = "../../local/llvm18-release/lib" });
+                    }
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64" });
                 }
             },
@@ -611,5 +619,3 @@ pub fn build(b: *std.Build) !void {
     const test_all = b.step("test_all", "Test all");
     test_all.dependOn(&test_command.step);
 }
-
-

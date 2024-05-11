@@ -213,7 +213,7 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type, comptim
 
             const length = array.length;
             const size = length * @sizeOf(T);
-            const granularity_aligned_size = align_forward(size, granularity);
+            const granularity_aligned_size = array.committed * granularity;
             const new_size = size + additional * @sizeOf(T);
 
             if (granularity_aligned_size < new_size) {
@@ -483,7 +483,7 @@ pub fn PinnedHashMapAdvanced(comptime K: type, comptime V: type, comptime granul
 
             {
                 const key_size = length * @sizeOf(K);
-                const key_granularity_aligned_size = align_forward(key_size, granularity);
+                const key_granularity_aligned_size = map.committed_key * granularity;
                 const key_new_size = key_size + additional * @sizeOf(K);
 
                 if (key_granularity_aligned_size < key_new_size) {
@@ -498,7 +498,7 @@ pub fn PinnedHashMapAdvanced(comptime K: type, comptime V: type, comptime granul
 
             {
                 const value_size = length * @sizeOf(V);
-                const value_granularity_aligned_size = align_forward(value_size, granularity);
+                const value_granularity_aligned_size = map.committed_value * granularity;
                 const value_new_size = value_size + additional * @sizeOf(K);
 
                 if (value_granularity_aligned_size < value_new_size) {
