@@ -175,6 +175,10 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type, comptim
 
         const Array = @This();
 
+        pub fn clear(array: *Array) void {
+            array.length = 0;
+        }
+
         pub fn const_slice(array: *const Array) []const T {
             return array.pointer[0..array.length];
         }
