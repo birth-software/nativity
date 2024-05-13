@@ -3569,6 +3569,7 @@ const Bitcode = struct {
         fn write_attribute_group_table(writer: *Writer) void {
             if (attribute_groups.len > 0) {
                 writer.enter_subblock(.parameter_attribute_group, 3);
+                const start = writer.buffer.length * 4;
                 var records = std.BoundedArray(u64, 4096){};
 
                 for (attribute_groups, 0..) |attribute_group, attribute_group_index| {
@@ -3576,7 +3577,7 @@ const Bitcode = struct {
                     records.appendAssumeCapacity(switch (attribute_group_index) {
                         0 => 0xffffffff,
                         else => attribute_group_index,
-                    });
+                        });
 
                     for (attribute_group.attributes) |attribute| {
                         switch (attribute) {
@@ -3611,6 +3612,11 @@ const Bitcode = struct {
                 }
 
                 writer.exit_block();
+                const end = writer.buffer.length * 4;
+                const expected = debug_main_bitcode[start..end];
+                const have = writer.get_byte_slice()[start..end];
+                std.debug.print("Start: {}\n", .{start});
+                std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
             }
         }
 
