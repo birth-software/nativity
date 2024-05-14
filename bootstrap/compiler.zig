@@ -3643,6 +3643,8 @@ const Bitcode = struct {
             if (attribute_groups.len > 0) {
                 writer.enter_subblock(.parameter_attribute, 3);
 
+                const start = writer.buffer.length * 4;
+
                 var records = std.BoundedArray(u64, 4096){};
                 for (attribute_lists) |attribute_list| {
                     for (attribute_list.attribute_groups) |attribute_group_index| {
@@ -3657,16 +3659,24 @@ const Bitcode = struct {
                 }
 
                 writer.exit_block();
+
+                const end = writer.buffer.length * 4;
+                const expected = debug_main_bitcode[start..end];
+                const have = writer.get_byte_slice()[start..end];
+                std.debug.print("Start: {}\n", .{start});
+                std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
             }
         }
 
         fn write_module_info(writer: *Writer) void {
-            const target_triple = "x86_64-pc-linux-gnu";
+            const start = writer.buffer.length * 4;
+            _ = start; // autofix
+            const target_triple = "x86_64-unknown-linux-gnu";
             writer.write_string_record(@intFromEnum(ModuleCode.triple), target_triple,
                 // TODO in LLVM code
                 0);
 
-            const data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
+            const data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
             writer.write_string_record(@intFromEnum(ModuleCode.data_layout), data_layout,
                 // TODO in LLVM code
                 0);
@@ -3684,7 +3694,7 @@ const Bitcode = struct {
 
             var values = std.BoundedArray(u32, 64){};
             {
-                const source_filename = "llvm-link";
+                const source_filename = "main.c";
                 const source_string_encoding = get_string_encoding(source_filename);
                 const abbreviation = writer.abbreviation_buffer.append(.{});
                 abbreviation.add_literal(@intFromEnum(ModuleCode.source_filename));
@@ -3707,7 +3717,11 @@ const Bitcode = struct {
             // TODO: global variables
 
             for (dummy_functions) |function| {
+                std.debug.print("====\nFUNCTION START\n====\n", .{});
+                defer std.debug.print("====\nFUNCTION END\n====\n", .{});
+                // const loop_start = writer.buffer.length * 4;
                 const offset = writer.strtab_content.length;
+                std.debug.print("Offset: {}\n", .{offset});
                 writer.strtab_content.append_slice(function.name);
                 values.appendAssumeCapacity(offset);
                 values.appendAssumeCapacity(@intCast(function.name.len));
@@ -3721,7 +3735,7 @@ const Bitcode = struct {
                 values.appendAssumeCapacity(@intFromEnum(function.visibility));
                 values.appendAssumeCapacity(@intFromBool(function.gc));
                 values.appendAssumeCapacity(@intFromEnum(function.unnamed_address));
-                // TODO:
+                values.appendAssumeCapacity(@intFromEnum(function.dll_storage_class));
                 values.appendAssumeCapacity(function.prologued_data);
                 values.appendAssumeCapacity(function.comdat);
                 values.appendAssumeCapacity(function.prefix_data);
@@ -3731,8 +3745,15 @@ const Bitcode = struct {
                 values.appendAssumeCapacity(function.partition_offset);
                 values.appendAssumeCapacity(function.partition_len);
 
+                assert(writer.current_codesize != 8);
                 writer.emit_record(@TypeOf(values.constSlice()[0]), @intFromEnum(ModuleCode.function), values.constSlice(), 0);
                 values.resize(0) catch unreachable;
+
+                // const loop_end = writer.buffer.length * 4;
+                // const expected = debug_main_bitcode[loop_start..loop_end];
+                // const have = writer.get_byte_slice()[loop_start..loop_end];
+                // std.debug.print("Start: {}\n", .{loop_start});
+                // std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
             }
 
             // TODO: global aliases
@@ -3740,6 +3761,12 @@ const Bitcode = struct {
             // TODO: global ifunc
 
             writer.write_value_symbol_table_forward_declaration();
+            //
+            // const end = writer.buffer.length * 4;
+            // const expected = debug_main_bitcode[start..end];
+            // const have = writer.get_byte_slice()[start..end];
+            // std.debug.print("Start: {}\n", .{start});
+            // std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
         }
 
         const DummyFunction = struct{
@@ -3772,7 +3799,7 @@ const Bitcode = struct {
                 .calling_convention = .C,
                 .is_declaration = false,
                 .linkage = .external,
-                .attribute_list_id = 0,
+                .attribute_list_id = 1,
                 .alignment = 0,
                 .section = 0,
                 .visibility = .default,
@@ -3784,7 +3811,7 @@ const Bitcode = struct {
                 .personality = 0,
                 .dso_local = true,
                 .address_space = 0,
-                .partition_offset = 0,
+                .partition_offset = 4,
                 .partition_len = 0,
             },
             .{
@@ -3793,7 +3820,7 @@ const Bitcode = struct {
                 .calling_convention = .C,
                 .is_declaration = true,
                 .linkage = .external,
-                .attribute_list_id = 1,
+                .attribute_list_id = 2,
                 .alignment = 0,
                 .section = 0,
                 .visibility = .default,
@@ -3805,7 +3832,7 @@ const Bitcode = struct {
                 .personality = 0,
                 .dso_local = false,
                 .address_space = 0,
-                .partition_offset = 0,
+                .partition_offset = 4,
                 .partition_len = 0,
             },
         };
@@ -3900,7 +3927,7 @@ const Bitcode = struct {
 
         fn write_raw(writer: *Writer, value: u32) void {
             std.debug.print("[{}-{}] Flushing buffer 0x{x}\n", .{writer.buffer.length, writer.buffer.length * 4, value});
-            // if (writer.buffer.length == (220) / 4 - 1) @breakpoint();
+            // if (writer.buffer.length == (712) / 4 - 1) @breakpoint();
             // if (writer.buffer.length == (152 + 32) / 4) @breakpoint();
             _ = writer.buffer.append(value);
         }
@@ -4025,6 +4052,7 @@ const Bitcode = struct {
 
             writer.buffer.slice()[last.start_size_index] = size32;
 
+            std.debug.print("\n\n\n[EXIT BLOCK] Current code size: {}. Previous code size: {}. Swapping...\n\n\n", .{writer.current_codesize, last.previous_code_size});
             writer.current_codesize = last.previous_code_size;
             writer.current_abbreviations = last.previous_abbreviations;
             writer.block_scope.length -= 1;
