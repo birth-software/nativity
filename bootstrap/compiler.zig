@@ -2244,6 +2244,56 @@ const Bitcode = struct {
         group_entry = 3,
     };
 
+    const MetadataCode = enum(u8) {
+        string_old = 1,     // mdstring:      [values]
+        value = 2,          // value:         [type num, value num]
+        node = 3,           // node:          [n x md num]
+        name = 4,           // string:        [values]
+        distinct_node = 5,  // distinct_node: [n x md num]
+        kind = 6,           // [n x [id, name]]
+        location = 7,       // [distinct, line, col, scope, inlined-at?]
+        old_node = 8,       // old_node:      [n x (type num, value num)]
+        old_fn_node = 9,    // old_fn_node:   [n x (type num, value num)]
+        named_node = 10,    // named_node:    [n x mdnodes]
+        attachment = 11,    // [m x [value, [n x [id, mdnode]]]
+        generic_debug = 12, // [distinct, tag, vers, header, n x md num]
+        subrange = 13,      // [distinct, count, lo]
+        enumerator = 14,    // [isunsigned|distinct, value, name]
+        basic_type = 15,    // [distinct, tag, name, size, align, enc]
+        file = 16, // [distinct, filename, directory, checksumkind, checksum]
+        derived_type = 17,       // [distinct, ...]
+        composite_type = 18,     // [distinct, ...]
+        subroutine_type = 19,    // [distinct, flags, types, cc]
+        compile_unit = 20,       // [distinct, ...]
+        subprogram = 21,         // [distinct, ...]
+        lexical_block = 22,      // [distinct, scope, file, line, column]
+        lexical_block_file = 23, //[distinct, scope, file, discriminator]
+        namespace = 24, // [distinct, scope, file, name, line, exportsymbols]
+        template_type = 25,   // [distinct, scope, name, type, ...]
+        template_value = 26,  // [distinct, scope, name, type, value, ...]
+        global_var = 27,      // [distinct, ...]
+        local_var = 28,       // [distinct, ...]
+        expression = 29,      // [distinct, n x element]
+        objc_property = 30,   // [distinct, name, file, line, ...]
+        imported_entity = 31, // [distinct, tag, scope, entity, line, name]
+        module = 32,          // [distinct, scope, name, ...]
+        macro = 33,           // [distinct, macinfo, line, name, value]
+        macro_file = 34,      // [distinct, macinfo, line, file, ...]
+        strings = 35,         // [count, offset] blob([lengths][chars])
+        global_decl_attachment = 36, // [valueid, n x [id, mdnode]]
+        global_var_expr = 37,        // [distinct, var, expr]
+        index_offset = 38,           // [offset]
+        index = 39,                  // [bitpos]
+        label = 40,                  // [distinct, scope, name, file, line]
+        string_type = 41,            // [distinct, name, size, align,...]
+                                     // codes 42 and 43 are reserved for support for fortran array specific debug
+                                     // info.
+        common_block = 44,     // [distinct, scope, name, variable,...]
+        generic_subrange = 45, // [distinct, count, lo, up, stride]
+        arg_list = 46,         // [n x [type num, value num]]
+        assign_id = 47,        // [distinct, ...]
+    };
+
     fn print_hex_slice(bytes: []const u8) void {
         for (bytes, 0..) |b, i| {
             if (i % 4 == 0) {
@@ -3957,8 +4007,73 @@ const Bitcode = struct {
         }
 
         fn write_module_metadata_kinds(writer: *Writer) void {
-            _ = writer; // autofix
-            // TODO:
+            writer.enter_subblock(.metadata_kind, 3);
+            const start = writer.buffer.length * 4;
+
+            const names = [40][]const u8{
+                "dbg",
+                "tbaa",
+                "prof",
+                "fpmath",
+                "range",
+                "tbaa.struct",
+                "invariant.load",
+                "alias.scope",
+                "noalias",
+                "nontemporal",
+                "llvm.mem.parallel_loop_access",
+                "nonnull",
+                "dereferenceable",
+                "dereferenceable_or_null",
+                "make.implicit",
+                "unpredictable",
+                "invariant.group",
+                "align",
+                "llvm.loop",
+                "type",
+                "section_prefix",
+                "absolute_symbol",
+                "associated",
+                "callees",
+                "irr_loop",
+                "llvm.access.group",
+                "callback",
+                "llvm.preserve.access.index",
+                "vcall_visibility",
+                "noundef",
+                "annotation",
+                "nosanitize",
+                "func_sanitize",
+                "exclude",
+                "memprof",
+                "callsite",
+                "kcfi_type",
+                "pcsections",
+                "DIAssignID",
+                "coro.outside.frame",
+            };
+
+            var records = std.BoundedArray(u64, 64){};
+
+            for (names, 0..) |name, name_index| {
+                records.appendAssumeCapacity(name_index);
+
+                for (name) |b| {
+                    records.appendAssumeCapacity(b);
+                }
+
+                writer.emit_record(u64, @intFromEnum(MetadataCode.kind), records.constSlice(), 0);
+
+                records.resize(0) catch unreachable;
+            }
+
+            writer.exit_block();
+            const end = writer.buffer.length * 4;
+            const expected = debug_main_bitcode[start..end];
+            const have = writer.get_byte_slice()[start..end];
+            print_hex_slice(expected);
+            std.debug.print("\n\nStart: {}\n", .{start});
+            std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
         }
 
         fn write_module_metadata(writer: *Writer) void {
