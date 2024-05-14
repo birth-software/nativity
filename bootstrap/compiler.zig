@@ -3668,7 +3668,9 @@ const Bitcode = struct {
             }
         }
 
+        var foo: u32 = undefined;
         fn write_module_info(writer: *Writer) void {
+            foo = writer.buffer.length * 4;
             const start = writer.buffer.length * 4;
             _ = start; // autofix
             const target_triple = "x86_64-unknown-linux-gnu";
@@ -3838,8 +3840,120 @@ const Bitcode = struct {
         };
 
         fn write_module_constants(writer: *Writer) void {
-            _ = writer; // autofix
-            // TODO:
+            std.debug.print("Module constants start\n", .{});
+            writer.write_constants(0, 15, true);
+            
+            // 0x81, 0x00, 0x00, 0x00, 
+            // 0x07, 0x00, 0x00, 0x00, 
+            // 0x32, 0x1e, 0x98, 0x10, 
+            // 0x19, 0x11, 0x4c, 0x90, 
+            // 0x8c, 0x09, 0x26, 0x47, 
+            // 0xc6, 0x04, 0x43, 0x4a, 
+            // 0x39, 0x94, 0x42, 0x11, 
+            // 0x94, 0x41, 0x09, 0x14, 
+            // 0x42, 0x41, 0x00, 0x00, 
+
+        }
+
+        fn write_constants(writer: *Writer, first_value: u32, last_value: u32, is_global: bool) void {
+            if (first_value == last_value) return;
+            writer.enter_subblock(.constant, 4);
+            const start = writer.buffer.length * 4;
+            const abbreviations: struct {
+                aggregate: u32 = 0,
+                string8: u32 = 0,
+                cstring7: u32 = 0,
+                cstring6: u32 = 0,
+            } = switch (is_global) {
+                true => blk: {
+                    std.debug.print("===\nAggregate\n===\n", .{});
+                    const aggregate_abbreviation = abv: {
+                        const abbreviation = writer.abbreviation_buffer.append(.{});
+                        abbreviation.add_literal(@intFromEnum(ConstantCode.aggregate));
+                        abbreviation.add_with_encoding(.{ .encoding = .array });
+                        abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = std.math.log2_int_ceil(u32, last_value + 1) });
+                        break :abv writer.emit_abbreviation(abbreviation);
+                    };
+                    std.debug.print("===\nstring8\n===\n", .{});
+                    const string8_abbreviation = abv: {
+                        const abbreviation = writer.abbreviation_buffer.append(.{});
+                        abbreviation.add_literal(@intFromEnum(ConstantCode.string));
+                        abbreviation.add_with_encoding(.{ .encoding = .array });
+                        abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 8 });
+                        break :abv writer.emit_abbreviation(abbreviation);
+                    };
+                    std.debug.print("===\ncstring7\n===\n", .{});
+                    const cstring7_abbreviation = abv: {
+                        const abbreviation = writer.abbreviation_buffer.append(.{});
+                        abbreviation.add_literal(@intFromEnum(ConstantCode.cstring));
+                        abbreviation.add_with_encoding(.{ .encoding = .array });
+                        abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 7 });
+                        break :abv writer.emit_abbreviation(abbreviation);
+                    };
+                    std.debug.print("===\ncstring6\n===\n", .{});
+                    const cstring6_abbreviation = abv: {
+                        const abbreviation = writer.abbreviation_buffer.append(.{});
+                        abbreviation.add_literal(@intFromEnum(ConstantCode.cstring));
+                        abbreviation.add_with_encoding(.{ .encoding = .array });
+                        abbreviation.add_with_encoding(.{ .encoding = .char6 });
+                        break :abv writer.emit_abbreviation(abbreviation);
+                    };
+                    std.debug.print("===\nEND\n===\n", .{});
+                    break :blk .{
+                        .aggregate = aggregate_abbreviation,
+                        .string8 = string8_abbreviation,
+                        .cstring7 = cstring7_abbreviation,
+                        .cstring6 = cstring6_abbreviation,
+                    };
+                },
+                false => .{},
+            };
+            _ = abbreviations; // autofix
+
+
+            var records = std.BoundedArray(u64, 64){};
+
+            // Hardcoded:
+            {
+                std.debug.print("SETTYPE\n", .{});
+                defer std.debug.print("END SETTYPE\n", .{});
+                // Type 1: i32
+                records.appendAssumeCapacity(1);
+                writer.emit_record(u64, @intFromEnum(ConstantCode.set_type), records.constSlice(), @intFromEnum(ConstantAbbreviationId.set_type));
+                records.resize(0) catch unreachable;
+            }
+
+            const Integer = struct{
+                value: u64,
+            };
+            _ = Integer; // autofix
+            const integers = [7]u64{7, 5, 2, 3, 1, 4, 8};
+            for (integers) |int| {
+                const v = encode_signed_int(int);
+                records.appendAssumeCapacity(v);
+                const code = ConstantCode.integer;
+                const abbreviation = ConstantAbbreviationId.integer;
+                writer.emit_record(u64, @intFromEnum(code), records.constSlice(), @intFromEnum(abbreviation));
+                records.resize(0) catch unreachable;
+            }
+
+            writer.exit_block();
+
+            const end = writer.buffer.length * 4;
+            const expected = debug_main_bitcode[start..end];
+            const have = writer.get_byte_slice()[start..end];
+            print_hex_slice(expected);
+            std.debug.print("\n\nStart: {}\n", .{start});
+            std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
+        }
+
+        fn encode_signed_int(value: u64) u64 {
+            const sv: i64 = @bitCast(value);
+            if (sv >= 0) {
+                return value << 1;
+            } else {
+                return @bitCast((-sv << 1) | 1);
+            }
         }
 
         fn write_module_metadata_kinds(writer: *Writer) void {
@@ -3867,13 +3981,16 @@ const Bitcode = struct {
         }
 
         fn write_value_symbol_table_forward_declaration(writer: *Writer) void {
+            std.debug.print("Emitting abbreviation...\n", .{});
             const abbreviation = writer.abbreviation_buffer.append(.{});
             abbreviation.add_literal(@intFromEnum(ModuleCode.vst_offset));
             abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 32 });
 
             const vst_offset_abbreviation = writer.emit_abbreviation(abbreviation);
+            std.debug.print("Emitting abbreviation record...\n", .{});
             const values = [_]u64{@intFromEnum(ModuleCode.vst_offset), 0};
             writer.emit_record_with_abbrev(u64, vst_offset_abbreviation, &values);
+            std.debug.print("End emitting abbreviation record...\n", .{});
 
             writer.vst_offset_placeholder = (writer.buffer.length * 32) - 32;
         }
@@ -4217,8 +4334,8 @@ const Bitcode = struct {
             writer.current_abbreviations = .{};
 
             // getBlockInfo
-            if (false) {
-                unreachable;
+            if (writer.get_block_info(@intFromEnum(block_id))) |block_info| {
+                writer.current_abbreviations.append_slice(block_info.abbreviations.const_slice());
             }
         }
 
