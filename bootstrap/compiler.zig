@@ -3485,15 +3485,22 @@ const Bitcode = struct {
 
         const AttributeGroup = struct{
             attributes: []const DummyAttribute,
+            parameter_index: u32,
         };
 
         const attribute_groups = [_]AttributeGroup{
             .{
+                .parameter_index = 0xffff_ffff,
                 .attributes = &.{
                     .{ .enumeration = .no_inline },
                     .{ .enumeration = .no_unwind },
                     .{ .enumeration = .optimize_none },
-                    .{ .enumeration = .uw_table },
+                    .{
+                        .int = .{
+                            .key = .uw_table,
+                            .value = 2,
+                        },
+                    },
                     .{
                         .string = .{
                             .key = "frame-pointer",
@@ -3521,7 +3528,7 @@ const Bitcode = struct {
                     .{
                         .string = .{
                             .key = "target-cpu",
-                            .value = "x86_64",
+                            .value = "x86-64",
                         },
                     },
                     .{
@@ -3539,16 +3546,19 @@ const Bitcode = struct {
                 },
             },
             .{
+                .parameter_index = 1,
                 .attributes = &.{
                     .{ .enumeration = .noundef },
                 },
             },
             .{
+                .parameter_index = 2,
                 .attributes = &.{
                     .{ .enumeration = .noundef },
                 },
             },
             .{
+                .parameter_index = 0xffff_ffff,
                 .attributes = &.{
                     .{ .enumeration = .no_callback },
                     .{ .enumeration = .nofree },
@@ -3573,11 +3583,10 @@ const Bitcode = struct {
                 var records = std.BoundedArray(u64, 4096){};
 
                 for (attribute_groups, 0..) |attribute_group, attribute_group_index| {
-                    records.appendAssumeCapacity(attribute_group_index);
-                    records.appendAssumeCapacity(switch (attribute_group_index) {
-                        0 => 0xffffffff,
-                        else => attribute_group_index,
-                        });
+                    std.debug.print("====\nWriting attribute group #{}...\n====\n", .{attribute_group_index});
+                    defer std.debug.print("====\nEnded attribute group #{}...\n====\n", .{attribute_group_index});
+                    records.appendAssumeCapacity(attribute_group_index + 1);
+                    records.appendAssumeCapacity(attribute_group.parameter_index);
 
                     for (attribute_group.attributes) |attribute| {
                         switch (attribute) {
@@ -3585,23 +3594,24 @@ const Bitcode = struct {
                                 records.appendAssumeCapacity(0);
                                 records.appendAssumeCapacity(@intFromEnum(e));
                             },
+                            .int => |i| {
+                                records.appendAssumeCapacity(1);
+                                records.appendAssumeCapacity(@intFromEnum(i.key));
+                                records.appendAssumeCapacity(i.value);
+                            },
                             .string => |s| {
                                 records.appendAssumeCapacity(@as(u64, 3) + @intFromBool(s.value.len > 0));
                                 for (s.key) |b| {
                                     records.appendAssumeCapacity(b);
                                 }
                                 records.appendAssumeCapacity(0);
+
                                 if (s.value.len > 0) {
                                     for (s.value) |b| {
                                         records.appendAssumeCapacity(b);
                                     }
                                     records.appendAssumeCapacity(0);
                                 }
-                            },
-                            .int => |i| {
-                                records.appendAssumeCapacity(1);
-                                records.appendAssumeCapacity(@intFromEnum(i.key));
-                                records.appendAssumeCapacity(i.value);
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -3889,8 +3899,8 @@ const Bitcode = struct {
         }
 
         fn write_raw(writer: *Writer, value: u32) void {
-            // std.debug.print("[{}-{}] Flushing buffer 0x{x}\n", .{writer.buffer.length, writer.buffer.length * 4, value});
-            // if (writer.buffer.length == (152 + 32) / 4 - 1) @breakpoint();
+            std.debug.print("[{}-{}] Flushing buffer 0x{x}\n", .{writer.buffer.length, writer.buffer.length * 4, value});
+            // if (writer.buffer.length == (220) / 4 - 1) @breakpoint();
             // if (writer.buffer.length == (152 + 32) / 4) @breakpoint();
             _ = writer.buffer.append(value);
         }
@@ -3906,7 +3916,7 @@ const Bitcode = struct {
         }
 
         fn emit(writer: *Writer, value: u32, bit_count: u32) void {
-            // std.debug.print("ASK: [[32-B-IDX[0x{x}] 8-bit IDX[{}] - CVAL=0x{x} - CBIT={}]] Writing 0x{x} for {} bits\n", .{writer.buffer.length, writer.buffer.length * 4, writer.current_value, writer.current_bit, value, bit_count});
+            std.debug.print("ASK: [[32-B-IDX[0x{x}] 8-bit IDX[{}] - CVAL=0x{x} - CBIT={}]] Writing 0x{x} for {} bits\n", .{writer.buffer.length, writer.buffer.length * 4, writer.current_value, writer.current_bit, value, bit_count});
             assert(bit_count > 0 and bit_count <= 32);
             assert(value & ~(~@as(u32, 0) >> @as(u5, @intCast(32 - bit_count))) == 0);
             const shifted = value << @as(u5, @intCast(writer.current_bit));
@@ -4044,7 +4054,8 @@ const Bitcode = struct {
                 writer.emit_vbr(code, 6);
                 writer.emit_vbr(count, 6);
 
-                for (values) |v| {
+                for (values, 0..) |v, i| {
+                    std.debug.print("Value #{} at [{}]: 0x{x}\n", .{i, writer.buffer.length * 4, v});
                     writer.emit_vbr64(v, 6);
                 }
             } else {
@@ -4188,6 +4199,7 @@ const Bitcode = struct {
         }
 
         fn emit_vbr(writer: *Writer, value: u32, bit_count: u32) void {
+            std.debug.print("Emitting VBR{}: 0x{x}...\n", .{bit_count, value});
             assert(bit_count <= 32);
             const shifter: u5 = @intCast(bit_count - 1);
             const threshold = @as(u32, 1) << shifter;
@@ -4202,6 +4214,7 @@ const Bitcode = struct {
         }
 
         fn emit_vbr64(writer: *Writer, value: u64, bit_count: u32) void {
+            std.debug.print("Emitting VBR{}: 0x{x}...\n", .{bit_count, value});
             assert(bit_count <= 32);
             if (@as(u32, @truncate(value)) == value) {
                 writer.emit_vbr(@truncate(value), bit_count);
