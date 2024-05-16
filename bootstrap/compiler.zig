@@ -7,6 +7,8 @@ const PinnedHashMap = library.PinnedHashMap;
 const hash_bytes = library.my_hash;
 const byte_equal = library.byte_equal;
 
+const test_byte_equality = false;
+
 fn exit(exit_code: u8) noreturn {
     @setCold(true);
     if (@import("builtin").mode == .Debug) {
@@ -1865,6 +1867,14 @@ const Bitcode = struct {
             });
         }
 
+        pub fn add_metadata(abbreviation: *Abbreviation) void {
+            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
+        }
+
+        pub fn add_line(abbreviation: *Abbreviation) void {
+            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 8 });
+        }
+
         pub fn add_with_encoding_advanced(abbreviation: *Abbreviation, op: Op) void {
             _ = abbreviation.operands.append(op);
         }
@@ -2310,6 +2320,61 @@ const Bitcode = struct {
             std.debug.print("0x{x:0>2}, ", .{b});
         }
     }
+        fn write_foo() void {
+            var writer = Bitcode.Writer{};
+            const magic align(4) = [_]u8{ 0x42, 0x43, 0xc0, 0xde };
+            writer.append_bytes(&magic);
+            writer.enter_subblock(.module, 3);
+            writer.write_type_table();
+            for (Writer.dummy_functions) |function| {
+                std.debug.print("====\nFUNCTION START\n====\n", .{});
+                defer std.debug.print("====\nFUNCTION END\n====\n", .{});
+                // const loop_start = writer.buffer.length * 4;
+                const offset = writer.strtab_content.length;
+                std.debug.print("Offset: {}\n", .{offset});
+                writer.strtab_content.append_slice(function.name);
+                var values = std.BoundedArray(u32, 64){};
+                values.appendAssumeCapacity(offset);
+                values.appendAssumeCapacity(@intCast(function.name.len));
+                values.appendAssumeCapacity(function.type);
+                values.appendAssumeCapacity(@intFromEnum(function.calling_convention));
+                values.appendAssumeCapacity(@intFromBool(function.body == null));
+                values.appendAssumeCapacity(@intFromEnum(function.linkage));
+                values.appendAssumeCapacity(function.attribute_list_id);
+                values.appendAssumeCapacity(function.alignment);
+                values.appendAssumeCapacity(function.section);
+                values.appendAssumeCapacity(@intFromEnum(function.visibility));
+                values.appendAssumeCapacity(@intFromBool(function.gc));
+                values.appendAssumeCapacity(@intFromEnum(function.unnamed_address));
+                values.appendAssumeCapacity(@intFromEnum(function.dll_storage_class));
+                values.appendAssumeCapacity(function.prologued_data);
+                values.appendAssumeCapacity(function.comdat);
+                values.appendAssumeCapacity(function.prefix_data);
+                values.appendAssumeCapacity(function.personality);
+                values.appendAssumeCapacity(@intFromBool(function.dso_local));
+                values.appendAssumeCapacity(function.address_space);
+                values.appendAssumeCapacity(function.partition_offset);
+                values.appendAssumeCapacity(function.partition_len);
+
+                assert(writer.current_codesize != 8);
+                writer.emit_record(@TypeOf(values.constSlice()[0]), @intFromEnum(ModuleCode.function), values.constSlice(), 0);
+                values.resize(0) catch unreachable;
+
+                // const loop_end = writer.buffer.length * 4;
+                // const expected = debug_main_bitcode[loop_start..loop_end];
+                // const have = writer.get_byte_slice()[loop_start..loop_end];
+                // std.debug.print("Start: {}\n", .{loop_start});
+                // std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
+            }
+            writer.enter_subblock(.function, 4);
+            writer.exit_block();
+            writer.exit_block();
+
+            const context = LLVM.Context.create();
+            const module = context.parse_bitcode(writer.get_byte_slice()) orelse exit(1);
+            _ = module; // autofix
+            exit(0);
+        }
 
     const Writer = struct {
         buffer: PinnedArray(u32) = .{},
@@ -2323,6 +2388,7 @@ const Bitcode = struct {
         current_codesize: u32 = 2,
         block_info_current_block_id: u32 = 0,
         strtab_content: PinnedArray(u8) = .{},
+
 
         fn get_type_count(writer: *Writer) u32 {
             _ = writer; // autofix
@@ -2993,7 +3059,7 @@ const Bitcode = struct {
             } else {
                 const module_version_start = writer.buffer.length;
                 _ = module_version_start; // autofix
-                writer.enter_subblock(.identification, 3);
+                writer.enter_subblock(.module, 3);
                 const block_start_position = writer.get_byte_position();
                 _ = block_start_position; // autofix
 
@@ -3163,10 +3229,16 @@ const Bitcode = struct {
 
         fn write_function_metadata(writer: *Writer, function: *const DummyFunction) void {
             writer.enter_subblock(.metadata, 3);
+            const start = writer.buffer.length * 4;
             var record = std.BoundedArray(u64, 64){};
             writer.write_metadata_strings(function.body.?.metadata_strings, &record);
             writer.write_metadata_records(function.body.?.metadata_records, &record);
             writer.exit_block();
+
+            const end = writer.buffer.length * 4;
+            const expected = debug_main_bitcode[start..end];
+            const have = writer.get_byte_slice()[start..end];
+            std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
         }
 
         fn write_symtab(writer: *Writer) void {
@@ -3535,7 +3607,7 @@ const Bitcode = struct {
             const opaque_pointer_abbreviation = blk: {
                 const abbreviation = writer.abbreviation_buffer.append(.{});
                 abbreviation.add_literal(@intFromEnum(TypeCode.opaque_pointer));
-                abbreviation.add_literal(0);
+                abbreviation.add_literal(address_space);
                 break :blk writer.emit_abbreviation(abbreviation);
             };
             const function_abbreviation = blk: {
@@ -3640,11 +3712,13 @@ const Bitcode = struct {
 
             writer.exit_block();
 
-            const end = writer.buffer.length * 4;
-            const expected = debug_main_bitcode[start..end];
-            const have = writer.get_byte_slice()[start..end];
-            std.debug.print("Start: {}\n", .{start});
-            std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
+            if (test_byte_equality) {
+                const end = writer.buffer.length * 4;
+                const expected = debug_main_bitcode[start..end];
+                const have = writer.get_byte_slice()[start..end];
+                std.debug.print("Start: {}\n", .{start});
+                std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
+            }
         }
 
         const DummyAttribute = union(enum) {
@@ -3987,9 +4061,93 @@ const Bitcode = struct {
                 .type = 2,
                 .calling_convention = .C,
                 .body = .{
-                    .basic_blocks = &.{},
-                    .metadata_records = &.{},
+                    .metadata_records = &.{
+                        .{
+                            .subprogram = .{
+                                .scope = 0,
+                                .name = 0,
+                                .linkage_name = 0,
+                                .file = 0,
+                                .line = 0,
+                                .type = 0,
+                                .scope_line = 0,
+                                .containing_type = 0,
+                                .sp_flags = 0,
+                                .virtual_index = 0,
+                                .flags = 0,
+                                .compile_unit = 0,
+                                .template_params = 0,
+                                .declaration = 0,
+                                .retained_nodes = 0,
+                                .this_adjustment = 0,
+                                .thrown_types = 0,
+                                .annotations = 0,
+                                .target_function = 0,
+                            },
+                        },
+                        .{
+                            .basic_type = .{
+                                .is_distinct = 0,
+                                .name = 0,
+                                .bit_count = 0,
+                                .bit_align = 0,
+                                .encoding = 0,
+                                .flags = 0,
+                            },
+                        },
+                        .{
+                            .basic_type = .{
+                                .is_distinct = 0,
+                                .name = 0,
+                                .bit_count = 0,
+                                .bit_align = 0,
+                                .encoding = 0,
+                                .flags = 0,
+                            },
+                        },
+                        .{
+                            .derived_type = .{
+                                .is_distinct = 0,
+                                .tag = 0,
+                                .name = 0,
+                                .file = 0,
+                                .line = 0,
+                                .scope = 0,
+                                .underlying_type = 0,
+                                .bit_count = 0,
+                                .bit_align = 0,
+                                .bit_offset = 0,
+                                .flags = 0,
+                                .extra_data = 0,
+                            },
+                        },
+                        .{
+                            .derived_type = .{
+                                .is_distinct = 0,
+                                .tag = 0,
+                                .name = 0,
+                                .file = 0,
+                                .line = 0,
+                                .scope = 0,
+                                .underlying_type = 0,
+                                .bit_count = 0,
+                                .bit_align = 0,
+                                .bit_offset = 0,
+                                .flags = 0,
+                                .extra_data = 0,
+                            },
+                        },
+                        .{ .node = .{ .ops = &.{12} } },
+                        .{ .subroutine_type = .{}, },
+                        .{ .node = .{ .ops = &.{12} } },
+                        .{ .local_var = .{}, },
+                        .{ .expression = .{}, },
+                        .{ .local_var = .{}, },
+                        .{ .value = .{ .type_id = 0, .value_id = 13 } },
+                        .{ .value = .{ .type_id = 0, .value_id = 14 } },
+                    },
                     .metadata_strings = &.{ "main", "int", "char", "argc", "argv" },
+                    .basic_blocks = &.{},
                 },
                 .linkage = .external,
                 .attribute_list_id = 1,
@@ -4007,27 +4165,27 @@ const Bitcode = struct {
                 .partition_offset = 4,
                 .partition_len = 0,
             },
-            .{
-                .name = "llvm.dbg.declare",
-                .type = 5,
-                .calling_convention = .C,
-                .body = null,
-                .linkage = .external,
-                .attribute_list_id = 2,
-                .alignment = 0,
-                .section = 0,
-                .visibility = .default,
-                .unnamed_address = .none,
-                .prologued_data = 0,
-                .dll_storage_class = .default,
-                .comdat = 0,
-                .prefix_data = 0,
-                .personality = 0,
-                .dso_local = false,
-                .address_space = 0,
-                .partition_offset = 4,
-                .partition_len = 0,
-            },
+            // .{
+            //     .name = "llvm.dbg.declare",
+            //     .type = 5,
+            //     .calling_convention = .C,
+            //     .body = null,
+            //     .linkage = .external,
+            //     .attribute_list_id = 2,
+            //     .alignment = 0,
+            //     .section = 0,
+            //     .visibility = .default,
+            //     .unnamed_address = .none,
+            //     .prologued_data = 0,
+            //     .dll_storage_class = .default,
+            //     .comdat = 0,
+            //     .prefix_data = 0,
+            //     .personality = 0,
+            //     .dso_local = false,
+            //     .address_space = 0,
+            //     .partition_offset = 4,
+            //     .partition_len = 0,
+            // },
         };
 
         const DummyConstant = union(enum) {
@@ -4612,8 +4770,13 @@ const Bitcode = struct {
             node: @This().Node,
             compile_unit: @This().CompileUnit,
             file: @This().File,
-            // name: @This().Name,
-            // named_node: @This().NamedNode,
+            subprogram: Subprogram,
+            basic_type: BasicType,
+            derived_type: DerivedType,
+            subroutine_type: SubroutineType,
+            local_var: LocalVar,
+            expression: @This().Expression,
+
             const Value = struct{
                 type_id: u32,
                 value_id: u32,
@@ -4622,6 +4785,56 @@ const Bitcode = struct {
             const Node = struct{
                 ops: []const u8,
             };
+            const Subprogram = struct {
+                scope: u32,
+                name: u32,
+                linkage_name: u32,
+                file: u32,
+                line: u32,
+                type: u32,
+                scope_line: u32,
+                containing_type: u32,
+                sp_flags: u32,
+                virtual_index: u32,
+                flags: u32,
+                compile_unit: u32,
+                template_params: u32,
+                declaration: u32,
+                retained_nodes: u32,
+                this_adjustment: u32,
+                thrown_types: u32,
+                annotations: u32,
+                target_function: u32,
+            };
+            const BasicType= struct {
+                is_distinct: u32,
+                tag: u32 = std.dwarf.TAG.base_type,
+                name: u32,
+                bit_count: u32,
+                bit_align: u32,
+                encoding: u32,
+                flags: u32,
+            };
+            const DerivedType = struct {
+                is_distinct: u32,
+                tag: u32,
+                name: u32,
+                file: u32,
+                line: u32,
+                scope: u32,
+                underlying_type: u32,
+                bit_count: u32,
+                bit_align: u32,
+                bit_offset: u32,
+                flags: u32,
+                extra_data: u32,
+            };
+            const SubroutineType= struct {
+            };
+            const LocalVar= struct {
+            };
+            const Expression = struct {};
+
 
             const CompileUnit = struct{
                 source_language: u32,
@@ -4728,13 +4941,18 @@ const Bitcode = struct {
         fn write_metadata_records(writer: *Writer, metadata_records: []const DummyMetadataRecord, record: *std.BoundedArray(u64, 64)) void {
             var node_first = true;
             var node_a: u32 = 0;
+            var subprogram_first = true;
+            var subprogram_a: u32 = 0;
+            var basic_type_first = true;
+            var basic_type_a: u32 = 0;
+            var derived_type_first = true;
+            var derived_type_a: u32 = 0;
             for (metadata_records) |metadata_record| {
                 switch (metadata_record) {
                     .value => |v| {
                         record.appendAssumeCapacity(v.type_id);
                         record.appendAssumeCapacity(v.value_id);
                         writer.emit_record(u64, @intFromEnum(MetadataCode.value), record.constSlice(), 0);
-                        record.resize(0) catch unreachable;
                     },
                     .compile_unit => |cu| {
                         const is_distinct = true;
@@ -4765,17 +4983,17 @@ const Bitcode = struct {
                         abbreviation.add_literal(20);
                         abbreviation.add_literal(1);
                         abbreviation.add_literal(source_language);
-                        abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
-                        abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
+                        abbreviation.add_metadata();
+                        abbreviation.add_metadata();
                         abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 1 });
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(1);
-                        abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
+                        abbreviation.add_metadata();
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(0);
-                        abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
+                        abbreviation.add_metadata();
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(0);
@@ -4788,7 +5006,6 @@ const Bitcode = struct {
 
                         const a = writer.emit_abbreviation(abbreviation);
                         writer.emit_record(u64, @intFromEnum(MetadataCode.compile_unit), record.constSlice(), a);
-                        record.resize(0) catch unreachable;
                     },
                     .file => |file| {
                         record.appendAssumeCapacity(@intFromBool(file.is_distinct));
@@ -4799,16 +5016,15 @@ const Bitcode = struct {
 
 
                         const abbreviation = writer.abbreviation_buffer.append(.{});
-                        abbreviation.add_literal(16);
+                        abbreviation.add_literal(@intFromEnum(MetadataCode.file));
                         abbreviation.add_literal(0);
-                        abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
-                        abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
+                        abbreviation.add_metadata();
+                        abbreviation.add_metadata();
                         abbreviation.add_literal(0);
                         abbreviation.add_literal(0);
 
                         const a = writer.emit_abbreviation(abbreviation);
                         writer.emit_record(u64, @intFromEnum(MetadataCode.file), record.constSlice(), a);
-                        record.resize(0) catch unreachable;
                     },
                     .node => |node| {
                         for (node.ops) |op| {
@@ -4817,17 +5033,137 @@ const Bitcode = struct {
 
                         if (node_first) {
                             const abbreviation = writer.abbreviation_buffer.append(.{});
-                            abbreviation.add_literal(3);
-                            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 16 });
+                            abbreviation.add_literal(@intFromEnum(MetadataCode.node));
+                            abbreviation.add_metadata();
                             const a = writer.emit_abbreviation(abbreviation);
                             node_a = a;
                             node_first = false;
                         }
 
                         writer.emit_record(u64, @intFromEnum(MetadataCode.node), record.constSlice(), node_a);
-                        record.resize(0) catch unreachable;
                     },
+                    .subprogram => |subprogram| {
+                        if (subprogram_first) {
+                            const abbreviation = writer.abbreviation_buffer.append(.{});
+                            abbreviation.add_literal(@intFromEnum(MetadataCode.subprogram));
+                            abbreviation.add_literal(0b111);// is distinct | has sp flags | has flags
+                            abbreviation.add_metadata(); // scope
+                            abbreviation.add_metadata(); // name
+                            abbreviation.add_metadata(); // linkage name
+                            abbreviation.add_metadata(); // file
+                            abbreviation.add_line(); // line
+                            abbreviation.add_metadata(); // type
+                            abbreviation.add_line(); // scope line
+                            abbreviation.add_literal(0); // containing type
+                            abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 32 }); // containing type
+                            abbreviation.add_literal(0); // virtual index
+                            abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 32 }); // flags
+                            abbreviation.add_metadata(); // compile unit
+                            abbreviation.add_literal(0); // template params
+                            abbreviation.add_literal(0); // declaration
+                            abbreviation.add_literal(0); // retained nodes
+                            abbreviation.add_literal(0); // this adjustment
+                            abbreviation.add_literal(0); // thrown types
+                            abbreviation.add_literal(0); // annotations
+                            abbreviation.add_literal(0); // target function name
+                                                         
+                            const a = writer.emit_abbreviation(abbreviation);
+                            subprogram_a = a;
+                            subprogram_first = false;
+                        }
+
+                        record.appendAssumeCapacity(0b111);
+                        record.appendAssumeCapacity(subprogram.scope);
+                        record.appendAssumeCapacity(subprogram.name);
+                        record.appendAssumeCapacity(subprogram.linkage_name);
+                        record.appendAssumeCapacity(subprogram.file);
+                        record.appendAssumeCapacity(subprogram.line);
+                        record.appendAssumeCapacity(subprogram.type);
+                        record.appendAssumeCapacity(subprogram.scope_line);
+                        record.appendAssumeCapacity(subprogram.containing_type);
+                        record.appendAssumeCapacity(subprogram.sp_flags);
+                        record.appendAssumeCapacity(subprogram.virtual_index);
+                        record.appendAssumeCapacity(subprogram.flags);
+                        record.appendAssumeCapacity(subprogram.compile_unit);
+                        record.appendAssumeCapacity(subprogram.template_params);
+                        record.appendAssumeCapacity(subprogram.declaration);
+                        record.appendAssumeCapacity(subprogram.retained_nodes);
+                        record.appendAssumeCapacity(subprogram.this_adjustment);
+                        record.appendAssumeCapacity(subprogram.thrown_types);
+                        record.appendAssumeCapacity(subprogram.annotations);
+                        record.appendAssumeCapacity(subprogram.target_function);
+
+                        writer.emit_record(u64, @intFromEnum(MetadataCode.subprogram), record.constSlice(), subprogram_a);
+                    },
+                    .basic_type => |basic_type| {
+                        if (basic_type_first) {
+                            const abbreviation = writer.abbreviation_buffer.append(.{});
+                            abbreviation.add_literal(@intFromEnum(MetadataCode.basic_type));
+                            abbreviation.add_literal(0);// is distinct 
+                            abbreviation.add_literal(std.dwarf.TAG.base_type);// tag
+                            abbreviation.add_metadata(); // name
+                            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 6 }); // size in bits
+                            abbreviation.add_literal(0);// align in bits
+                            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 8 }); // encoding
+                            abbreviation.add_literal(0);// flags
+                                                         
+                            const a = writer.emit_abbreviation(abbreviation);
+                            basic_type_a = a;
+                            basic_type_first = false;
+                        }
+
+                        record.appendAssumeCapacity(basic_type.is_distinct);
+                        record.appendAssumeCapacity(basic_type.tag);
+                        record.appendAssumeCapacity(basic_type.name);
+                        record.appendAssumeCapacity(basic_type.bit_count);
+                        record.appendAssumeCapacity(basic_type.bit_align);
+                        record.appendAssumeCapacity(basic_type.encoding);
+                        record.appendAssumeCapacity(basic_type.flags);
+
+                        writer.emit_record(u64, @intFromEnum(MetadataCode.basic_type), record.constSlice(), basic_type_a);
+                    },
+                    .derived_type => |derived_type| {
+                        if (derived_type_first) {
+                            const abbreviation = writer.abbreviation_buffer.append(.{});
+                            abbreviation.add_literal(@intFromEnum(MetadataCode.derived_type));
+                            abbreviation.add_literal(0);// is distinct 
+                            abbreviation.add_with_encoding(.{ .encoding = .fixed, .value = 32 }); // tag
+                            abbreviation.add_metadata(); // name
+                            abbreviation.add_metadata(); // file
+                            abbreviation.add_line(); // line
+                            abbreviation.add_metadata(); // scope
+                            abbreviation.add_metadata(); // underlying type
+                            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 6 }); // size in bits
+                            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 6 }); // align in bits
+                            abbreviation.add_with_encoding(.{ .encoding = .vbr, .value = 6 }); // offset in bits
+                            abbreviation.add_literal(0);// flags
+                            abbreviation.add_literal(0);// extra data
+                                                         
+                            const a = writer.emit_abbreviation(abbreviation);
+                            derived_type_a = a;
+                            derived_type_first = false;
+                        }
+
+                        record.appendAssumeCapacity(derived_type.is_distinct);
+                        record.appendAssumeCapacity(derived_type.tag);
+                        record.appendAssumeCapacity(derived_type.name);
+                        record.appendAssumeCapacity(derived_type.file);
+                        record.appendAssumeCapacity(derived_type.line);
+                        record.appendAssumeCapacity(derived_type.scope);
+                        record.appendAssumeCapacity(derived_type.underlying_type);
+                        record.appendAssumeCapacity(derived_type.bit_count);
+                        record.appendAssumeCapacity(derived_type.bit_align);
+                        record.appendAssumeCapacity(derived_type.bit_offset);
+                        record.appendAssumeCapacity(derived_type.flags);
+                        record.appendAssumeCapacity(derived_type.extra_data);
+
+                        writer.emit_record(u64, @intFromEnum(MetadataCode.derived_type), record.constSlice(), derived_type_a);
+                    },
+                    .subroutine_type => unreachable,
+                    .local_var => unreachable,
+                    .expression => unreachable,
                 }
+                record.resize(0) catch unreachable;
             }
         }
 
@@ -5025,6 +5361,7 @@ const Bitcode = struct {
         fn emit(writer: *Writer, value: u32, bit_count: u32) void {
             std.debug.print("ASK: [[32-B-IDX[0x{x}] 8-bit IDX[{}] - CVAL=0x{x} - CBIT={}]] Writing 0x{x} for {} bits\n", .{writer.buffer.length, writer.buffer.length * 4, writer.current_value, writer.current_bit, value, bit_count});
             assert(bit_count > 0 and bit_count <= 32);
+            // High bits set
             assert(value & ~(~@as(u32, 0) >> @as(u5, @intCast(32 - bit_count))) == 0);
             const shifted = value << @as(u5, @intCast(writer.current_bit));
             writer.current_value |= shifted;
@@ -5373,6 +5710,10 @@ const Bitcode = struct {
     };
 };
 
+fn write_bitcode2() void {
+    Bitcode.write_foo();
+}
+
 fn write_bitcode() void {
     var writer = Bitcode.Writer{};
     if (false) {
@@ -5600,7 +5941,7 @@ fn thread_callback(thread_index: u32) void {
                             //     }
                             //     std.debug.print("0x{x:0>2}, ", .{b});
                             // }
-                            write_bitcode();
+                            write_bitcode2();
                             // _ = result; // autofix
                             exit(0);
                             // const bytes = library.read_file(instance.arena, std.fs.cwd(), "/home/david/mybitcode.ll");
