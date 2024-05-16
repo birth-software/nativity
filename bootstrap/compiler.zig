@@ -3029,7 +3029,7 @@ const Bitcode = struct {
                 writer.write_sync_scope_names();
 
                 for (&dummy_functions) |*function| {
-                    if (!function.is_declaration) {
+                    if (function.body != null) {
                         writer.write_function(function);
                     }
                 }
@@ -3048,9 +3048,125 @@ const Bitcode = struct {
         }
 
         fn write_function(writer: *Writer, function: *const DummyFunction) void {
-            _ = writer; // autofix
-            _ = function; // autofix
-            unreachable;
+            writer.enter_subblock(.function, 4);
+
+            const start = writer.buffer.length * 4;
+
+            const body = function.body.?;
+            var record = std.BoundedArray(u64, 64){};
+            record.appendAssumeCapacity(body.basic_blocks.len);
+            writer.emit_record(u64, @intFromEnum(FunctionCode.declare_blocks), record.constSlice(), 0);
+            record.resize(0) catch unreachable;
+
+            writer.write_constants(&.{ .null }, 0, 1, false);
+
+            writer.write_function_metadata(function);
+
+            for (body.basic_blocks) |*basic_block| {
+                _ = basic_block; // autofix
+                unreachable;
+            }
+
+            const dbg align(4) = [_]u8{
+                0x61, 0x20, 0x00, 0x00, 
+                0x4d, 0x00, 0x00, 0x00, 
+                0x13, 0x04, 0x41, 0x2c, 
+                0x10, 0x00, 0x00, 0x00, 
+                0x01, 0x00, 0x00, 0x00, 
+                0x94, 0x11, 0x00, 0x00, 
+                0xf1, 0x30, 0x00, 0x00, 
+                0x24, 0x00, 0x00, 0x00, 
+                0x22, 0x47, 0xc8, 0x90, 
+                0x51, 0x16, 0xc4, 0x05, 
+                0xc4, 0x40, 0x10, 0x04, 
+                0x6d, 0x61, 0x69, 0x6e, 
+                0x69, 0x6e, 0x74, 0x63, 
+                0x68, 0x61, 0x72, 0x61, 
+                0x72, 0x67, 0x63, 0x61, 
+                0x72, 0x67, 0x76, 0x00, 
+                0xab, 0xa8, 0x83, 0xea, 
+                0x00, 0x2a, 0x40, 0x03, 
+                0x01, 0x40, 0x00, 0x10, 
+                0x99, 0x00, 0x20, 0x0d, 
+                0x00, 0x00, 0x00, 0xf6, 
+                0x1c, 0x00, 0x19, 0x78, 
+                0x60, 0x00, 0x14, 0xc0, 
+                0x9e, 0x03, 0x20, 0x83, 
+                0x0f, 0x01, 0x0c, 0x60, 
+                0x91, 0x03, 0x3c, 0x00, 
+                0x00, 0x00, 0x64, 0x00, 
+                0x0a, 0x00, 0x00, 0x00, 
+                0x00, 0xb0, 0xc8, 0x01, 
+                0x1e, 0x00, 0x00, 0x80, 
+                0x32, 0x00, 0x05, 0x00, 
+                0x00, 0x00, 0x00, 0xd8, 
+                0x30, 0x8c, 0xc1, 0x18, 
+                0x98, 0xc1, 0x26, 0x42, 
+                0x00, 0xce, 0x00, 0xd8, 
+                0x00, 0x8c, 0x53, 0x04, 
+                0x31, 0x00, 0x03, 0x2a, 
+                0x18, 0x83, 0x00, 0x00, 
+                0x80, 0x75, 0x81, 0x31, 
+                0x4e, 0x11, 0xc4, 0x20, 
+                0x0c, 0xa8, 0xc0, 0x0c, 
+                0x04, 0x00, 0x00, 0x26, 
+                0x08, 0x40, 0x33, 0x41, 
+                0x00, 0x1c, 0x00, 0x00, 
+                0x33, 0x11, 0x41, 0x60, 
+                0x8c, 0xc2, 0x4c, 0x44, 
+                0x10, 0x18, 0xa3, 0x30, 
+                0x13, 0x01, 0x04, 0x06, 
+                0x29, 0x0c, 0x1b, 0x10, 
+                0x03, 0x31, 0x00, 0xc3, 
+                0x06, 0x84, 0x60, 0x0c, 
+                0xc0, 0x88, 0xc1, 0x01, 
+                0x80, 0x20, 0x18, 0x14, 
+                0xce, 0xf8, 0xff, 0xff, 
+                0xff, 0x0f, 0xe6, 0xff, 
+                0xff, 0xff, 0x3f, 0x94, 
+                0xff, 0xff, 0xff, 0xff, 
+                0x30, 0x63, 0x50, 0x04, 
+                0x8e, 0x18, 0x00, 0xc0, 
+                0xb0, 0x01, 0x11, 0x14, 
+                0x04, 0x30, 0x62, 0x70, 
+                0x00, 0x20, 0x08, 0x06, 
+                0x85, 0x23, 0xfe, 0xff, 
+                0xff, 0xff, 0x03, 0xf9, 
+                0xff, 0xff, 0xff, 0x0f, 
+                0xe5, 0xff, 0xff, 0xff, 
+                0x3f, 0xcc, 0x18, 0x14, 
+                0xc1, 0x26, 0x06, 0x00, 
+                0xc0, 0xc4, 0x8c, 0x41, 
+                0x31, 0x14, 0x62, 0x00, 
+                0x00, 0x01, 0x31, 0x00, 
+                0x02, 0x00, 0x00, 0x00, 
+                0x5b, 0x04, 0x20, 0x0c, 
+                0x00, 0x00, 0x00, 0x00, 
+                0x21, 0x31, 0x00, 0x00, 
+                0x02, 0x00, 0x00, 0x00, 
+                0x0b, 0x86, 0x00, 0x08, 
+                0x00, 0x00, 0x00, 0x00, 
+                0x00, 0x00, 0x00, 0x00, 
+            };
+            writer.exit_block();
+
+            const end = writer.buffer.length * 4;
+            const expected = debug_main_bitcode[start..end];
+            const have = writer.get_byte_slice()[start..end];
+            if (have.len != dbg.len) {
+                std.debug.print("Expected approximately {} bytes, have {} bytes\n", .{dbg.len, have.len});
+                exit(1);
+            } else {
+                std.testing.expectEqualSlices(u8, expected, have) catch unreachable;
+            }
+        }
+
+        fn write_function_metadata(writer: *Writer, function: *const DummyFunction) void {
+            writer.enter_subblock(.metadata, 3);
+            var record = std.BoundedArray(u64, 64){};
+            writer.write_metadata_strings(function.body.?.metadata_strings, &record);
+            writer.write_metadata_records(function.body.?.metadata_records, &record);
+            writer.exit_block();
         }
 
         fn write_symtab(writer: *Writer) void {
@@ -3791,7 +3907,7 @@ const Bitcode = struct {
                 values.appendAssumeCapacity(@intCast(function.name.len));
                 values.appendAssumeCapacity(function.type);
                 values.appendAssumeCapacity(@intFromEnum(function.calling_convention));
-                values.appendAssumeCapacity(@intFromBool(function.is_declaration));
+                values.appendAssumeCapacity(@intFromBool(function.body == null));
                 values.appendAssumeCapacity(@intFromEnum(function.linkage));
                 values.appendAssumeCapacity(function.attribute_list_id);
                 values.appendAssumeCapacity(function.alignment);
@@ -3837,7 +3953,7 @@ const Bitcode = struct {
             name: []const u8,
             type: u32,
             calling_convention: LLVM.Value.Constant.Function.CallingConvention,
-            is_declaration: bool,
+            body: ?Body,
             linkage: LLVM.BitcodeLinkage,
             attribute_list_id: u32,
             alignment: u32,
@@ -3854,6 +3970,15 @@ const Bitcode = struct {
             address_space: u32,
             partition_offset: u32,
             partition_len: u32,
+
+
+            const Body = struct{
+                basic_blocks: []const DummyFunction.BasicBlock,
+                metadata_records: []const DummyMetadataRecord,
+                metadata_strings: []const []const u8,
+            };
+
+            const BasicBlock = struct{};
         };
 
         const dummy_functions = [_]DummyFunction{
@@ -3861,7 +3986,11 @@ const Bitcode = struct {
                 .name = "main",
                 .type = 2,
                 .calling_convention = .C,
-                .is_declaration = false,
+                .body = .{
+                    .basic_blocks = &.{},
+                    .metadata_records = &.{},
+                    .metadata_strings = &.{ "main", "int", "char", "argc", "argv" },
+                },
                 .linkage = .external,
                 .attribute_list_id = 1,
                 .alignment = 0,
@@ -3882,7 +4011,7 @@ const Bitcode = struct {
                 .name = "llvm.dbg.declare",
                 .type = 5,
                 .calling_convention = .C,
-                .is_declaration = true,
+                .body = null,
                 .linkage = .external,
                 .attribute_list_id = 2,
                 .alignment = 0,
@@ -3901,9 +4030,23 @@ const Bitcode = struct {
             },
         };
 
+        const DummyConstant = union(enum) {
+            integer: u64,
+            null,
+        };
+        const dummy_module_constants = [_]DummyConstant{
+            .{ .integer = 7 },
+            .{ .integer = 5 },
+            .{ .integer = 2 },
+            .{ .integer = 3 },
+            .{ .integer = 1 },
+            .{ .integer = 4 },
+            .{ .integer = 8 },
+        };
+
         fn write_module_constants(writer: *Writer) void {
             std.debug.print("Module constants start\n", .{});
-            writer.write_constants(0, 15, true);
+            writer.write_constants(&dummy_module_constants, 0, 15, true);
             
             // 0x81, 0x00, 0x00, 0x00, 
             // 0x07, 0x00, 0x00, 0x00, 
@@ -3917,7 +4060,7 @@ const Bitcode = struct {
 
         }
 
-        fn write_constants(writer: *Writer, first_value: u32, last_value: u32, is_global: bool) void {
+        fn write_constants(writer: *Writer, constants: []const DummyConstant, first_value: u32, last_value: u32, is_global: bool) void {
             if (first_value == last_value) return;
             writer.enter_subblock(.constant, 4);
             const start = writer.buffer.length * 4;
@@ -3985,18 +4128,19 @@ const Bitcode = struct {
                 record_buffer.resize(0) catch unreachable;
             }
 
-            const Integer = struct{
-                value: u64,
-            };
-            _ = Integer; // autofix
-            const integers = [7]u64{7, 5, 2, 3, 1, 4, 8};
-            for (integers) |int| {
-                const v = encode_signed_int(int);
-                record_buffer.appendAssumeCapacity(v);
-                const code = ConstantCode.integer;
-                const abbreviation = ConstantAbbreviationId.integer;
-                writer.emit_record(u64, @intFromEnum(code), record_buffer.constSlice(), @intFromEnum(abbreviation));
-                record_buffer.resize(0) catch unreachable;
+            for (constants) |constant| {
+                switch (constant) {
+                    .integer => |int| {
+                        const v = encode_signed_int(int);
+                        record_buffer.appendAssumeCapacity(v);
+                        writer.emit_record(u64, @intFromEnum(ConstantCode.integer), record_buffer.constSlice(), @intFromEnum(ConstantAbbreviationId.integer));
+                        record_buffer.resize(0) catch unreachable;
+                    },
+                    .null => {
+                        writer.emit_record(u64, @intFromEnum(ConstantCode.null), record_buffer.constSlice(), 0);
+                        record_buffer.resize(0) catch unreachable;
+                    },
+                }
             }
 
             writer.exit_block();
@@ -4581,10 +4725,10 @@ const Bitcode = struct {
             // .{ .node = .{ .ops = &.{ 4 } } },
         };
 
-        fn write_metadata_records(writer: *Writer, record: *std.BoundedArray(u64, 64)) void {
+        fn write_metadata_records(writer: *Writer, metadata_records: []const DummyMetadataRecord, record: *std.BoundedArray(u64, 64)) void {
             var node_first = true;
             var node_a: u32 = 0;
-            for (dummy_metadata_records) |metadata_record| {
+            for (metadata_records) |metadata_record| {
                 switch (metadata_record) {
                     .value => |v| {
                         record.appendAssumeCapacity(v.type_id);
@@ -5097,9 +5241,17 @@ const Bitcode = struct {
 
             writer.flush();
 
-            // TODO: warning this can cause issues
-            writer.append_bytes(blob);
-            // align the buffer?
+            // TODO: make this faster
+            var i: usize = 0;
+            while (i < blob.len - @sizeOf(u32)) : (i += @sizeOf(u32)) {
+                const ptr: *const align(1) u32 = @ptrCast(&blob[i]);
+                writer.write_raw(ptr.*);
+            }
+
+            while (i < blob.len) : (i += 1) {
+                writer.emit(blob[i], @bitSizeOf(u8));
+            }
+            writer.flush();
         }
 
         fn emit_abbreviated_field(writer: *Writer, comptime T: type, operand: *Abbreviation.Op, value: T) void {
