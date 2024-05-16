@@ -642,8 +642,10 @@ const Job = packed struct(u64) {
         analyze_file,
         llvm_setup,
         notify_file_resolved,
-        resolve_thread_module,
-        llvm_codegen_thread_module,
+        resolve_module,
+        llvm_generate_ir,
+        llvm_optimize,
+        llvm_emit_object,
     };
 };
 
@@ -880,7 +882,7 @@ pub fn make() void {
         // finish thread semantic analysis
         for (threads) |*thread| {
             thread.add_thread_work(Job{
-                .id = .resolve_thread_module,
+                .id = .resolve_module,
             });
         }
     }
@@ -890,7 +892,7 @@ pub fn make() void {
         for (threads) |*thread| {
             thread.add_thread_work(Job{
                 .id = switch (codegen_backend) {
-                    .llvm => .llvm_codegen_thread_module,
+                    .llvm => .llvm_generate_ir,
                 },
             });
         }
@@ -1265,10 +1267,10 @@ fn thread_callback(thread_index: u32) void {
                             }
                         }
                     },
-                    .resolve_thread_module => {
+                    .resolve_module => {
                         // exit(0);
                     },
-                    .llvm_codegen_thread_module => {
+                    .llvm_generate_ir => {
                         if (thread.functions.length > 0) {
                             const debug_info = true;
 
@@ -1375,6 +1377,7 @@ fn thread_callback(thread_index: u32) void {
                             }
                         }
                     },
+                    else => |t| @panic(@tagName(t)),
                 }
 
                 thread.task_system.job.completed += 1;
