@@ -487,7 +487,7 @@ pub fn build(b: *std.Build) !void {
             .macos => {
                 compiler.linkLibCpp();
 
-                if (discover_brew_prefix(b, "llvm@17")) |llvm_prefix| {
+                if (discover_brew_prefix(b, "llvm@18")) |llvm_prefix| {
                     const llvm_include_path = try std.mem.concat(b.allocator, u8, &.{ llvm_prefix, "/include" });
                     const llvm_lib_path = try std.mem.concat(b.allocator, u8, &.{ llvm_prefix, "/lib" });
                     compiler.addIncludePath(.{ .cwd_relative = llvm_include_path });

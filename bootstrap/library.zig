@@ -155,7 +155,7 @@ const pinned_array_page_size = 2 * 1024 * 1024;
 const pinned_array_max_size = std.math.maxInt(u32) - pinned_array_page_size;
 const pinned_array_default_granularity = pinned_array_page_size;
 
-const small_granularity = 0x1000;
+const small_granularity = std.mem.page_size;
 const large_granularity = 2 * 1024 * 1024;
 // This must be used with big arrays, which are not resizeable (can't be cleared)
 pub fn PinnedArray(comptime T: type) type {
