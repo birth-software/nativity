@@ -921,20 +921,19 @@ extern "C" const Target* NativityLLVMGetTarget(const char* target_triple_ptr, si
     return target;
 }
 
-// TODO:
-// extern "C" TargetMachine* NativityLLVMTargetCreateTargetMachine(Target& target, const char* target_triple_ptr, size_t target_triple_len, const char* cpu_ptr, size_t cpu_len, const char* features_ptr, size_t features_len, Reloc::Model relocation_model, CodeModel::Model maybe_code_model, bool is_code_model_present, CodeGenOpt::Level optimization_level, bool jit)
-// {
-//     auto target_triple = StringRef(target_triple_ptr, target_triple_len);
-//     auto cpu = StringRef(cpu_ptr, cpu_len);
-//     auto features = StringRef(features_ptr, features_len);
-//     TargetOptions target_options;
-//     std::optional<CodeModel::Model> code_model = std::nullopt;
-//     if (is_code_model_present) {
-//         code_model = maybe_code_model;
-//     }
-//     TargetMachine* target_machine = target.createTargetMachine(target_triple, cpu, features, target_options, relocation_model, code_model, optimization_level, jit);
-//     return target_machine;
-// }
+extern "C" TargetMachine* NativityLLVMTargetCreateTargetMachine(Target& target, const char* target_triple_ptr, size_t target_triple_len, const char* cpu_ptr, size_t cpu_len, const char* features_ptr, size_t features_len, Reloc::Model relocation_model, CodeModel::Model maybe_code_model, bool is_code_model_present, CodeGenOptLevel optimization_level, bool jit)
+{
+    auto target_triple = StringRef(target_triple_ptr, target_triple_len);
+    auto cpu = StringRef(cpu_ptr, cpu_len);
+    auto features = StringRef(features_ptr, features_len);
+    TargetOptions target_options;
+    std::optional<CodeModel::Model> code_model = std::nullopt;
+    if (is_code_model_present) {
+        code_model = maybe_code_model;
+    }
+    TargetMachine* target_machine = target.createTargetMachine(target_triple, cpu, features, target_options, relocation_model, code_model, optimization_level, jit);
+    return target_machine;
+}
 
 extern "C" void NativityLLVMModuleSetTargetMachineDataLayout(Module& module, TargetMachine& target_machine)
 {

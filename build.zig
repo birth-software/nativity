@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) !void {
 
     const cpp_files = .{
         "src/llvm/llvm.cpp",
-        // "src/llvm/lld.cpp",
+        "src/llvm/lld.cpp",
         // "src/llvm/clang_main.cpp",
         // "src/llvm/clang_cc1.cpp",
         // "src/llvm/clang_cc1as.cpp",
@@ -425,14 +425,14 @@ pub fn build(b: *std.Build) !void {
     } else {
         compiler.linkSystemLibrary("LLVM");
         // compiler.linkSystemLibrary("clang-cpp");
-        // compiler.linkSystemLibrary("lldCommon");
-        // compiler.linkSystemLibrary("lldCOFF");
-        // compiler.linkSystemLibrary("lldELF");
-        // compiler.linkSystemLibrary("lldMachO");
-        // compiler.linkSystemLibrary("lldWasm");
+        compiler.linkSystemLibrary("lldCommon");
+        compiler.linkSystemLibrary("lldCOFF");
+        compiler.linkSystemLibrary("lldELF");
+        compiler.linkSystemLibrary("lldMachO");
+        compiler.linkSystemLibrary("lldWasm");
         // compiler.linkSystemLibrary("unwind");
-        // compiler.linkSystemLibrary(if (is_ci) "z" else "zlib");
-        // compiler.linkSystemLibrary("zstd");
+        compiler.linkSystemLibrary(if (is_ci) "z" else "zlib");
+        compiler.linkSystemLibrary("zstd");
 
         switch (target.result.os.tag) {
             .linux => {

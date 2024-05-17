@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const library = @import("library.zig");
 const assert = library.assert;
 const Arena = library.Arena;
@@ -425,11 +426,6 @@ fn Descriptor(comptime Id: type, comptime Integer: type) type {
     };
 }
 
-const Expression = struct{
-    type: *Type,
-    value: *Value,
-};
-
 const Value = struct {
     llvm: ?*LLVM.Value = null,
     sema: packed struct(u64) {
@@ -483,9 +479,6 @@ fn integer_signedness(t: *Type) Type.Integer.Signedness {
     const integer: Type.Integer = @bitCast(t.sema);
     return integer.signedness;
 }
-
-const IntegerType = struct{
-};
 
 const Keyword = enum{
     @"for",
@@ -597,7 +590,6 @@ const Thread = struct{
     pending_files: PinnedArray(u32) = .{},
     pending_file_values: PinnedArray(PinnedArray(*Value)) = .{},
     file_scopes: PinnedArray(FileScope) = .{},
-    expressions: PinnedArray(Expression) = .{},
     calls: PinnedArray(Call) = .{},
     returns: PinnedArray(Return) = .{},
     types: PinnedArray(Type) = .{},
@@ -608,6 +600,8 @@ const Thread = struct{
         module: *LLVM.Module,
         builder: *LLVM.Builder,
         attributes: LLVM.Attributes,
+        target_machine: *LLVM.Target.Machine,
+        object: ?[]const u8 = null,
     } = undefined,
 
 
@@ -639,11 +633,11 @@ const Job = packed struct(u64) {
     id: Id,
 
     const Id = enum(u8){
+        analysis_setup,
         analyze_file,
-        llvm_setup,
         notify_file_resolved,
-        resolve_module,
         llvm_generate_ir,
+        llvm_notify_ir_done,
         llvm_optimize,
         llvm_emit_object,
     };
@@ -799,7 +793,7 @@ pub fn make() void {
         const llvm_job = Job{
             .offset = 0,
             .count = 0,
-            .id = .llvm_setup,
+            .id = .analysis_setup,
         };
         for (threads) |*thread| {
             thread.add_thread_work(llvm_job);
@@ -878,15 +872,6 @@ pub fn make() void {
         }
     }
 
-    {
-        // finish thread semantic analysis
-        for (threads) |*thread| {
-            thread.add_thread_work(Job{
-                .id = .resolve_module,
-            });
-        }
-    }
-
     // TODO: Prune
     if (do_codegen) {
         for (threads) |*thread| {
@@ -898,63 +883,219 @@ pub fn make() void {
         }
 
         while (true) {
-            var to_do: u64 = 0;
+            var asks_to_do: u64 = 0;
+            var jobs_to_do: u64 = 0;
             for (threads) |*thread| {
-                const jobs_to_do = thread.task_system.job.to_do - thread.task_system.job.completed;
-                const asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-                assert(asks_to_do == 0);
-
-                to_do += jobs_to_do;
+                jobs_to_do += thread.task_system.job.to_do - thread.task_system.job.completed;
+                asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
             }
 
-            if (to_do == 0) {
+            if (asks_to_do + jobs_to_do == 0) {
                 break;
             }
-        }
 
-        var modules_present = PinnedArray(usize){};
-        for (threads, 0..) |*thread, i| {
-            if (thread.functions.length > 0) {
-                _ = modules_present.append(i);
+            // Check if there is any request
+            for (threads) |*thread| {
+                for (thread.task_system.ask.entries[thread.task_system.ask.completed..thread.task_system.ask.to_do]) |entry| {
+                    switch (entry.id) {
+                        .llvm_notify_ir_done => {
+                            thread.add_thread_work(.{
+                                .id = .llvm_emit_object,
+                            });
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+
+                    thread.task_system.ask.completed += 1;
+                }
             }
         }
 
-        switch (modules_present.length) {
-            0 => unreachable,
-            1 => unreachable,
-            2 => {
-                const first = modules_present.slice()[0];
-                const second = modules_present.slice()[1];
-                const destination = threads[first].llvm.module;
-                {
-                    var message: []const u8 = undefined;
-                    destination.toString(&message.ptr, &message.len);
-                    std.debug.print("{s}\n", .{message});
-                }
-                const source = threads[second].llvm.module;
-                {
-                    var message: []const u8 = undefined;
-                    source.toString(&message.ptr, &message.len);
-                    std.debug.print("{s}\n", .{message});
-                }
-
-                if (!destination.link(source, .{
-                    .override_from_source = true,
-                    .link_only_needed = false,
-                })) {
-                    exit(1);
-                }
-
-                var message: []const u8 = undefined;
-                destination.toString(&message.ptr, &message.len);
-                std.debug.print("============\n===========\n{s}\n", .{message});
-            },
-            else => unreachable,
+        var objects = PinnedArray([]const u8) {};
+        for (threads) |*thread| {
+            if (thread.llvm.object) |object| {
+                _ = objects.append(object);
+            }
         }
+
+        var libraries = PinnedArray([]const u8){};
+
+        link(.{
+            .output_file_path = "module",
+            .extra_arguments = &.{},
+            .objects = objects.slice(),
+            .link_libc = true,
+            .link_libcpp = false,
+            .libraries = libraries.slice(),
+        }) catch unreachable;
     }
 
     // while (true) {}
 }
+
+const LinkerOptions = struct {
+    output_file_path: []const u8,
+    extra_arguments: []const []const u8,
+    objects: []const []const u8,
+    libraries: []const []const u8,
+    link_libc: bool,
+    link_libcpp: bool,
+};
+
+pub fn link(options: LinkerOptions) !void {
+    var argv = PinnedArray([]const u8){};
+    const driver_program = switch (@import("builtin").os.tag) {
+        .windows => "lld-link",
+        .linux => "ld.lld",
+        .macos => "ld64.lld",
+        else => @compileError("OS not supported"),
+    };
+    _ = argv.append(driver_program);
+    _ = argv.append("--error-limit=0");
+
+    switch (@import("builtin").cpu.arch) {
+        .aarch64 => switch (@import("builtin").os.tag) {
+            .linux => {
+                _ = argv.append("-znow");
+                _ = argv.append_slice(&.{ "-m", "aarch64linux" });
+            },
+            else => {},
+        },
+        else => {},
+    }
+
+    // const output_path = out_path orelse "a.out";
+    _ = argv.append("-o");
+    _ = argv.append(options.output_file_path);
+
+    argv.append_slice(options.extra_arguments);
+
+    for (options.objects) |object| {
+        _ = argv.append(object);
+    }
+
+    const ci = @import("configuration").ci;
+    switch (@import("builtin").os.tag) {
+        .macos => {
+            _ = argv.append("-dynamic");
+            argv.append_slice(&.{ "-platform_version", "macos", "13.4.1", "13.3" });
+            _ = argv.append("-arch");
+            _ = argv.append(switch (@import("builtin").cpu.arch) {
+                .aarch64 => "arm64",
+                else => |t| @panic(@tagName(t)),
+            });
+
+            argv.append_slice(&.{ "-syslibroot", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk" });
+
+            if (!library.ends_with_slice(options.output_file_path, ".dylib")) {
+                argv.append_slice(&.{ "-e", "_main" });
+            }
+
+            _ = argv.append("-lSystem");
+
+            if (options.link_libcpp) {
+                _ = argv.append("-L/Library/Developer/CommandLineTools/SDKs/MacOSX13.3.sdk/usr/lib");
+                _ = argv.append("-lc++");
+            }
+        },
+        .linux => {
+            if (ci) {
+                if (options.link_libcpp) {
+                    assert(options.link_libc);
+                    _ = argv.append("/lib/x86_64-linux-gnu/libstdc++.so.6");
+                }
+
+                if (options.link_libc) {
+                    _ = argv.append("/lib/x86_64-linux-gnu/crt1.o");
+                    _ = argv.append("/lib/x86_64-linux-gnu/crti.o");
+                    argv.append_slice(&.{ "-L", "/lib/x86_64-linux-gnu" });
+                    argv.append_slice(&.{ "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2" });
+                    _ = argv.append("--as-needed");
+                    _ = argv.append("-lm");
+                    _ = argv.append("-lpthread");
+                    _ = argv.append("-lc");
+                    _ = argv.append("-ldl");
+                    _ = argv.append("-lrt");
+                    _ = argv.append("-lutil");
+                    _ = argv.append("/lib/x86_64-linux-gnu/crtn.o");
+                }
+            } else {
+                if (options.link_libcpp) {
+                    assert(options.link_libc);
+                    _ = argv.append("/usr/lib64/libstdc++.so.6");
+                }
+
+                if (options.link_libc) {
+                    _ = argv.append("/usr/lib64/crt1.o");
+                    _ = argv.append("/usr/lib64/crti.o");
+                    argv.append_slice(&.{ "-L", "/usr/lib64" });
+
+                    _ = argv.append("-dynamic-linker");
+                    switch (@import("builtin").cpu.arch) {
+                        .x86_64 => _ = argv.append("/lib64/ld-linux-x86-64.so.2"),
+                        .aarch64 => _ = argv.append("/lib/ld-linux-aarch64.so.1"),
+                        else => unreachable,
+                    }
+
+                    _ = argv.append("--as-needed");
+                    _ = argv.append("-lm");
+                    _ = argv.append("-lpthread");
+                    _ = argv.append("-lc");
+                    _ = argv.append("-ldl");
+                    _ = argv.append("-lrt");
+                    _ = argv.append("-lutil");
+
+                    _ = argv.append("/usr/lib64/crtn.o");
+                }
+            }
+        },
+        .windows => {},
+        else => @compileError("OS not supported"),
+    }
+
+    for (options.libraries) |lib| {
+        _ = argv.append(instance.arena.join(&.{ "-l", lib }) catch unreachable);
+    }
+
+    const argv_zero_terminated = library.argument_copy_zero_terminated(instance.arena, argv.const_slice()) catch unreachable;
+
+    var stdout_ptr: [*]const u8 = undefined;
+    var stdout_len: usize = 0;
+    var stderr_ptr: [*]const u8 = undefined;
+    var stderr_len: usize = 0;
+    const result = switch (@import("builtin").os.tag) {
+        .linux => NativityLLDLinkELF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        .macos => NativityLLDLinkMachO(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        .windows => NativityLLDLinkCOFF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
+        else => @compileError("OS not supported"),
+    };
+
+    if (!result) {
+        const stdout = stdout_ptr[0..stdout_len];
+        const stderr = stderr_ptr[0..stderr_len];
+        for (argv.const_slice()) |arg| {
+            write(arg);
+            write(" ");
+        }
+        write("\n");
+        if (stdout.len > 0) {
+            write(stdout);
+            write("\n");
+        }
+
+        if (stderr.len > 0) {
+            write(stderr);
+            write("\n");
+        }
+
+        @panic("Linking with LLD failed");
+    }
+}
+
+extern fn NativityLLDLinkELF(argument_ptr: [*:null]?[*:0]u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+extern fn NativityLLDLinkCOFF(argument_ptr: [*:null]?[*:0]u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+extern fn NativityLLDLinkMachO(argument_ptr: [*:null]?[*:0]u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
+extern fn NativityLLDLinkWasm(argument_ptr: [*:null]?[*:0]u8, argument_count: usize, stdout_ptr: *[*]const u8, stdout_len: *usize, stderr_ptr: *[*]const u8, stderr_len: *usize) bool;
 
 fn intern_identifier(pool: *PinnedHashMap(u32, []const u8), identifier: []const u8) u32 {
     const start_index = @intFromBool(identifier[0] == '"');
@@ -963,93 +1104,6 @@ fn intern_identifier(pool: *PinnedHashMap(u32, []const u8), identifier: []const 
     pool.put(hash, identifier);
 
     return hash;
-}
-
-// fn resolve_call(thread: *Thread, file_index: u32, expression: *Expression) void {
-//     assert(expression.kind == .unresolved and expression.kind.unresolved == .call_expression);
-//     const unresolved_call_expression = expression.kind.unresolved.call_expression;
-//     resolve_expression(thread, file_index, unresolved_call_expression.callee);
-//     const function_expression = unresolved_call_expression.callee;
-//     switch (function_expression.kind) {
-//         .resolved => |resolved| switch (resolved) {
-//             .declaration => |declaration| switch (declaration.id) {
-//                 .function_definition => |fn_def| { 
-//                     _ = fn_def; // autofix
-//                     _ = expression.instruction;
-//                     const basic_block = thread.basic_blocks.get(expression.basic_block);
-//                     const call = thread.calls.append_index(.{});
-//                     const instruction = thread.instructions.append(.{
-//                         .id = .call,
-//                         .index = @intCast(@intFromEnum(call)),
-//                     });
-//                     _ = basic_block.instructions.append(instruction);
-//                     expression.kind = .{
-//                         .resolved = .{
-//                             .instruction = instruction,
-//                         },
-//                     };
-//                 },
-//                 else => |t| @panic(@tagName(t)),
-//             },
-//             else => |t| @panic(@tagName(t)),
-//         },
-//         else => |t| @panic(@tagName(t)),
-//     }
-// }
-
-fn resolve_value(thread: *Thread, file_index: u32, value: *Value) void {
-    _ = thread; // autofix
-    _ = file_index; // autofix
-    _ = value; // autofix
-    unreachable;
-    // switch (expression.kind) {
-    //     .unresolved => |unresolved_expression| switch (unresolved_expression) {
-    //         .import => |declaration| {
-    //             declaration.* = .{
-    //                 .id = .file,
-    //                 .index = @intCast(file_index),
-    //             };
-    //
-    //             expression.kind = .{
-    //                 .resolved = .{
-    //                     .import = declaration,
-    //                 },
-    //             };
-    //         },
-    //         .call_expression => resolve_call(thread, file_index, expression),
-    //         .field_expression => |field_expression| {
-    //             resolve_expression(thread, file_index, field_expression.left);
-    //
-    //             switch (field_expression.left.kind) {
-    //                 .resolved => |resolved_expression| switch (resolved_expression) {
-    //                     .import => |declaration| {
-    //                         assert(declaration.id == .file);
-    //                         const resolved_file_index = declaration.index;
-    //                         const file = &instance.files.pointer[resolved_file_index];
-    //
-    //                         const file_scope = &threads[file.thread].file_scopes.pointer[file.scope.index];
-    //                         if (file_scope.declarations.get_pointer(field_expression.right)) |symbol| {
-    //                             expression.kind = .{
-    //                                 .resolved = .{
-    //                                     .declaration = symbol,
-    //                                 },
-    //                             };
-    //                         } else {
-    //                             exit(1);
-    //                         }
-    //                     },
-    //                     else => |t| @panic(@tagName(t)),
-    //                 },
-    //                 else => |t| @panic(@tagName(t)),
-    //             }
-    //         },
-    //     },
-    //     .resolved => {},
-    // }
-}
-
-fn get_integer_type(thread: *Thread) void {
-    _ = thread; // autofix
 }
 
 const CallingConvention = enum{
@@ -1062,8 +1116,8 @@ const Analyzer = struct{
     current_function: *Function = undefined,
 };
 
-const bracket_open = 0x7b;
-const bracket_close = 0x7d;
+const brace_open = 0x7b;
+const brace_close = 0x7d;
 
 var cpu_count: u32 = 0;
 
@@ -1096,25 +1150,7 @@ fn thread_callback(thread_index: u32) void {
             const jobs = thread.task_system.job.entries[completed..to_do];
             for (jobs) |job| {
                 switch (job.id) {
-                    .llvm_setup => {
-                        const context = LLVM.Context.create();
-                        const module_name: []const u8 = "thread";
-                        const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
-                        const builder = LLVM.Builder.create(context);
-                        const attributes = LLVM.Attributes{
-                            .naked = context.getAttributeFromEnum(.Naked, 0),
-                            .noreturn = context.getAttributeFromEnum(.NoReturn, 0),
-                            .nounwind = context.getAttributeFromEnum(.NoUnwind, 0),
-                            .inreg = context.getAttributeFromEnum(.InReg, 0),
-                            .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
-                        };
-                        thread.llvm = .{
-                            .context = context,
-                            .module = module,
-                            .builder = builder,
-                            .attributes = attributes,
-                        };
-
+                    .analysis_setup => {
                         for ([_]Type.Integer.Signedness{.unsigned, .signed}) |signedness| {
                             for (0..64+1) |bit_count| {
                                 const integer_type = Type.Integer{
@@ -1138,9 +1174,6 @@ fn thread_callback(thread_index: u32) void {
                         file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
                         file.thread = thread_index;
                         analyze_file(thread, file_index);
-
-                        // if (do_codegen and codegen_backend == .llvm) {
-                        // }
 
                         thread.analyzed_file_count += 1;
 
@@ -1267,11 +1300,108 @@ fn thread_callback(thread_index: u32) void {
                             }
                         }
                     },
-                    .resolve_module => {
-                        // exit(0);
-                    },
                     .llvm_generate_ir => {
                         if (thread.functions.length > 0) {
+                            const context = LLVM.Context.create();
+                            const module_name: []const u8 = "thread";
+                            const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
+                            const builder = LLVM.Builder.create(context);
+                            const attributes = LLVM.Attributes{
+                                .naked = context.getAttributeFromEnum(.Naked, 0),
+                                .noreturn = context.getAttributeFromEnum(.NoReturn, 0),
+                                .nounwind = context.getAttributeFromEnum(.NoUnwind, 0),
+                                .inreg = context.getAttributeFromEnum(.InReg, 0),
+                                .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
+                            };
+
+                            switch (builtin.cpu.arch) {
+                                inline else => |a| {
+                                    const arch = @field(LLVM, @tagName(a));
+                                    arch.initializeTarget();
+                                    arch.initializeTargetInfo();
+                                    arch.initializeTargetMC();
+                                    arch.initializeAsmPrinter();
+                                    arch.initializeAsmParser();
+                                },
+                            }
+
+                            const target_triple = switch (builtin.os.tag) {
+                                .linux => switch (builtin.cpu.arch) {
+                                    .aarch64 => "aarch64-linux-none",
+                                    .x86_64 => "x86_64-linux-none",
+                                    else => @compileError("CPU not supported"),
+                                },
+                                .macos => "aarch64-apple-macosx-none",
+                                .windows => "x86_64-windows-gnu",
+                                else => @compileError("OS not supported"),
+                            };
+                            const cpu = builtin.cpu.model.llvm_name.?;
+
+                            var features = PinnedArray(u8){
+                                .pointer = @constCast(""),
+                            };
+
+                            const temp_use_native_features = true;
+                            if (temp_use_native_features) {
+                                const feature_list = builtin.cpu.arch.allFeaturesList();
+                                if (feature_list.len > 0) {
+                                    for (feature_list, 0..) |feature, index_usize| {
+                                        const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+                                        const is_enabled = builtin.cpu.features.isEnabled(index);
+
+                                        if (feature.llvm_name) |llvm_name| {
+                                            const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+                                            _ = features.append(plus_or_minus);
+                                            features.append_slice(llvm_name);
+                                            features.append_slice(",");
+                                        }
+                                    }
+
+                                    assert(std.mem.endsWith(u8, features.slice(), ","));
+                                    features.length -= 1;
+                                }
+                            }
+
+                            const target = blk: {
+                                var error_message: [*]const u8 = undefined;
+                                var error_message_len: usize = 0;
+                                const target = LLVM.bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len) orelse unreachable;
+                                break :blk target;
+                            };
+                            const jit = false;
+                            const code_model: LLVM.CodeModel = undefined;
+                            const is_code_model_present = false;
+                            const Optimization = enum {
+                                none,
+                                debug_prefer_fast,
+                                debug_prefer_size,
+                                lightly_optimize_for_speed,
+                                optimize_for_speed,
+                                optimize_for_size,
+                                aggressively_optimize_for_speed,
+                                aggressively_optimize_for_size,
+                            };
+
+                            // TODO:
+                            const codegen_optimization_level: LLVM.CodegenOptimizationLevel = switch (Optimization.none) {
+                                .none => .none,
+                                .debug_prefer_fast, .debug_prefer_size => .none,
+                                .lightly_optimize_for_speed => .less,
+                                .optimize_for_speed, .optimize_for_size => .default,
+                                .aggressively_optimize_for_speed, .aggressively_optimize_for_size => .aggressive,
+                            };
+                            const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu.ptr, cpu.len, features.pointer, features.length, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit);
+
+                            module.setTargetMachineDataLayout(target_machine);
+                            module.setTargetTriple(target_triple.ptr, target_triple.len);
+
+                            thread.llvm = .{
+                                .context = context,
+                                .module = module,
+                                .builder = builder,
+                                .attributes = attributes,
+                                .target_machine = target_machine,
+                            };
                             const debug_info = true;
 
                             const ExternalRef = struct{
@@ -1319,7 +1449,7 @@ fn thread_callback(thread_index: u32) void {
                                                     };
                                                 },
                                                 else => |t| @panic(@tagName(t)),
-                                            } else exit(1);
+                                                } else exit(1);
                                             const function_type = callee.getType();
 
                                             const arguments: []const *LLVM.Value = &.{};
@@ -1375,6 +1505,19 @@ fn thread_callback(thread_index: u32) void {
                                     exit_with_error(verification_message);
                                 }
                             }
+
+                            thread.add_control_work(.{
+                                .id = .llvm_notify_ir_done,
+                            });
+                        }
+                    },
+                    .llvm_emit_object => {
+                        const thread_object = std.fmt.allocPrint(std.heap.page_allocator, "thread{}.o", .{thread.get_index()}) catch unreachable;
+                        thread.llvm.object = thread_object;
+                        const disable_verify = false;
+                        const result = thread.llvm.module.addPassesToEmitFile(thread.llvm.target_machine, thread_object.ptr, thread_object.len, LLVM.CodeGenFileType.object, disable_verify);
+                        if (!result) {
+                            @panic("can't generate machine code");
                         }
                     },
                     else => |t| @panic(@tagName(t)),
@@ -1399,19 +1542,6 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
                 const signedness = integer_signedness(constant_int.type);
                 const result = thread.llvm.context.getConstantInt(bit_count, integer_value, @intFromEnum(signedness) != 0);
                 break :b result.toValue();
-            },
-            .lazy_expression => {
-                // const lazy_expression = thread.expressions.get(@enumFromInt(value.index));
-                // switch (lazy_expression.kind) {
-                //     .resolved => |resolved| switch (resolved) {
-                //         .instruction => |instruction| switch (instruction.id) {
-                //             else => |t| @panic(@tagName(t)),
-                //         },
-                //         else => |t| @panic(@tagName(t)),
-                //     },
-                //     else => |t| @panic(@tagName(t)),
-                // }
-                @trap();
             },
             .instruction => block: {
                 const instruction = thread.instructions.get_unchecked(value.sema.index);
@@ -1781,7 +1911,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     const block_column = block_start - parser.line_offset + 1;
                     _ = block_column; // autofix
                                       //
-                    parser.expect_character(src, bracket_open);
+                    parser.expect_character(src, brace_open);
                     const file_scope = thread.file_scopes.get(@enumFromInt(file.scope.index));
                     file_scope.declarations.put_no_clobber(function.declaration.global.name, .{
                         .id = .function_definition,
@@ -1793,7 +1923,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     while (true) {
                         parser.skip_space(src);
 
-                        if (src[parser.i] == bracket_close) break;
+                        if (src[parser.i] == brace_close) break;
 
                         if (src[parser.i] == 'r') {
                             const identifier = parser.parse_raw_identifier(src);
@@ -1828,7 +1958,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         }
                     }
 
-                    parser.expect_character(src, bracket_close);
+                    parser.expect_character(src, brace_close);
                 } else {
                     exit(1);
                 }
@@ -3075,3 +3205,4 @@ pub const LLVM = struct {
         };
     };
 };
+

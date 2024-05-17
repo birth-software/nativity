@@ -798,3 +798,14 @@ pub fn realpath(arena: *Arena, dir: std.fs.Dir, relative_path: []const u8) ![]co
     @memcpy(heap_realpath, stack_realpath);
     return heap_realpath;
 }
+
+pub fn argument_copy_zero_terminated(arena: *Arena, args: []const []const u8) ![:null]?[*:0]u8 {
+    var result = try arena.new_array(?[*:0]u8, args.len + 1);
+    result[args.len] = null;
+
+    for (args, 0..) |argument, i| {
+        result[i] = try arena.duplicate_bytes_zero_terminated(argument);
+    }
+
+    return result[0..args.len :null];
+}
