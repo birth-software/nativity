@@ -714,7 +714,6 @@ const Job = packed struct(u64) {
     id: Id,
 
     const Id = enum(u8){
-        analysis_setup,
         analyze_file,
         notify_file_resolved,
         llvm_generate_ir,
@@ -821,18 +820,6 @@ pub fn make() void {
     }
     cpu_count -= 2;
     _ = std.Thread.spawn(.{}, thread_callback, .{cpu_count}) catch unreachable;
-
-    // Initialize LLVM in all threads
-    if (do_codegen) {
-        const llvm_job = Job{
-            .offset = 0,
-            .count = 0,
-            .id = .analysis_setup,
-        };
-        for (threads) |*thread| {
-            thread.add_thread_work(llvm_job);
-        }
-    }
 
     const first_file_relative_path = "retest/standalone/first/main.nat";
     const first_file_absolute_path = library.realpath(instance.arena, std.fs.cwd(), first_file_relative_path) catch unreachable;
@@ -1184,8 +1171,6 @@ fn thread_callback(thread_index: u32) void {
             const jobs = thread.task_system.job.entries[completed..to_do];
             for (jobs) |job| {
                 switch (job.id) {
-                    .analysis_setup => {
-                    },
                     .analyze_file => {
                         const file_index = job.offset;
                         const file = &instance.files.slice()[file_index];
