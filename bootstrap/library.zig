@@ -785,7 +785,6 @@ pub fn read_file(arena: *Arena, directory: std.fs.Dir, file_relative_path: []con
     return file_buffer[0..read_byte_count];
 }
 
-
 pub fn self_exe_path(arena: *Arena) ![]const u8 {
     var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     return try arena.duplicate_bytes(try std.fs.selfExePath(&buffer));

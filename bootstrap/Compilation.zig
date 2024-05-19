@@ -2752,19 +2752,6 @@ pub fn argsCopyZ(arena: *Arena, args: []const []const u8) ![:null]?[*:0]u8 {
     return result[0..args.len :null];
 }
 
-extern "c" fn NativityLLVMArchiverMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-fn arMain(arena: *Arena, arguments: []const []const u8) !u8 {
-    const argv = try argsCopyZ(arena, arguments);
-    const exit_code = NativityLLVMArchiverMain(@as(c_int, @intCast(arguments.len)), argv.ptr);
-    return @as(u8, @bitCast(@as(i8, @truncate(exit_code))));
-}
-
-extern "c" fn NativityClangMain(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-pub fn clangMain(arena: *Arena, arguments: []const []const u8) !u8 {
-    const argv = try argsCopyZ(arena, arguments);
-    const exit_code = NativityClangMain(@as(c_int, @intCast(arguments.len)), argv.ptr);
-    return @as(u8, @bitCast(@as(i8, @truncate(exit_code))));
-}
 
 const ExecutableOptions = struct {
     is_test: bool,
@@ -2835,46 +2822,6 @@ pub fn buildExecutable(context: *const Context, arguments: []const []const u8, o
                 // target_triplet = span(arguments[i + 1]);
                 i += 1;
                 unreachable;
-            } else {
-                reportUnterminatedArgumentError(current_argument);
-            }
-        } else if (byte_equal(current_argument, "-log")) {
-            if (i + 1 != arguments.len) {
-                i += 1;
-
-                // var log_argument_iterator = std.mem.splitScalar(u8, span(arguments[i]), ',');
-                //
-                // while (log_argument_iterator.next()) |log_argument| {
-                //     var log_argument_splitter = std.mem.splitScalar(u8, log_argument, '.');
-                //     const log_scope_candidate = log_argument_splitter.next() orelse unreachable;
-                //     var recognized_scope = false;
-                //
-                //     inline for (@typeInfo(LoggerScope).Enum.fields) |logger_scope_enum_field| {
-                //         const log_scope = @field(LoggerScope, logger_scope_enum_field.name);
-                //
-                //         if (byte_equal(@tagName(log_scope), log_scope_candidate)) {
-                //             const LogScope = getLoggerScopeType(log_scope);
-                //
-                //             if (log_argument_splitter.next()) |particular_log_candidate| {
-                //                 var recognized_particular = false;
-                //                 inline for (@typeInfo(LogScope.Logger).Enum.fields) |particular_log_field| {
-                //                     const particular_log = @field(LogScope.Logger, particular_log_field.name);
-                //
-                //                     if (byte_equal(particular_log_candidate, @tagName(particular_log))) {
-                //                         LogScope.Logger.bitset.setPresent(particular_log, true);
-                //                         recognized_particular = true;
-                //                     }
-                //                 } else if (!recognized_particular) @panic("Unrecognized particular log"); //std.debug.panic("Unrecognized particular log \"{s}\" in scope {s}", .{ particular_log_candidate, @tagName(log_scope) });
-                //             } else {
-                //                 // LogScope.Logger.bitset = @TypeOf(LogScope.Logger.bitset).initFull();
-                //             }
-                //
-                //             logger_bitset.setPresent(log_scope, true);
-                //
-                //             recognized_scope = true;
-                //         }
-                //     } else if (!recognized_scope) @panic("Unrecognized particular log"); //std.debug.panic("Unrecognized log scope: {s}", .{log_scope_candidate});
-                // }
             } else {
                 reportUnterminatedArgumentError(current_argument);
             }
@@ -17669,7 +17616,9 @@ pub const Unit = struct {
             return unit.importPackage(context, package);
         }
 
-        const ends_with_nat = import_name.len >= 4 and @as(u32, @bitCast(import_name[import_name.len - 4 ..][0..4].*)) == @as(u32, @bitCast(@as([*]const u8, ".nat")[0..4].*));
+        const nat_ending = ".nat";
+        const nat_ending_len = nat_ending.len;
+        const ends_with_nat = import_name.len >= 4 and @as(u32, @bitCast(import_name[import_name.len - nat_ending_len ..][0..nat_ending_len].*)) == @as(u32, @bitCast(@as([*]const u8, ".nat")[0..nat_ending_len].*));
         if (!ends_with_nat) {
             unreachable;
         }

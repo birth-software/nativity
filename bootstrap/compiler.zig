@@ -11,8 +11,8 @@ const byte_equal = library.byte_equal;
 
 fn exit(exit_code: u8) noreturn {
     @setCold(true);
-    if (@import("builtin").mode == .Debug) {
-        if (exit_code != 0) @trap();
+    if (builtin.mode == .Debug) {
+        if (exit_code != 0) @breakpoint();
     }
     std.posix.exit(exit_code);
 }
@@ -26,7 +26,7 @@ fn is_space(ch: u8) bool {
     return result;
 }
 
-fn write(string: []const u8) void {
+pub fn write(string: []const u8) void {
     std.io.getStdOut().writeAll(string) catch unreachable;
 }
 
@@ -280,7 +280,7 @@ const Parser = struct{
                                         .resolved = true,
                                         .id = .constant_int,
                                     },
-                                },
+                                    },
                                 .n = 0,
                                 .type = ty,
                             });
@@ -306,7 +306,7 @@ const Parser = struct{
                         const unresolved_import_index =  thread.unresolved_imports.get_index(unresolved_import);
                         resolved = false;
                         lazy_expression.* = LazyExpression.init(declaration_reference, thread);
-                    
+
                         while (true) {
                             switch (src[parser.i]) {
                                 '.' => {
@@ -333,7 +333,7 @@ const Parser = struct{
                                                 .resolved = false,
                                                 .id = .instruction,
                                             },
-                                        },
+                                            },
                                         .id = .call,
                                     },
                                     .callable = &lazy_expression.value,
@@ -368,7 +368,7 @@ const LazyExpression = struct {
             names: [4]u32 = .{0} ** 4,
             outsider: GlobalDeclaration.Reference,
         },
-    },
+        },
 
     fn init(global_declaration: GlobalDeclaration.Reference, thread: *Thread) LazyExpression {
         return .{
@@ -378,7 +378,7 @@ const LazyExpression = struct {
                     .resolved = false,
                     .id = .lazy_expression,
                 },
-            },
+                },
             .u = .{
                 .static = .{
                     .outsider = global_declaration,
@@ -415,19 +415,19 @@ const LazyExpression = struct {
     }
 };
 
-fn Descriptor(comptime Id: type, comptime Integer: type) type {
-    return packed struct(Integer) {
-        index: @Type(.{
-            .Int = .{
-                .signedness = .unsigned,
-                .bits = @typeInfo(Integer).Int.bits - @typeInfo(@typeInfo(Id).Enum.tag_type).Int.bits,
-            },
-        }),
-        id: Id,
-
-        pub const Index = PinnedArray(@This()).Index;
-    };
-}
+// fn Descriptor(comptime Id: type, comptime Integer: type) type {
+//     return packed struct(Integer) {
+//         index: @Type(.{
+//             .Int = .{
+//                 .signedness = .unsigned,
+//                 .bits = @typeInfo(Integer).Int.bits - @typeInfo(@typeInfo(Id).Enum.tag_type).Int.bits,
+//             },
+//         }),
+//         id: Id,
+//
+//         pub const Index = PinnedArray(@This()).Index;
+//     };
+// }
 
 const Value = struct {
     llvm: ?*LLVM.Value = null,
@@ -650,12 +650,12 @@ const Thread = struct{
     task_system: TaskSystem = .{},
     analyzed_file_count: u32 = 0,
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
-    local_files: PinnedHashMap(u32, u32) = .{},
     pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
     calls: PinnedArray(Call) = .{},
     returns: PinnedArray(Return) = .{},
     lazy_expressions: PinnedArray(LazyExpression) = .{},
     unresolved_imports: PinnedArray(UnresolvedImport) = .{},
+    resolved_file_count: u32 = 0,
     llvm: struct {
         context: *LLVM.Context,
         module: *LLVM.Module,
@@ -676,7 +676,7 @@ const Thread = struct{
                             .id = .integer,
                             .resolved = true,
                         },
-                    },
+                        },
                     .bit_count = bit_count,
                     .signedness = signedness,
                 };
@@ -684,9 +684,11 @@ const Thread = struct{
         }
         break :blk integers;
     },
-
+    handle: std.Thread = undefined,
 
     fn add_thread_work(thread: *Thread, job: Job) void {
+        thread.task_system.state = .running;
+        assert(thread.task_system.program_state != .none);
         thread.task_system.job.queue_job(job);
     }
 
@@ -695,12 +697,10 @@ const Thread = struct{
     }
 
     pub fn get_index(thread: *Thread) u16 {
-        const index = @divExact(@intFromPtr(thread) - @intFromPtr(threads.ptr), @sizeOf(Thread));
+        const index = @divExact(@intFromPtr(thread) - @intFromPtr(instance.threads.ptr), @sizeOf(Thread));
         return @intCast(index);
     }
 };
-
-const instrument = true;
 
 const LLVMFile = struct {
     file: *LLVM.DebugInfo.File,
@@ -716,6 +716,7 @@ const Job = packed struct(u64) {
     const Id = enum(u8){
         analyze_file,
         notify_file_resolved,
+        analysis_resolution,
         llvm_generate_ir,
         llvm_notify_ir_done,
         llvm_optimize,
@@ -726,6 +727,21 @@ const Job = packed struct(u64) {
 const TaskSystem = struct{
     job: JobQueue = .{},
     ask: JobQueue = .{},
+    program_state: ProgramState = .none,
+    state: ThreadState = .idle,
+
+    const ProgramState = enum{
+        none,
+        analysis,
+        analysis_resolution,
+        llvm_generate_ir,
+        llvm_emit_object,
+    };
+
+    const ThreadState = enum{
+        idle,
+        running,
+    };
 };
 
 const JobQueue = struct{
@@ -740,12 +756,29 @@ const JobQueue = struct{
     }
 };
 
-var threads: []Thread = undefined;
-
 const Instance = struct{
     files: PinnedArray(File) = .{},
     file_paths: PinnedArray(u32) = .{},
+    units: PinnedArray(Unit) = .{},
     arena: *Arena = undefined,
+    threads: []Thread = undefined,
+    paths: struct {
+        cwd: []const u8,
+        executable: []const u8,
+        executable_directory: []const u8,
+    } = .{
+        .cwd = &.{},
+        .executable = &.{},
+        .executable_directory = &.{},
+    },
+
+    fn path_from_cwd(i: *Instance, arena: *Arena, relative_path: []const u8) []const u8 {
+        return arena.join(&.{i.paths.cwd, "/", relative_path}) catch unreachable;
+    }
+
+    fn path_from_compiler(i: *Instance, arena: *Arena, relative_path: []const u8) []const u8 {
+        return arena.join(&.{i.paths.executable_directory, "/", relative_path}) catch unreachable;
+    }
 };
 
 const File = struct{
@@ -782,8 +815,10 @@ var instance = Instance{};
 const do_codegen = true;
 const codegen_backend = CodegenBackend.llvm;
 
-const CodegenBackend = enum{
-    llvm,
+const CodegenBackend = union(enum){
+    llvm: struct {
+        split_object_per_thread: bool,
+    },
 };
 
 fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) File.Index {
@@ -799,7 +834,7 @@ fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) Fil
             .scope = .{
                 .id = .file,
             },
-        },
+            },
         .source_code = &.{},
         .path = file_absolute_path,
     };
@@ -808,117 +843,136 @@ fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) Fil
 
     return new_file_index;
 }
+const Arch = enum {
+    x86_64,
+    aarch64,
+};
 
-pub fn make() void {
-    instance.arena = library.Arena.init(4 * 1024 * 1024) catch unreachable;
+const Os = enum {
+    linux,
+    macos,
+    windows,
+};
 
-    const thread_count = std.Thread.getCpuCount() catch unreachable;
-    cpu_count = @intCast(thread_count);
-    threads = instance.arena.new_array(Thread, cpu_count - 1) catch unreachable;
-    for (threads) |*thread| {
-        thread.* = .{};
+const Abi = enum {
+    none,
+    gnu,
+    musl,
+};
+
+const Optimization = enum {
+    none,
+    debug_prefer_fast,
+    debug_prefer_size,
+    lightly_optimize_for_speed,
+    optimize_for_speed,
+    optimize_for_size,
+    aggressively_optimize_for_speed,
+    aggressively_optimize_for_size,
+};
+
+fn error_insufficient_arguments_command(command: []const u8) noreturn {
+    @setCold(true);
+    write("Command '");
+    write(command);
+    write("' requires at least one argument\n");
+    exit(1);
+}
+
+fn error_unterminated_argument(argument: []const u8) noreturn {
+    @setCold(true);
+    write("Argument '");
+    write(argument);
+    write("' must be terminated\n");
+    exit(1);
+}
+
+const Target = struct {
+    arch: Arch,
+    os: Os,
+    abi: Abi,
+};
+
+const Unit = struct {
+    descriptor: Descriptor,
+
+    const Descriptor = struct {
+        main_source_file_path: []const u8,
+        executable_path: []const u8,
+        object_path: []const u8,
+        target: Target,
+        optimization: Optimization,
+        generate_debug_information: bool,
+        link_libc: bool,
+        link_libcpp: bool,
+        codegen_backend: CodegenBackend,
+    };
+
+    fn compile(descriptor: Descriptor) *Unit {
+        const unit = instance.units.add_one();
+        unit.* = .{
+            .descriptor = descriptor,
+        };
+
+        const main_source_file_absolute = instance.path_from_cwd(instance.arena, unit.descriptor.main_source_file_path);
+        const new_file_index = add_file(main_source_file_absolute, &.{});
+        instance.threads[0].task_system.program_state = .analysis;
+        instance.threads[0].add_thread_work(Job{
+            .offset = @intFromEnum(new_file_index),
+            .id = .analyze_file,
+        });
+        control_thread();
+
+        return unit;
     }
-    cpu_count -= 2;
-    _ = std.Thread.spawn(.{}, thread_callback, .{cpu_count}) catch unreachable;
+};
 
-    const first_file_relative_path = "retest/standalone/first/main.nat";
-    const first_file_absolute_path = library.realpath(instance.arena, std.fs.cwd(), first_file_relative_path) catch unreachable;
-    const new_file_index = add_file(first_file_absolute_path, &.{});
-    var last_assigned_thread_index: u32 = 0;
-    threads[last_assigned_thread_index].add_thread_work(Job{
-        .offset = @intFromEnum(new_file_index),
-        .id = .analyze_file,
-    });
-
+fn control_thread() void {
+    var last_assigned_thread_index: u32 = 1;
     while (true) {
-        var worker_pending_tasks: u64 = 0;
-        var control_pending_tasks: u64 = 0;
-        for (threads) |*thread| {
-            worker_pending_tasks += thread.task_system.job.to_do - thread.task_system.job.completed;
-            control_pending_tasks += thread.task_system.ask.to_do - thread.task_system.ask.completed;
-        }
+        for (instance.threads, 0..) |*thread, i| {
+            const worker_pending_tasks = thread.task_system.job.to_do - thread.task_system.job.completed;
+            const control_pending_tasks = thread.task_system.ask.to_do - thread.task_system.ask.completed;
+            const pending_tasks = worker_pending_tasks + control_pending_tasks;
 
-        const pending_tasks = worker_pending_tasks + control_pending_tasks;
-        if (pending_tasks == 0) {
-            break;
-        }
-
-        if (control_pending_tasks > 0) {
-            for (threads, 0..) |*thread, i| {
-                const control_pending = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-                if (control_pending != 0) {
-                    const jobs_to_do = thread.task_system.ask.entries[thread.task_system.ask.completed .. thread.task_system.ask.to_do];
-
-                    for (jobs_to_do) |job| {
-                        switch (job.id) {
-                            .analyze_file => {
-                                last_assigned_thread_index += 1;
-                                const analyze_file_path_hash = job.offset;
-                                for (instance.file_paths.slice()) |file_path_hash| {
-                                    if (analyze_file_path_hash == file_path_hash) {
-                                        exit(1);
-                                    }
-                                } else {
-                                    last_assigned_thread_index += 1;
-                                    const thread_index = last_assigned_thread_index % threads.len;
-                                    const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
-                                    const interested_thread_index: u32 = @intCast(i);
-                                    const file_index = add_file(file_absolute_path, &.{interested_thread_index});
-                                    const assigned_thread = &threads[thread_index];
-                                    assigned_thread.add_thread_work(Job{
-                                        .offset = @intFromEnum(file_index),
-                                        .id = .analyze_file,
-                                    });
+            if (control_pending_tasks > 0) {
+                const jobs_to_do = thread.task_system.ask.entries[thread.task_system.ask.completed .. thread.task_system.ask.to_do];
+                for (jobs_to_do) |job| {
+                    switch (job.id) {
+                        .analyze_file => {
+                            last_assigned_thread_index += 1;
+                            const analyze_file_path_hash = job.offset;
+                            for (instance.file_paths.slice()) |file_path_hash| {
+                                if (analyze_file_path_hash == file_path_hash) {
+                                    exit(1);
                                 }
-                            },
-                            .notify_file_resolved => {
-                                const file_index = job.offset;
-                                const thread_index = job.count;
-                                const destination_thread = &threads[thread_index];
-                                const file = instance.files.get(@enumFromInt(file_index));
-                                const file_path_hash = hash_bytes(file.path);
-                                destination_thread.add_thread_work(.{
-                                    .id = .notify_file_resolved,
-                                    .count = @intCast(file_index),
-                                    .offset = file_path_hash,
+                            } else {
+                                last_assigned_thread_index += 1;
+                                const thread_index = last_assigned_thread_index % instance.threads.len;
+                                const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
+                                const interested_thread_index: u32 = @intCast(i);
+                                const file_index = add_file(file_absolute_path, &.{interested_thread_index});
+                                const assigned_thread = &instance.threads[thread_index];
+                                assigned_thread.task_system.program_state = .analysis;
+                                assigned_thread.add_thread_work(Job{
+                                    .offset = @intFromEnum(file_index),
+                                    .id = .analyze_file,
                                 });
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        }
-                    }
-
-                    thread.task_system.ask.completed += jobs_to_do.len;
-                }
-            }
-        }
-    }
-
-    // TODO: Prune
-    if (do_codegen) {
-        for (threads) |*thread| {
-            thread.add_thread_work(Job{
-                .id = switch (codegen_backend) {
-                    .llvm => .llvm_generate_ir,
-                },
-            });
-        }
-
-        while (true) {
-            var asks_to_do: u64 = 0;
-            var jobs_to_do: u64 = 0;
-            for (threads) |*thread| {
-                jobs_to_do += thread.task_system.job.to_do - thread.task_system.job.completed;
-                asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-            }
-
-            if (asks_to_do + jobs_to_do == 0) {
-                break;
-            }
-
-            // Check if there is any request
-            for (threads) |*thread| {
-                for (thread.task_system.ask.entries[thread.task_system.ask.completed..thread.task_system.ask.to_do]) |entry| {
-                    switch (entry.id) {
+                            }
+                        },
+                        .notify_file_resolved => {
+                            notify_received = true;
+                            const file_index = job.offset;
+                            const thread_index = job.count;
+                            const destination_thread = &instance.threads[thread_index];
+                            const file = instance.files.get(@enumFromInt(file_index));
+                            const file_path_hash = hash_bytes(file.path);
+                            destination_thread.add_thread_work(.{
+                                .id = .notify_file_resolved,
+                                .count = @intCast(file_index),
+                                .offset = file_path_hash,
+                            });
+                        },
                         .llvm_notify_ir_done => {
                             thread.add_thread_work(.{
                                 .id = .llvm_emit_object,
@@ -926,30 +980,373 @@ pub fn make() void {
                         },
                         else => |t| @panic(@tagName(t)),
                     }
+                }
 
-                    thread.task_system.ask.completed += 1;
+                thread.task_system.ask.completed += control_pending_tasks;
+                if (notify_received) {
+                    notify_processed = true;
+                }
+            }
+
+            if (pending_tasks == 0) {
+                switch (thread.task_system.program_state) {
+                    .none => {
+                        assert(thread.task_system.state == .idle);
+                    },
+                    .analysis => {
+                        assert(thread.task_system.state == .running);
+                        thread.task_system.program_state = .analysis_resolution;
+
+                        thread.add_thread_work(Job{
+                            .id = .analysis_resolution,
+                        });
+                    },
+                    .analysis_resolution => {
+                        assert(thread.task_system.state == .running);
+                        thread.task_system.program_state = .llvm_generate_ir;
+                        thread.add_thread_work(Job{
+                            .id = .llvm_generate_ir,
+                        });
+                    },
+                    .llvm_generate_ir => {
+                        assert(thread.task_system.state == .running);
+                        thread.task_system.program_state = .llvm_emit_object;
+                        thread.add_thread_work(Job{
+                            .id = .llvm_emit_object,
+                        });
+                    },
+                    .llvm_emit_object => {},
                 }
             }
         }
-
-        var objects = PinnedArray([]const u8) {};
-        for (threads) |*thread| {
-            if (thread.llvm.object) |object| {
-                _ = objects.append(object);
-            }
-        }
-
-        var libraries = PinnedArray([]const u8){};
-
-        link(.{
-            .output_file_path = "module",
-            .extra_arguments = &.{},
-            .objects = objects.slice(),
-            .link_libc = true,
-            .link_libcpp = false,
-            .libraries = libraries.slice(),
-        }) catch unreachable;
     }
+}
+
+fn command_exe(arguments: []const []const u8) void {
+    if (arguments.len == 0) {
+        error_insufficient_arguments_command("exe");
+    }
+        // TODO: make these mutable
+    const arch: Arch = switch (builtin.cpu.arch) {
+        .aarch64 => .aarch64,
+        .x86_64 => .x86_64,
+        else => unreachable,
+    };
+    const os: Os = switch (builtin.os.tag) {
+        .linux => .linux,
+        .macos => .macos,
+        .windows => .windows,
+        else => unreachable,
+    };
+    const abi: Abi = switch (builtin.os.tag) {
+        .linux => .gnu,
+        .macos => .none,
+        .windows => .gnu,
+        else => unreachable,
+    };
+
+
+    var maybe_executable_path: ?[]const u8 = null;
+    var maybe_executable_name: ?[]const u8 = null;
+    var maybe_main_source_file_path: ?[]const u8 = null;
+
+    var c_source_files = PinnedArray([]const u8){};
+
+    var optimization = Optimization.none;
+    var generate_debug_information = true;
+    var link_libc = true;
+    const link_libcpp = false;
+
+    var i: usize = 0;
+    while (i < arguments.len) : (i += 1) {
+        const current_argument = arguments[i];
+        if (byte_equal(current_argument, "-o")) {
+            if (i + 1 != arguments.len) {
+                maybe_executable_path = arguments[i + 1];
+                assert(maybe_executable_path.?.len != 0);
+                i += 1;
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-link_libc")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                if (byte_equal(arg, "true")) {
+                    link_libc = true;
+                } else if (byte_equal(arg, "false")) {
+                    link_libc = false;
+                } else {
+                    unreachable;
+                }
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-main_source_file")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                maybe_main_source_file_path = arg;
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-name")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const arg = arguments[i];
+                maybe_executable_name = arg;
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-c_source_files")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                c_source_files.append_slice(arguments[i..]);
+                i = arguments.len;
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-optimize")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const optimize_string = arguments[i];
+                optimization = library.enumFromString(Optimization, optimize_string) orelse unreachable;
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else if (byte_equal(current_argument, "-debug")) {
+            if (i + 1 != arguments.len) {
+                i += 1;
+
+                const debug_string = arguments[i];
+                generate_debug_information = if (byte_equal(debug_string, "true")) true else if (byte_equal(debug_string, "false")) false else unreachable;
+            } else {
+                error_unterminated_argument(current_argument);
+            }
+        } else {
+            @panic(current_argument);
+            // std.debug.panic("Unrecognized argument: {s}", .{current_argument});
+        }
+    }
+
+    const main_source_file_path = maybe_main_source_file_path orelse exit_with_error("Main source file must be specified with -main_source_file");
+    // TODO: undo this incongruency
+    const executable_name = if (maybe_executable_name) |executable_name| executable_name else std.fs.path.basename(main_source_file_path[0..main_source_file_path.len - "/main.nat".len]);
+    const executable_path = maybe_executable_path orelse blk: {
+        assert(executable_name.len > 0);
+        const result = instance.arena.join(&.{"nat/", executable_name }) catch unreachable;
+        break :blk result;
+    };
+
+    const object_path = blk: {
+        const slice = instance.arena.new_array(u8, executable_path.len + 2) catch unreachable;
+        @memcpy(slice[0..executable_path.len], executable_path);
+        slice[executable_path.len] = '.';
+        slice[executable_path.len + 1] = 'o';
+        break :blk slice;
+    };
+
+    _ = Unit.compile(.{
+        .target = .{
+            .arch = arch,
+            .os = os,
+            .abi = abi,
+        },
+        .link_libc = link_libc,
+        .link_libcpp = link_libcpp,
+        .main_source_file_path = main_source_file_path,
+        .object_path = object_path,
+        .executable_path = executable_path,
+        .optimization = optimization,
+        .generate_debug_information = generate_debug_information,
+        .codegen_backend = .{
+            .llvm = .{
+                .split_object_per_thread = true,
+            },
+        },
+    });
+}
+
+pub fn main() void {
+    instance.arena = library.Arena.init(4 * 1024 * 1024) catch unreachable;
+    const executable_path = library.self_exe_path(instance.arena) catch unreachable;
+    const executable_directory = std.fs.path.dirname(executable_path).?;
+    std.fs.cwd().makePath("nat") catch |err| switch (err) {
+        else => @panic(@errorName(err)),
+    };
+    instance.paths = .{
+        .cwd = library.realpath(instance.arena, std.fs.cwd(), ".") catch unreachable,
+        .executable = executable_path,
+        .executable_directory = executable_directory,
+    };
+    const thread_count = std.Thread.getCpuCount() catch unreachable;
+    const cpu_count = &cpu_count_buffer[0];
+    // cpu_count.* = @intCast(thread_count - 2);
+    instance.threads = instance.arena.new_array(Thread, thread_count - 1) catch unreachable;
+    cpu_count.* = @intCast(thread_count - 2);
+    for (instance.threads) |*thread| {
+        thread.* = .{};
+    }
+
+    const thread_index = cpu_count.*;
+    instance.threads[thread_index].handle = std.Thread.spawn(.{}, worker_thread, .{thread_index, cpu_count}) catch unreachable;
+
+    var arg_iterator = std.process.args();
+    var argument_buffer = PinnedArray([]const u8){};
+
+    while (arg_iterator.next()) |arg| {
+        _ = argument_buffer.append(arg);
+    }
+
+    const arguments = argument_buffer.const_slice();
+    if (arguments.len < 2) {
+        exit_with_error("Insufficient number of arguments");
+    }
+
+    const command = arguments[1];
+    const command_arguments = arguments[2..];
+
+    if (byte_equal(command, "exe")) {
+        command_exe(command_arguments);
+    } else if (byte_equal(command, "clang") or byte_equal(command, "-cc1") or byte_equal(command, "-cc1as")) {
+        exit_with_error("TODO: clang");
+    } else if (byte_equal(command, "cc")) {
+        exit_with_error("TODO: clang");
+    } else if (byte_equal(command, "c++")) {
+        exit_with_error("TODO: clang");
+    } else {
+        exit_with_error("Unrecognized command");
+    }
+
+    // const first_file_relative_path = "retest/standalone/first/main.nat";
+    // const first_file_absolute_path = library.realpath(instance.arena, std.fs.cwd(), first_file_relative_path) catch unreachable;
+    // const new_file_index = add_file(first_file_absolute_path, &.{});
+    // var last_assigned_thread_index: u32 = 0;
+    // instance.threads[last_assigned_thread_index].add_thread_work(Job{
+    //     .offset = @intFromEnum(new_file_index),
+    //     .id = .analyze_file,
+    // });
+    //
+    // while (true) {
+    //     var worker_pending_tasks: u64 = 0;
+    //     var control_pending_tasks: u64 = 0;
+    //     for (instance.threads) |*thread| {
+    //         worker_pending_tasks += thread.task_system.job.to_do - thread.task_system.job.completed;
+    //         control_pending_tasks += thread.task_system.ask.to_do - thread.task_system.ask.completed;
+    //     }
+    //
+    //     const pending_tasks = worker_pending_tasks + control_pending_tasks;
+    //     if (pending_tasks == 0) {
+    //         break;
+    //     }
+    //
+    //     if (control_pending_tasks > 0) {
+    //         for (instance.threads, 0..) |*thread, i| {
+    //             const control_pending = thread.task_system.ask.to_do - thread.task_system.ask.completed;
+    //             if (control_pending != 0) {
+    //                 const jobs_to_do = thread.task_system.ask.entries[thread.task_system.ask.completed .. thread.task_system.ask.to_do];
+    //
+    //                 for (jobs_to_do) |job| {
+    //                     switch (job.id) {
+    //                         .analyze_file => {
+    //                             last_assigned_thread_index += 1;
+    //                             const analyze_file_path_hash = job.offset;
+    //                             for (instance.file_paths.slice()) |file_path_hash| {
+    //                                 if (analyze_file_path_hash == file_path_hash) {
+    //                                     exit(1);
+    //                                 }
+    //                             } else {
+    //                                 last_assigned_thread_index += 1;
+    //                                 const thread_index = last_assigned_thread_index % instance.threads.len;
+    //                                 const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
+    //                                 const interested_thread_index: u32 = @intCast(i);
+    //                                 const file_index = add_file(file_absolute_path, &.{interested_thread_index});
+    //                                 const assigned_thread = &instance.threads[thread_index];
+    //                                 assigned_thread.add_thread_work(Job{
+    //                                     .offset = @intFromEnum(file_index),
+    //                                     .id = .analyze_file,
+    //                                 });
+    //                             }
+    //                         },
+    //                         .notify_file_resolved => {
+    //                             const file_index = job.offset;
+    //                             const thread_index = job.count;
+    //                             const destination_thread = &instance.threads[thread_index];
+    //                             const file = instance.files.get(@enumFromInt(file_index));
+    //                             const file_path_hash = hash_bytes(file.path);
+    //                             destination_thread.add_thread_work(.{
+    //                                 .id = .notify_file_resolved,
+    //                                 .count = @intCast(file_index),
+    //                                 .offset = file_path_hash,
+    //                             });
+    //                         },
+    //                         else => |t| @panic(@tagName(t)),
+    //                     }
+    //                 }
+    //
+    //                 thread.task_system.ask.completed += jobs_to_do.len;
+    //             }
+    //         }
+    //     }
+    // }
+    //
+    // // TODO: Prune
+    // if (do_codegen) {
+    //     for (instance.threads) |*thread| {
+    //         thread.add_thread_work(Job{
+    //             .id = switch (codegen_backend) {
+    //                 .llvm => .llvm_generate_ir,
+    //             },
+    //         });
+    //     }
+    //
+    //     while (true) {
+    //         var asks_to_do: u64 = 0;
+    //         var jobs_to_do: u64 = 0;
+    //         for (instance.threads) |*thread| {
+    //             jobs_to_do += thread.task_system.job.to_do - thread.task_system.job.completed;
+    //             asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
+    //         }
+    //
+    //         if (asks_to_do + jobs_to_do == 0) {
+    //             break;
+    //         }
+    //
+    //         // Check if there is any request
+    //         for (instance.threads) |*thread| {
+    //             for (thread.task_system.ask.entries[thread.task_system.ask.completed..thread.task_system.ask.to_do]) |entry| {
+    //                 switch (entry.id) {
+    //                     else => |t| @panic(@tagName(t)),
+    //                 }
+    //
+    //                 thread.task_system.ask.completed += 1;
+    //             }
+    //         }
+    //     }
+    //
+    //     var objects = PinnedArray([]const u8) {};
+    //     for (instance.threads) |*thread| {
+    //         if (thread.llvm.object) |object| {
+    //             _ = objects.append(object);
+    //         }
+    //     }
+    //
+    //     var libraries = PinnedArray([]const u8){};
+    //
+    //     link(.{
+    //         .output_file_path = "module",
+    //         .extra_arguments = &.{},
+    //         .objects = objects.slice(),
+    //         .link_libc = true,
+    //         .link_libcpp = false,
+    //         .libraries = libraries.slice(),
+    //     }) catch unreachable;
+    // }
 
     // while (true) {}
 }
@@ -965,7 +1362,7 @@ const LinkerOptions = struct {
 
 pub fn link(options: LinkerOptions) !void {
     var argv = PinnedArray([]const u8){};
-    const driver_program = switch (@import("builtin").os.tag) {
+    const driver_program = switch (builtin.os.tag) {
         .windows => "lld-link",
         .linux => "ld.lld",
         .macos => "ld64.lld",
@@ -974,8 +1371,8 @@ pub fn link(options: LinkerOptions) !void {
     _ = argv.append(driver_program);
     _ = argv.append("--error-limit=0");
 
-    switch (@import("builtin").cpu.arch) {
-        .aarch64 => switch (@import("builtin").os.tag) {
+    switch (builtin.cpu.arch) {
+        .aarch64 => switch (builtin.os.tag) {
             .linux => {
                 _ = argv.append("-znow");
                 _ = argv.append_slice(&.{ "-m", "aarch64linux" });
@@ -996,12 +1393,12 @@ pub fn link(options: LinkerOptions) !void {
     }
 
     const ci = @import("configuration").ci;
-    switch (@import("builtin").os.tag) {
+    switch (builtin.os.tag) {
         .macos => {
             _ = argv.append("-dynamic");
             argv.append_slice(&.{ "-platform_version", "macos", "13.4.1", "13.3" });
             _ = argv.append("-arch");
-            _ = argv.append(switch (@import("builtin").cpu.arch) {
+            _ = argv.append(switch (builtin.cpu.arch) {
                 .aarch64 => "arm64",
                 else => |t| @panic(@tagName(t)),
             });
@@ -1052,7 +1449,7 @@ pub fn link(options: LinkerOptions) !void {
                     argv.append_slice(&.{ "-L", "/usr/lib64" });
 
                     _ = argv.append("-dynamic-linker");
-                    switch (@import("builtin").cpu.arch) {
+                    switch (builtin.cpu.arch) {
                         .x86_64 => _ = argv.append("/lib64/ld-linux-x86-64.so.2"),
                         .aarch64 => _ = argv.append("/lib/ld-linux-aarch64.so.1"),
                         else => unreachable,
@@ -1084,7 +1481,7 @@ pub fn link(options: LinkerOptions) !void {
     var stdout_len: usize = 0;
     var stderr_ptr: [*]const u8 = undefined;
     var stderr_len: usize = 0;
-    const result = switch (@import("builtin").os.tag) {
+    const result = switch (builtin.os.tag) {
         .linux => NativityLLDLinkELF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
         .macos => NativityLLDLinkMachO(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
         .windows => NativityLLDLinkCOFF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
@@ -1140,27 +1537,33 @@ const Analyzer = struct{
 const brace_open = 0x7b;
 const brace_close = 0x7d;
 
-var cpu_count: u32 = 0;
+const cache_line_size = switch (builtin.os.tag) {
+    .macos => 128,
+    else => 64,
+};
+
+var cpu_count_buffer = [1]u32{0} ** @divExact(cache_line_size, @sizeOf(u32));
 
 const address_space = 0;
+var notify_registered = false;
+var notify_received = false;
+var notify_processed = false;
+var file_analyzed = false;
 
-fn thread_callback(thread_index: u32) void {
-    var created_thread_count: u32 = 0;
+fn worker_thread(thread_index: u32, cpu_count: *u32) void {
     while (true) {
-        const local_cpu_count = cpu_count;
+        const local_cpu_count = cpu_count.*;
         if (local_cpu_count == 0) {
             break;
         }
 
-        if (@cmpxchgWeak(u32, &cpu_count, local_cpu_count, local_cpu_count - 1, .seq_cst, .seq_cst) == null) {
-            created_thread_count += 1;
-            const t = std.Thread.spawn(.{}, thread_callback, .{local_cpu_count - 1}) catch unreachable;
-            _ = t; // autofix
+        if (@cmpxchgWeak(u32, cpu_count, local_cpu_count, local_cpu_count - 1, .seq_cst, .seq_cst) == null) {
+            const new_thread_index = local_cpu_count - 1;
+            instance.threads[thread_index].handle = std.Thread.spawn(.{}, worker_thread, .{new_thread_index, cpu_count}) catch unreachable;
         }
     }
 
-    const thread = &threads[thread_index];
-
+    const thread = &instance.threads[thread_index];
     thread.arena = Arena.init(4 * 1024 * 1024) catch unreachable;
     
     while (true) {
@@ -1168,6 +1571,8 @@ fn thread_callback(thread_index: u32) void {
         const completed = thread.task_system.job.completed;
 
         if (completed < to_do) {
+            assert(thread.task_system.program_state != .none);
+            assert(thread.task_system.state != .idle);
             const jobs = thread.task_system.job.entries[completed..to_do];
             for (jobs) |job| {
                 switch (job.id) {
@@ -1178,6 +1583,7 @@ fn thread_callback(thread_index: u32) void {
                         file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
                         file.thread = thread_index;
                         analyze_file(thread, file_index);
+                        file_analyzed = true;
 
                         thread.analyzed_file_count += 1;
 
@@ -1187,13 +1593,14 @@ fn thread_callback(thread_index: u32) void {
                                 .offset = file_index,
                                 .count = @intCast(ti),
                             });
+                            notify_registered = true;
                         }
                     },
                     .notify_file_resolved => {
                         const file_path_hash = job.offset;
                         const file_index = job.count;
                         const file = &instance.files.pointer[file_index];
-                        if (&threads[file.thread] == thread) {
+                        if (&instance.threads[file.thread] == thread) {
                             exit_with_error("Threads match!");
                         } else {
                             const pending_file_index = for (thread.unresolved_imports.slice(), 0..) |unresolved_import, i| {
@@ -1282,6 +1689,15 @@ fn thread_callback(thread_index: u32) void {
                                     }
                                 }
                             }
+
+                            thread.resolved_file_count += 1;
+                        }
+                    },
+                    .analysis_resolution => {
+                        if (thread.unresolved_imports.length - thread.resolved_file_count > 0) {
+                            assert(jobs.len == 1);
+                            std.debug.print("Unresolved imports: {}. resolved_file_count: {}\n", .{thread.unresolved_imports.length, thread.resolved_file_count});
+                            exit(1);
                         }
                     },
                     .llvm_generate_ir => {
@@ -1355,16 +1771,6 @@ fn thread_callback(thread_index: u32) void {
                             const jit = false;
                             const code_model: LLVM.CodeModel = undefined;
                             const is_code_model_present = false;
-                            const Optimization = enum {
-                                none,
-                                debug_prefer_fast,
-                                debug_prefer_size,
-                                lightly_optimize_for_speed,
-                                optimize_for_speed,
-                                optimize_for_size,
-                                aggressively_optimize_for_speed,
-                                aggressively_optimize_for_size,
-                            };
 
                             // TODO:
                             const codegen_optimization_level: LLVM.CodegenOptimizationLevel = switch (Optimization.none) {
@@ -1957,32 +2363,27 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     const file_path = library.realpath(thread.arena, directory, string_literal) catch unreachable;
                     const file_path_hash = intern_identifier(&thread.identifiers, file_path);
 
-                    if (thread.local_files.get(file_path_hash)) |import_file_index| {
-                        _ = import_file_index; // autofix
-                        exit(1);
-                    } else {
-                        for (thread.unresolved_imports.slice()) |unresolved_import| {
-                            const pending_file_hash = unresolved_import.hash;
-                            if (pending_file_hash == file_path_hash) {
-                                exit(1);
-                            }
-                        } else {
-                            thread.add_control_work(.{
-                                .id = .analyze_file,
-                                .offset = file_path_hash,
-                            });
-                            const unresolved_import = thread.unresolved_imports.append(.{
-                                .hash = file_path_hash,
-                                .global_declaration = .{
-                                    .id = .unresolved_import,
-                                },
-                            });
-                            file.scope.declarations.put_no_clobber(filename_without_extension_hash, &unresolved_import.global_declaration);
-                            const ptr = file.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable;
-                            const list = thread.pending_values_per_file.append(.{});
-                            const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(ptr, thread));
-                            _ = list.append(&lazy_expression.value);
+                    for (thread.unresolved_imports.slice()) |unresolved_import| {
+                        const pending_file_hash = unresolved_import.hash;
+                        if (pending_file_hash == file_path_hash) {
+                            exit(1);
                         }
+                    } else {
+                        thread.add_control_work(.{
+                            .id = .analyze_file,
+                            .offset = file_path_hash,
+                        });
+                        const unresolved_import = thread.unresolved_imports.append(.{
+                            .hash = file_path_hash,
+                            .global_declaration = .{
+                                .id = .unresolved_import,
+                            },
+                            });
+                        file.scope.declarations.put_no_clobber(filename_without_extension_hash, &unresolved_import.global_declaration);
+                        const ptr = file.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable;
+                        const list = thread.pending_values_per_file.append(.{});
+                        const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(ptr, thread));
+                        _ = list.append(&lazy_expression.value);
                     }
                 } else {
                     exit(1);
@@ -3169,3 +3570,17 @@ pub const LLVM = struct {
     };
 };
 
+pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
+    @setCold(true);
+    const print_stack_trace = @import("configuration").print_stack_trace;
+    switch (print_stack_trace) {
+        true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
+        false => {
+            compiler.write("\nPANIC: ");
+            compiler.write(message);
+            compiler.write("\n");
+            std.debug.print("registered: {}. received: {}. processed: {}\n", .{notify_registered, notify_received, notify_processed});
+            exit(1);
+        },
+    }
+}

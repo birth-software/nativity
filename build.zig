@@ -431,7 +431,7 @@ pub fn build(b: *std.Build) !void {
         compiler.linkSystemLibrary("lldMachO");
         compiler.linkSystemLibrary("lldWasm");
         // compiler.linkSystemLibrary("unwind");
-        compiler.linkSystemLibrary(if (is_ci) "z" else "zlib");
+        compiler.linkSystemLibrary(if (is_ci or builtin.os.tag == .macos) "z" else "zlib");
         compiler.linkSystemLibrary("zstd");
 
         switch (target.result.os.tag) {
