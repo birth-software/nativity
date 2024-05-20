@@ -947,15 +947,14 @@ const Unit = struct {
             .offset = @intFromEnum(new_file_index),
             .id = .analyze_file,
         });
-        control_thread();
+        control_thread(unit);
 
         return unit;
     }
 };
 
-fn control_thread() void {
+fn control_thread(unit: *Unit) void {
     var last_assigned_thread_index: u32 = 1;
-    var objects = PinnedArray([]const u8){};
     while (true) {
         var total_pending_tasks: u64 = 0;
         for (instance.threads, 0..) |*thread, i| {
@@ -1016,8 +1015,6 @@ fn control_thread() void {
                             });
                         },
                         .llvm_notify_object_done => {
-                            const object_name = thread.llvm.object.?;
-                            _ = objects.append(object_name);
                         },
                         else => |t| @panic(@tagName(t)),
                     }
@@ -1031,6 +1028,23 @@ fn control_thread() void {
             break;
         }
     }
+
+    var objects = PinnedArray([]const u8){};
+    for (instance.threads) |*thread| {
+        if (thread.llvm.object) |object| {
+            _ = objects.append(object);
+        }
+    }
+
+
+    link(.{
+        .output_file_path = unit.descriptor.executable_path,
+        .extra_arguments = &.{},
+        .objects = objects.const_slice(),
+        .libraries = &.{},
+        .link_libc = true,
+        .link_libcpp = false,
+    });
 }
 
 fn command_exe(arguments: []const []const u8) void {
@@ -1371,7 +1385,7 @@ const LinkerOptions = struct {
     link_libcpp: bool,
 };
 
-pub fn link(options: LinkerOptions) !void {
+pub fn link(options: LinkerOptions) void {
     var argv = PinnedArray([]const u8){};
     const driver_program = switch (builtin.os.tag) {
         .windows => "lld-link",
@@ -1889,6 +1903,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         thread.add_control_work(.{
                             .id = .llvm_notify_object_done,
                         });
+                        // std.debug.print("Thread #{} emitted object and notified\n", .{thread_index});
                     },
                     else => |t| @panic(@tagName(t)),
                 }
