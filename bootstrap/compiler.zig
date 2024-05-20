@@ -956,16 +956,22 @@ const Unit = struct {
 fn control_thread(unit: *Unit) void {
     var last_assigned_thread_index: u32 = 1;
     while (true) {
-        var total_pending_tasks: u64 = 0;
+        var total_is_done: bool = true;
         for (instance.threads, 0..) |*thread, i| {
-            const worker_pending_tasks = thread.task_system.job.to_do - thread.task_system.job.completed;
-            const control_pending_tasks = thread.task_system.ask.to_do - thread.task_system.ask.completed;
+            const jobs_to_do = thread.task_system.job.to_do;
+            const jobs_completed = thread.task_system.job.completed;
+            const worker_pending_tasks = jobs_to_do - jobs_completed;
+            const asks_to_do = thread.task_system.ask.to_do;
+            const asks_completed = thread.task_system.ask.completed;
+            const control_pending_tasks = asks_to_do - asks_completed; 
             const pending_tasks = worker_pending_tasks + control_pending_tasks;
-            total_pending_tasks += pending_tasks;
+
+            const is_done = pending_tasks == 0;
+            // std.debug.print("Is done: {}\n", .{is_done});
+            total_is_done = total_is_done and is_done;
 
             if (control_pending_tasks > 0) {
-                const jobs_to_do = thread.task_system.ask.entries[thread.task_system.ask.completed .. thread.task_system.ask.to_do];
-                for (jobs_to_do) |job| {
+                for (thread.task_system.ask.entries[asks_completed .. asks_to_do]) |job| {
                     switch (job.id) {
                         .analyze_file => {
                             last_assigned_thread_index += 1;
@@ -1024,7 +1030,7 @@ fn control_thread(unit: *Unit) void {
             }
         }
 
-        if (total_pending_tasks == 0) {
+        if (total_is_done) {
             break;
         }
     }
