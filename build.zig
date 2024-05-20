@@ -446,9 +446,9 @@ pub fn build(b: *std.Build) !void {
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/11" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu/c++/11" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/lib/llvm-17/include" });
+                    compiler.addIncludePath(.{ .cwd_relative = "/usr/lib/llvm-18/include" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu" });
-                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib/llvm-17/lib" });
+                    compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib/llvm-18/lib" });
                 } else {
                     const result = try std.ChildProcess.run(.{
                         .allocator = b.allocator,
