@@ -928,6 +928,18 @@ const Unit = struct {
             .descriptor = descriptor,
         };
 
+        switch (unit.descriptor.target.arch) {
+            inline else => |a| {
+                const arch = @field(LLVM, @tagName(a));
+                arch.initializeTarget();
+                arch.initializeTargetInfo();
+                arch.initializeTargetMC();
+                arch.initializeAsmPrinter();
+                arch.initializeAsmParser();
+            },
+        }
+
+
         const main_source_file_absolute = instance.path_from_cwd(instance.arena, unit.descriptor.main_source_file_path);
         const new_file_index = add_file(main_source_file_absolute, &.{});
         instance.threads[0].task_system.program_state = .analysis;
@@ -1703,21 +1715,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
                             };
 
-                            switch (builtin.cpu.arch) {
-                                inline else => |a| {
-                                    const arch = @field(LLVM, @tagName(a));
-                                    arch.initializeTarget();
-                                    arch.initializeTargetInfo();
-                                    arch.initializeTargetMC();
-                                    arch.initializeAsmPrinter();
-                                    arch.initializeAsmParser();
-                                },
-                            }
-
                             const target_triple = switch (builtin.os.tag) {
                                 .linux => switch (builtin.cpu.arch) {
                                     .aarch64 => "aarch64-linux-none",
-                                    .x86_64 => "x86_64-linux-none",
+                                    .x86_64 => "x86_64-unknown-linux-gnu",
                                     else => @compileError("CPU not supported"),
                                 },
                                 .macos => "aarch64-apple-macosx-none",
@@ -1754,7 +1755,11 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             const target = blk: {
                                 var error_message: [*]const u8 = undefined;
                                 var error_message_len: usize = 0;
-                                const target = LLVM.bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len) orelse unreachable;
+
+                                const optional_target = LLVM.bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len);
+                                const target = optional_target orelse {
+                                    exit_with_error(error_message[0..error_message_len]);
+                                };
                                 break :blk target;
                             };
                             const jit = false;
@@ -2203,7 +2208,6 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     }
 
                     function.declaration.symbol.name = parser.parse_identifier(thread, src);
-                    std.debug.print("Function {s} in thread #{}\n", .{thread.identifiers.get( function.declaration.symbol.name).?, thread.get_index()});
 
                     parser.skip_space(src);
 

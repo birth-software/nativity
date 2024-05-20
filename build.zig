@@ -413,8 +413,8 @@ pub fn build(b: *std.Build) !void {
                 break :blk llvm_directory.items;
             } else {
                 break :blk switch (use_debug) {
-                    true => "../zig-bootstrap/out/x86_64-linux-musl-native-debug-static",
-                    false => "../zig-bootstrap/out/x86_64-linux-musl-native-release-static",
+                    true => "../zig-bootstrap/out/x86_64-linux-musl-native",
+                    false => "../zig-bootstrap/out/x86_64-linux-musl-native",
                 };
             }
         };
