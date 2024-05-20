@@ -2412,7 +2412,7 @@ fn try_resolve_file(thread: *Thread, file: *File) void {
 
         if (thread.analyzed_file_count == thread.assigned_file_count) {
             // TODO: should this be atomic?
-            if (@atomicLoad(u64, &thread.task_system.job.to_do, .seq_cst) == thread.task_system.job.completed + 1) {
+            if (thread.task_system.job.to_do == thread.task_system.job.completed + 1) {
                 thread.add_control_work(.{
                     .id = .notify_analysis_complete,
                 });
