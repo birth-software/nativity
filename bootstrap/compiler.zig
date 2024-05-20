@@ -302,11 +302,14 @@ const Parser = struct{
                 switch (declaration_reference.*.id) {
                     .unresolved_import => {
                         comptime assert(@TypeOf(declaration_reference.*.*) == GlobalDeclaration);
-                        const unresolved_import: *UnresolvedImport = declaration_reference.*.get_payload(.unresolved_import);
-                        const unresolved_import_index =  thread.unresolved_imports.get_index(unresolved_import);
+                        const import: *Import = declaration_reference.*.get_payload(.unresolved_import);
+                        assert(!import.resolved);
                         resolved = false;
+                        const import_index = for (file.imports.slice(), 0..) |existing_import, i| {
+                            if (import == existing_import) break i;
+                        } else unreachable;
                         lazy_expression.* = LazyExpression.init(declaration_reference, thread);
-
+                        
                         while (true) {
                             switch (src[parser.i]) {
                                 '.' => {
@@ -318,7 +321,7 @@ const Parser = struct{
                                 else => @panic((src.ptr + parser.i)[0..1]),
                             }
                         }
-
+                        
                         switch (src[parser.i]) {
                             '(' => {
                                 parser.i += 1;
@@ -339,12 +342,12 @@ const Parser = struct{
                                     .callable = &lazy_expression.value,
                                 });
                                 _ = analyzer.current_basic_block.instructions.append(&call.instruction);
-                                _ = thread.pending_values_per_file.get(@enumFromInt(unresolved_import_index)).append(&call.instruction.value);
+
+                                _ = file.values_per_import.get(@enumFromInt(import_index)).append(&call.instruction.value);
                                 return &call.instruction.value;
                             },
                             else => @panic((src.ptr + parser.i)[0..1]),
                         }
-                        unreachable;
                     },
                     else => |t| @panic(@tagName(t)),
                 }
@@ -542,7 +545,7 @@ const GlobalDeclaration = struct {
         .function_definition = Function,
         .function_declaration = Function.Declaration,
         .file = File,
-        .unresolved_import = UnresolvedImport,
+        .unresolved_import = Import,
     });
 
     fn get_payload(global_declaration: *GlobalDeclaration, comptime id: Id) *id_to_global_declaration_map.get(id) {
@@ -635,9 +638,11 @@ const Return = struct{
     const Index = PinnedArray(Call).Index;
 };
 
-const UnresolvedImport = struct {
+const Import = struct {
     global_declaration: GlobalDeclaration,
     hash: u32,
+    resolved: bool = false,
+    files: PinnedArray(*File) = .{},
 };
 
 const Thread = struct{
@@ -648,14 +653,14 @@ const Thread = struct{
     constant_ints: PinnedArray(ConstantInt) = .{},
     basic_blocks: PinnedArray(BasicBlock) = .{},
     task_system: TaskSystem = .{},
-    analyzed_file_count: u32 = 0,
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
-    pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
+    // pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
     calls: PinnedArray(Call) = .{},
     returns: PinnedArray(Return) = .{},
     lazy_expressions: PinnedArray(LazyExpression) = .{},
-    unresolved_imports: PinnedArray(UnresolvedImport) = .{},
-    resolved_file_count: u32 = 0,
+    imports: PinnedArray(Import) = .{},
+    analyzed_file_count: u32 = 0,
+    assigned_file_count: u32 = 0,
     llvm: struct {
         context: *LLVM.Context,
         module: *LLVM.Module,
@@ -716,11 +721,12 @@ const Job = packed struct(u64) {
     const Id = enum(u8){
         analyze_file,
         notify_file_resolved,
-        analysis_resolution,
+        notify_analysis_complete,
         llvm_generate_ir,
         llvm_notify_ir_done,
         llvm_optimize,
         llvm_emit_object,
+        llvm_notify_object_done,
     };
 };
 
@@ -793,6 +799,14 @@ const File = struct{
     state: State = .queued,
     thread: u32 = 0,
     interested_threads: PinnedArray(u32) = .{},
+    interested_files: PinnedArray(*File) = .{},
+    imports: PinnedArray(*Import) = .{},
+    values_per_import: PinnedArray(PinnedArray(*Value)) = .{},
+    resolved_import_count: u32 = 0,
+
+    pub fn get_index(file: *File) u32 {
+        return instance.files.get_index(file);
+    }
 
     pub fn get_directory_path(file: *const File) []const u8 {
         return std.fs.path.dirname(file.path) orelse unreachable;
@@ -929,11 +943,14 @@ const Unit = struct {
 
 fn control_thread() void {
     var last_assigned_thread_index: u32 = 1;
+    var objects = PinnedArray([]const u8){};
     while (true) {
+        var total_pending_tasks: u64 = 0;
         for (instance.threads, 0..) |*thread, i| {
             const worker_pending_tasks = thread.task_system.job.to_do - thread.task_system.job.completed;
             const control_pending_tasks = thread.task_system.ask.to_do - thread.task_system.ask.completed;
             const pending_tasks = worker_pending_tasks + control_pending_tasks;
+            total_pending_tasks += pending_tasks;
 
             if (control_pending_tasks > 0) {
                 const jobs_to_do = thread.task_system.ask.entries[thread.task_system.ask.completed .. thread.task_system.ask.to_do];
@@ -942,6 +959,7 @@ fn control_thread() void {
                         .analyze_file => {
                             last_assigned_thread_index += 1;
                             const analyze_file_path_hash = job.offset;
+                            const interested_file_index = job.count;
                             for (instance.file_paths.slice()) |file_path_hash| {
                                 if (analyze_file_path_hash == file_path_hash) {
                                     exit(1);
@@ -952,7 +970,9 @@ fn control_thread() void {
                                 const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
                                 const interested_thread_index: u32 = @intCast(i);
                                 const file_index = add_file(file_absolute_path, &.{interested_thread_index});
+                                _ = instance.files.get(file_index).interested_files.append(&instance.files.pointer[interested_file_index]);
                                 const assigned_thread = &instance.threads[thread_index];
+
                                 assigned_thread.task_system.program_state = .analysis;
                                 assigned_thread.add_thread_work(Job{
                                     .offset = @intFromEnum(file_index),
@@ -961,16 +981,21 @@ fn control_thread() void {
                             }
                         },
                         .notify_file_resolved => {
-                            notify_received = true;
                             const file_index = job.offset;
                             const thread_index = job.count;
                             const destination_thread = &instance.threads[thread_index];
                             const file = instance.files.get(@enumFromInt(file_index));
                             const file_path_hash = hash_bytes(file.path);
+
                             destination_thread.add_thread_work(.{
                                 .id = .notify_file_resolved,
                                 .count = @intCast(file_index),
                                 .offset = file_path_hash,
+                            });
+                        },
+                        .notify_analysis_complete => {
+                            thread.add_thread_work(.{
+                                .id = .llvm_generate_ir,
                             });
                         },
                         .llvm_notify_ir_done => {
@@ -978,46 +1003,20 @@ fn control_thread() void {
                                 .id = .llvm_emit_object,
                             });
                         },
+                        .llvm_notify_object_done => {
+                            const object_name = thread.llvm.object.?;
+                            _ = objects.append(object_name);
+                        },
                         else => |t| @panic(@tagName(t)),
                     }
                 }
 
                 thread.task_system.ask.completed += control_pending_tasks;
-                if (notify_received) {
-                    notify_processed = true;
-                }
             }
+        }
 
-            if (pending_tasks == 0) {
-                switch (thread.task_system.program_state) {
-                    .none => {
-                        assert(thread.task_system.state == .idle);
-                    },
-                    .analysis => {
-                        assert(thread.task_system.state == .running);
-                        thread.task_system.program_state = .analysis_resolution;
-
-                        thread.add_thread_work(Job{
-                            .id = .analysis_resolution,
-                        });
-                    },
-                    .analysis_resolution => {
-                        assert(thread.task_system.state == .running);
-                        thread.task_system.program_state = .llvm_generate_ir;
-                        thread.add_thread_work(Job{
-                            .id = .llvm_generate_ir,
-                        });
-                    },
-                    .llvm_generate_ir => {
-                        assert(thread.task_system.state == .running);
-                        thread.task_system.program_state = .llvm_emit_object;
-                        thread.add_thread_work(Job{
-                            .id = .llvm_emit_object,
-                        });
-                    },
-                    .llvm_emit_object => {},
-                }
-            }
+        if (total_pending_tasks == 0) {
+            break;
         }
     }
 }
@@ -1545,10 +1544,10 @@ const cache_line_size = switch (builtin.os.tag) {
 var cpu_count_buffer = [1]u32{0} ** @divExact(cache_line_size, @sizeOf(u32));
 
 const address_space = 0;
-var notify_registered = false;
-var notify_received = false;
-var notify_processed = false;
-var file_analyzed = false;
+
+fn try_end_analyzing_file(file: *File) void {
+    _ = file; // autofix
+}
 
 fn worker_thread(thread_index: u32, cpu_count: *u32) void {
     while (true) {
@@ -1574,130 +1573,116 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
             assert(thread.task_system.program_state != .none);
             assert(thread.task_system.state != .idle);
             const jobs = thread.task_system.job.entries[completed..to_do];
+
             for (jobs) |job| {
                 switch (job.id) {
                     .analyze_file => {
+                        thread.assigned_file_count += 1;
                         const file_index = job.offset;
                         const file = &instance.files.slice()[file_index];
                         file.state = .analyzing;
                         file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
                         file.thread = thread_index;
                         analyze_file(thread, file_index);
-                        file_analyzed = true;
-
-                        thread.analyzed_file_count += 1;
-
-                        for (file.interested_threads.slice()) |ti| {
-                            thread.add_control_work(.{
-                                .id = .notify_file_resolved,
-                                .offset = file_index,
-                                .count = @intCast(ti),
-                            });
-                            notify_registered = true;
-                        }
                     },
                     .notify_file_resolved => {
-                        const file_path_hash = job.offset;
                         const file_index = job.count;
                         const file = &instance.files.pointer[file_index];
+
                         if (&instance.threads[file.thread] == thread) {
                             exit_with_error("Threads match!");
                         } else {
-                            const pending_file_index = for (thread.unresolved_imports.slice(), 0..) |unresolved_import, i| {
-                                const pending_file_hash = unresolved_import.hash;
-                                if (file_path_hash == pending_file_hash) {
-                                    break i;
-                                }
-                            } else {
-                                exit(1);
-                            };
+                            const file_path_hash = job.offset;
+                            for (file.interested_files.slice()) |interested_file| {
+                                if (interested_file.thread == thread.get_index()) {
+                                    assert(interested_file.resolved_import_count != interested_file.imports.length);
+                                    for (interested_file.imports.slice(), 0..) |import, i| {
+                                        if (import.hash == file_path_hash) {
+                                            const values_per_import = interested_file.values_per_import.get(@enumFromInt(i));
+                                            for (values_per_import.slice()) |value| {
+                                                assert(value.sema.thread == thread.get_index());
+                                                assert(!value.sema.resolved);
+                                                if (!value.sema.resolved) {
+                                                    switch (value.sema.id) {
+                                                        .instruction => {
+                                                            const instruction = value.get_payload(.instruction);
+                                                            switch (instruction.id) {
+                                                                .call => {
+                                                                    const call: *Call = instruction.get_payload(.call);
+                                                                    assert(!call.callable.sema.resolved);
 
-                            const file_pending_values = thread.pending_values_per_file.get(@enumFromInt(pending_file_index));
-                            for (file_pending_values.slice()) |value| {
-                                assert(value.sema.thread == thread.get_index());
-                                assert(!value.sema.resolved);
-                                if (!value.sema.resolved) {
-                                    switch (value.sema.id) {
-                                        .instruction => {
-                                            const instruction = value.get_payload(.instruction);
-                                            switch (instruction.id) {
-                                                .call => {
-                                                    const call: *Call = instruction.get_payload(.call);
-                                                    assert(!call.callable.sema.resolved);
+                                                                    switch (call.callable.sema.id) {
+                                                                        .lazy_expression => {
+                                                                            const lazy_expression = call.callable.get_payload(.lazy_expression);
+                                                                            const names = lazy_expression.names();
+                                                                            assert(names.len > 0);
 
-                                                    switch (call.callable.sema.id) {
-                                                        .lazy_expression => {
-                                                            const lazy_expression = call.callable.get_payload(.lazy_expression);
-                                                            const names = lazy_expression.names();
-                                                            assert(names.len > 0);
+                                                                            switch (lazy_expression.u) {
+                                                                                .static => |*static| {
+                                                                                    _ = static; // autofix
+                                                                                },
+                                                                                .dynamic => unreachable,
+                                                                            }
 
-                                                            switch (lazy_expression.u) {
-                                                                .static => |*static| {
-                                                                    _ = static; // autofix
-                                                                },
-                                                                .dynamic => unreachable,
-                                                            }
+                                                                            const declaration_reference = lazy_expression.u.static.outsider;
+                                                                            switch (declaration_reference.*.id) {
+                                                                                .file => {
+                                                                                    assert(names.len == 1);
+                                                                                    const file_declaration = declaration_reference.*.get_payload(.file);
+                                                                                    assert(file_declaration == file);
 
-                                                            const declaration_reference = lazy_expression.u.static.outsider;
-                                                            switch (declaration_reference.*.id) {
-                                                                .file => {
-                                                                    assert(names.len == 1);
-                                                                    const file_declaration = declaration_reference.*.get_payload(.file);
-                                                                    assert(file_declaration == file);
+                                                                                    if (file.scope.declarations.get(names[0])) |callable_declaration| switch (callable_declaration.id) {
+                                                                                        .function_definition => {
+                                                                                            const function_definition = callable_declaration.get_payload(.function_definition);
+                                                                                            // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
+                                                                                            const external_fn = thread.external_functions.append(function_definition.declaration);
+                                                                                            external_fn.symbol.attributes.@"export" = false;
+                                                                                            external_fn.symbol.attributes.@"extern" = true;
+                                                                                            external_fn.value.sema.thread = thread.get_index();
 
-                                                                    if (file.scope.declarations.get(names[0])) |callable_declaration| switch (callable_declaration.id) {
-                                                                        .function_definition => {
-                                                                            const function_definition = callable_declaration.get_payload(.function_definition);
-                                                                            // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
-                                                                            const external_fn = thread.external_functions.append(function_definition.declaration);
-                                                                            external_fn.symbol.attributes.@"export" = false;
-                                                                            external_fn.symbol.attributes.@"extern" = true;
-                                                                            external_fn.value.sema.thread = thread.get_index();
-
-                                                                            call.callable = &external_fn.value;
-                                                                            value.sema.resolved = true;
+                                                                                            call.callable = &external_fn.value;
+                                                                                            value.sema.resolved = true;
+                                                                                        },
+                                                                                        else => |t| @panic(@tagName(t)),
+                                                                                        } else exit(1);
+                                                                                    },
+                                                                                    else => |t| @panic(@tagName(t)),
+                                                                            }
                                                                         },
                                                                         else => |t| @panic(@tagName(t)),
-                                                                    } else exit(1);
+                                                                    }
+                                                                },
+                                                                else => |t| @panic(@tagName(t)),
+                                                            }
+                                                        },
+                                                        .lazy_expression => {
+                                                            const lazy_expression = value.get_payload(.lazy_expression);
+                                                            assert(lazy_expression.u == .static);
+                                                            for (lazy_expression.u.static.names) |n| {
+                                                                assert(n == 0);
+                                                            }
+                                                            const declaration_reference = lazy_expression.u.static.outsider;
+
+                                                            switch (declaration_reference.*.id) {
+                                                                .unresolved_import => {
+                                                                    declaration_reference.* = &file.global_declaration;
+                                                                    value.sema.resolved = true;
                                                                 },
                                                                 else => |t| @panic(@tagName(t)),
                                                             }
                                                         },
                                                         else => |t| @panic(@tagName(t)),
                                                     }
-                                                },
-                                                else => |t| @panic(@tagName(t)),
+                                                }
                                             }
-                                        },
-                                        .lazy_expression => {
-                                            const lazy_expression = value.get_payload(.lazy_expression);
-                                            assert(lazy_expression.u == .static);
-                                            for (lazy_expression.u.static.names) |n| {
-                                                assert(n == 0);
-                                            }
-                                            const declaration_reference = lazy_expression.u.static.outsider;
-
-                                            switch (declaration_reference.*.id) {
-                                                .unresolved_import => {
-                                                    declaration_reference.* = &file.global_declaration;
-                                                    value.sema.resolved = true;
-                                                },
-                                                else => |t| @panic(@tagName(t)),
-                                            }
-                                        },
-                                        else => |t| @panic(@tagName(t)),
+                                        }
                                     }
+
+                                    interested_file.resolved_import_count += 1;
+
+                                    try_resolve_file(thread, interested_file);
                                 }
                             }
-
-                            thread.resolved_file_count += 1;
-                        }
-                    },
-                    .analysis_resolution => {
-                        if (thread.unresolved_imports.length - thread.resolved_file_count > 0) {
-                            assert(jobs.len == 1);
-                            std.debug.print("Unresolved imports: {}. resolved_file_count: {}\n", .{thread.unresolved_imports.length, thread.resolved_file_count});
-                            exit(1);
                         }
                     },
                     .llvm_generate_ir => {
@@ -1792,7 +1777,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 .attributes = attributes,
                                 .target_machine = target_machine,
                             };
-                            const debug_info = true;
+                            const debug_info = false;
 
                             for (thread.external_functions.slice()) |*nat_function| {
                                 _ = llvm_get_function(thread, nat_function, true);
@@ -1841,7 +1826,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                     llvm_file.builder.finalizeSubprogram(subprogram, function);
                                 }
 
-                                const verify_function = true;
+                                const verify_function = false;
                                 if (verify_function) {
                                     var message: []const u8 = undefined;
                                     const verification_success = function.verify(&message.ptr, &message.len);
@@ -1891,6 +1876,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         if (!result) {
                             @panic("can't generate machine code");
                         }
+
+                        thread.add_control_work(.{
+                            .id = .llvm_notify_object_done,
+                        });
                     },
                     else => |t| @panic(@tagName(t)),
                 }
@@ -2000,7 +1989,7 @@ fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, overr
         };
         const function = thread.llvm.module.createFunction(function_type, linkage, address_space, function_name.ptr, function_name.len);
 
-        const debug_info = true;
+        const debug_info = false;
         if (debug_info) {
             const file_index = nat_function.file;
             const llvm_file = llvm_get_file(thread, file_index);
@@ -2355,41 +2344,72 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     if (!has_right_extension) {
                         exit(1);
                     }
+
                     const filename_without_extension = filename[0..filename.len - ".nat".len];
                     const filename_without_extension_hash = hash_bytes(filename_without_extension);
-
                     const directory_path = file.get_directory_path();
                     const directory = std.fs.openDirAbsolute(directory_path, .{}) catch unreachable;
                     const file_path = library.realpath(thread.arena, directory, string_literal) catch unreachable;
                     const file_path_hash = intern_identifier(&thread.identifiers, file_path);
-
-                    for (thread.unresolved_imports.slice()) |unresolved_import| {
-                        const pending_file_hash = unresolved_import.hash;
+                    
+                    for (thread.imports.slice()) |import| {
+                        const pending_file_hash = import.hash;
                         if (pending_file_hash == file_path_hash) {
                             exit(1);
                         }
                     } else {
-                        thread.add_control_work(.{
-                            .id = .analyze_file,
-                            .offset = file_path_hash,
-                        });
-                        const unresolved_import = thread.unresolved_imports.append(.{
-                            .hash = file_path_hash,
+                        const import = thread.imports.append(.{
                             .global_declaration = .{
                                 .id = .unresolved_import,
                             },
-                            });
-                        file.scope.declarations.put_no_clobber(filename_without_extension_hash, &unresolved_import.global_declaration);
-                        const ptr = file.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable;
-                        const list = thread.pending_values_per_file.append(.{});
-                        const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(ptr, thread));
-                        _ = list.append(&lazy_expression.value);
+                            .hash = file_path_hash,
+                        });
+                        _ = import.files.append(file);
+                        _ = file.imports.append(import);
+                        file.scope.declarations.put_no_clobber(filename_without_extension_hash, &import.global_declaration);
+                        const global_declaration_reference = file.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable;
+                        const import_values = file.values_per_import.append(.{});
+                        const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(global_declaration_reference, thread));
+                        _ = import_values.append(&lazy_expression.value);
+
+                        thread.add_control_work(.{
+                            .id = .analyze_file,
+                            .offset = file_path_hash,
+                            .count = @intCast(file_index),
+                        });
                     }
                 } else {
                     exit(1);
                 }
             },
             else => exit(1),
+        }
+    }
+
+    try_resolve_file(thread, file);
+}
+
+fn try_resolve_file(thread: *Thread, file: *File) void {
+    if (file.imports.length == file.resolved_import_count) {
+        thread.analyzed_file_count += 1;
+
+        if (thread.analyzed_file_count == thread.assigned_file_count) {
+            // TODO: should this be atomic?
+            if (@atomicLoad(u64, &thread.task_system.job.to_do, .seq_cst) == thread.task_system.job.completed + 1) {
+                thread.add_control_work(.{
+                    .id = .notify_analysis_complete,
+                });
+            } else {
+                unreachable;
+            }
+        }
+
+        for (file.interested_threads.slice()) |ti| {
+            thread.add_control_work(.{
+                .id = .notify_file_resolved,
+                .offset = file.get_index(),
+                .count = @intCast(ti),
+            });
         }
     }
 }
@@ -3579,7 +3599,6 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
             compiler.write("\nPANIC: ");
             compiler.write(message);
             compiler.write("\n");
-            std.debug.print("registered: {}. received: {}. processed: {}\n", .{notify_registered, notify_received, notify_processed});
             exit(1);
         },
     }
