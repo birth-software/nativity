@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) !void {
     const enable_editor = false;
     const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse (!is_ci and enable_editor);
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
+    const sanitize = b.option(bool, "sanitize", "This option enables sanitizers for the compiler") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
         .windows => true,
@@ -121,6 +122,9 @@ pub fn build(b: *std.Build) !void {
     compiler.root_module.omit_frame_pointer = false;
     compiler.root_module.error_tracing = print_stack_trace;
     compiler.want_lto = false;
+    if (sanitize) {
+        compiler.root_module.sanitize_thread = true;
+    }
 
     compiler.linkLibC();
 
