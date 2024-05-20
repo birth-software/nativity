@@ -1,6 +1,6 @@
-#!/bin/sh
+#!/bin/bash
 
-set -e 
+set -ex
 
 i=$((0))
 while ((i < 1000)); do
