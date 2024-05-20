@@ -476,11 +476,11 @@ pub fn build(b: *std.Build) !void {
                     const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
                     const cxx_include_arch = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-pc-linux-gnu" });
                     compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
-                    compiler.addIncludePath(.{ .cwd_relative = "../../local/llvm18-debug/include" });
+                    compiler.addIncludePath(.{ .cwd_relative = if (use_debug) "../../local/llvm18-debug/include" else "../../local/llvm18-release/include" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
                     compiler.addIncludePath(.{ .cwd_relative = cxx_include_arch });
-                    compiler.addLibraryPath(.{ .cwd_relative = "../../local/llvm18-debug/lib" });
+                    compiler.addLibraryPath(.{ .cwd_relative = if (use_debug) "../../local/llvm18-debug/lib" else "../../local/llvm18-release/lib" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64" });
                 }
             },
