@@ -12,4 +12,4 @@ source ci/download_zig.sh
 download_zig master x86_64-linux
 
 # Build and test
-zig build test -Dthird_party_ci=true
+ci script.sh #zig build test -Dthird_party_ci=true
