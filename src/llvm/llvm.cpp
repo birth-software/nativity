@@ -355,6 +355,12 @@ extern "C" Type* NativityLLVMValueGetType(Value* value)
     return type;
 }
 
+extern "C" LLVMContext* NativityLLVMValueGetContext(Value& value)
+{
+    auto& context = value.getContext();
+    return &context;
+}
+
 extern "C" PoisonValue* NativityLLVMGetPoisonValue(Type* type)
 {
     auto* poison_value = PoisonValue::get(type);

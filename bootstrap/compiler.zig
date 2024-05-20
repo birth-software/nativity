@@ -11,9 +11,9 @@ const byte_equal = library.byte_equal;
 
 fn exit(exit_code: u8) noreturn {
     @setCold(true);
-    if (builtin.mode == .Debug) {
+    // if (builtin.mode == .Debug) {
         if (exit_code != 0) @breakpoint();
-    }
+    // }
     std.posix.exit(exit_code);
 }
 
@@ -1634,11 +1634,15 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                                                     if (file.scope.declarations.get(names[0])) |callable_declaration| switch (callable_declaration.id) {
                                                                                         .function_definition => {
                                                                                             const function_definition = callable_declaration.get_payload(.function_definition);
+                                                                                            assert(function_definition.declaration.value.sema.resolved);
+                                                                                            assert(function_definition.declaration.value.sema.resolved);
+                                                                                            assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
                                                                                             // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
                                                                                             const external_fn = thread.external_functions.append(function_definition.declaration);
                                                                                             external_fn.symbol.attributes.@"export" = false;
                                                                                             external_fn.symbol.attributes.@"extern" = true;
                                                                                             external_fn.value.sema.thread = thread.get_index();
+                                                                                            external_fn.value.llvm = null;
 
                                                                                             call.callable = &external_fn.value;
                                                                                             value.sema.resolved = true;
@@ -1791,7 +1795,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 const function = nat_function.declaration.value.llvm.?.toFunction() orelse unreachable;
                                 const nat_entry_basic_block = thread.basic_blocks.get(nat_function.entry_block);
                                 assert(nat_entry_basic_block.predecessors.length == 0);
-                                const entry_block_name = "entry_block_name";
+                                const entry_block_name = "entry";
                                 const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
                                 thread.llvm.builder.setInsertPoint(entry_block);
 
@@ -1893,7 +1897,22 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 }
 
 fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
-    if (value.llvm) |llvm| return llvm else {
+    if (value.llvm) |llvm| {
+        assert(value.sema.thread == thread.get_index());
+        if (llvm.getContext() != thread.llvm.context) {
+            std.debug.print("Value was assigned to thread #{} ", .{thread.get_index()});
+            const thread_index = for (instance.threads, 0..) |*t, i| {
+                if (t.functions.length > 0) {
+                    if (t.llvm.context == llvm.getContext()) {
+                        break i;
+                    }
+                }
+            } else unreachable;
+            std.debug.print("but context from which it was generated belongs to thread #{}\n", .{thread_index});
+            @panic("internal error");
+        }
+        return llvm;
+    } else {
         const value_id = value.sema.id;
         const llvm_value: *LLVM.Value = switch (value_id) {
             .constant_int => b: {
@@ -1912,15 +1931,11 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
 }
 
 fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
-    var store = true;
     if (ty.llvm) |llvm| {
-        if (llvm.getContext() == thread.llvm.context) {
-            return llvm;
-        }
-        store = false;
-    }
-
-    {
+        assert(ty.sema.thread == thread.get_index());
+        assert(llvm.getContext() == thread.llvm.context);
+        return llvm;
+    } else {
         const llvm_type: *LLVM.Type = switch (ty.sema.id) {
             .integer => b: {
                 const int_ty = ty.get_payload(.integer);
@@ -1929,9 +1944,6 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
             },
             else => |t| @panic(@tagName(t)),
         };
-        if (store) {
-            ty.llvm = llvm_type;
-        }
         return llvm_type;
     }
 }
@@ -2191,6 +2203,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     }
 
                     function.declaration.symbol.name = parser.parse_identifier(thread, src);
+                    std.debug.print("Function {s} in thread #{}\n", .{thread.identifiers.get( function.declaration.symbol.name).?, thread.get_index()});
 
                     parser.skip_space(src);
 
@@ -3117,6 +3130,7 @@ pub const LLVM = struct {
     pub const Value = opaque {
         const setName = bindings.NativityLLVMValueSetName;
         const getType = bindings.NativityLLVMValueGetType;
+        const getContext = bindings.NativityLLVMValueGetContext;
         const toConstant = bindings.NativityLLVMValueToConstant;
         const toFunction = bindings.NativityLLVMValueToFunction;
         const toAlloca = bindings.NativityLLVMValueToAlloca;

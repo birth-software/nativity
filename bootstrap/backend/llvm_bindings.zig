@@ -49,6 +49,7 @@ pub extern fn NativityLLVMBuilderGetInsertBlock(builder: *LLVM.Builder) *LLVM.Va
 pub extern fn NativityLLVMBuilderSetCurrentDebugLocation(builder: *LLVM.Builder, context: *LLVM.Context, line: c_uint, column: c_uint, scope: *LLVM.DebugInfo.Scope, function: *LLVM.Value.Constant.Function) void;
 pub extern fn NativityLLVMValueSetName(value: *LLVM.Value, name_ptr: [*]const u8, name_len: usize) void;
 pub extern fn NativityLLVMValueGetType(value: *LLVM.Value) *LLVM.Type;
+pub extern fn NativityLLVMValueGetContext(value: *LLVM.Value) *LLVM.Context;
 pub extern fn NativityLLVMArgumentGetIndex(argument: *LLVM.Value.Argument) c_uint;
 pub extern fn NativityLLVMFunctionGetArguments(function: *LLVM.Value.Constant.Function, argument_ptr: [*]*LLVM.Value.Argument, argument_len: *usize) void;
 pub extern fn NativityLLVMFunctionGetArgument(function: *LLVM.Value.Constant.Function, index: c_uint) *LLVM.Value.Argument;
