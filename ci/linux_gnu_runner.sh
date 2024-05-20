@@ -4,8 +4,9 @@ set -ex
 # Install LLVM and system dependencies
 wget https://apt.llvm.org/llvm.sh
 chmod +x llvm.sh
-sudo ./llvm.sh 17 all
-sudo apt install liblld-17-dev libclang-17-dev liblld-17 ninja-build cmake -y
+MY_LLVM_VERSION=18
+sudo ./llvm.sh $MY_LLVM_VERSION all
+sudo apt install liblld-$MY_LLVM_VERSION-dev libclang-$MY_LLVM_VERSION-dev liblld-$MY_LLVM_VERSION ninja-build cmake -y
 
 # Install Zig
 source ci/download_zig.sh
