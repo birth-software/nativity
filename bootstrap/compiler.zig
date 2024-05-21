@@ -955,8 +955,9 @@ const Unit = struct {
 
 fn control_thread(unit: *Unit) void {
     var last_assigned_thread_index: u32 = 1;
+    var first_ir_done = false;
     while (true) {
-        var total_is_done: bool = true;
+        var total_is_done: bool = first_ir_done;
         for (instance.threads, 0..) |*thread, i| {
             const jobs_to_do = thread.task_system.job.to_do;
             const jobs_completed = thread.task_system.job.completed;
@@ -974,7 +975,6 @@ fn control_thread(unit: *Unit) void {
                 for (thread.task_system.ask.entries[asks_completed .. asks_to_do]) |job| {
                     switch (job.id) {
                         .analyze_file => {
-                            last_assigned_thread_index += 1;
                             const analyze_file_path_hash = job.offset;
                             const interested_file_index = job.count;
                             for (instance.file_paths.slice()) |file_path_hash| {
@@ -982,8 +982,8 @@ fn control_thread(unit: *Unit) void {
                                     exit(1);
                                 }
                             } else {
-                                last_assigned_thread_index += 1;
                                 const thread_index = last_assigned_thread_index % instance.threads.len;
+                                last_assigned_thread_index += 1;
                                 const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
                                 const interested_thread_index: u32 = @intCast(i);
                                 const file_index = add_file(file_absolute_path, &.{interested_thread_index});
@@ -1021,6 +1021,7 @@ fn control_thread(unit: *Unit) void {
                             });
                         },
                         .llvm_notify_object_done => {
+                            first_ir_done = true;
                         },
                         else => |t| @panic(@tagName(t)),
                     }
@@ -1042,6 +1043,7 @@ fn control_thread(unit: *Unit) void {
         }
     }
 
+    assert(objects.length > 0);
 
     link(.{
         .output_file_path = unit.descriptor.executable_path,
@@ -1216,6 +1218,7 @@ pub fn main() void {
         .executable_directory = executable_directory,
     };
     const thread_count = std.Thread.getCpuCount() catch unreachable;
+    std.debug.print("Thread count: {}\n", .{thread_count});
     const cpu_count = &cpu_count_buffer[0];
     // cpu_count.* = @intCast(thread_count - 2);
     instance.threads = instance.arena.new_array(Thread, thread_count - 1) catch unreachable;
@@ -1253,133 +1256,6 @@ pub fn main() void {
     } else {
         exit_with_error("Unrecognized command");
     }
-
-    // const first_file_relative_path = "retest/standalone/first/main.nat";
-    // const first_file_absolute_path = library.realpath(instance.arena, std.fs.cwd(), first_file_relative_path) catch unreachable;
-    // const new_file_index = add_file(first_file_absolute_path, &.{});
-    // var last_assigned_thread_index: u32 = 0;
-    // instance.threads[last_assigned_thread_index].add_thread_work(Job{
-    //     .offset = @intFromEnum(new_file_index),
-    //     .id = .analyze_file,
-    // });
-    //
-    // while (true) {
-    //     var worker_pending_tasks: u64 = 0;
-    //     var control_pending_tasks: u64 = 0;
-    //     for (instance.threads) |*thread| {
-    //         worker_pending_tasks += thread.task_system.job.to_do - thread.task_system.job.completed;
-    //         control_pending_tasks += thread.task_system.ask.to_do - thread.task_system.ask.completed;
-    //     }
-    //
-    //     const pending_tasks = worker_pending_tasks + control_pending_tasks;
-    //     if (pending_tasks == 0) {
-    //         break;
-    //     }
-    //
-    //     if (control_pending_tasks > 0) {
-    //         for (instance.threads, 0..) |*thread, i| {
-    //             const control_pending = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-    //             if (control_pending != 0) {
-    //                 const jobs_to_do = thread.task_system.ask.entries[thread.task_system.ask.completed .. thread.task_system.ask.to_do];
-    //
-    //                 for (jobs_to_do) |job| {
-    //                     switch (job.id) {
-    //                         .analyze_file => {
-    //                             last_assigned_thread_index += 1;
-    //                             const analyze_file_path_hash = job.offset;
-    //                             for (instance.file_paths.slice()) |file_path_hash| {
-    //                                 if (analyze_file_path_hash == file_path_hash) {
-    //                                     exit(1);
-    //                                 }
-    //                             } else {
-    //                                 last_assigned_thread_index += 1;
-    //                                 const thread_index = last_assigned_thread_index % instance.threads.len;
-    //                                 const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
-    //                                 const interested_thread_index: u32 = @intCast(i);
-    //                                 const file_index = add_file(file_absolute_path, &.{interested_thread_index});
-    //                                 const assigned_thread = &instance.threads[thread_index];
-    //                                 assigned_thread.add_thread_work(Job{
-    //                                     .offset = @intFromEnum(file_index),
-    //                                     .id = .analyze_file,
-    //                                 });
-    //                             }
-    //                         },
-    //                         .notify_file_resolved => {
-    //                             const file_index = job.offset;
-    //                             const thread_index = job.count;
-    //                             const destination_thread = &instance.threads[thread_index];
-    //                             const file = instance.files.get(@enumFromInt(file_index));
-    //                             const file_path_hash = hash_bytes(file.path);
-    //                             destination_thread.add_thread_work(.{
-    //                                 .id = .notify_file_resolved,
-    //                                 .count = @intCast(file_index),
-    //                                 .offset = file_path_hash,
-    //                             });
-    //                         },
-    //                         else => |t| @panic(@tagName(t)),
-    //                     }
-    //                 }
-    //
-    //                 thread.task_system.ask.completed += jobs_to_do.len;
-    //             }
-    //         }
-    //     }
-    // }
-    //
-    // // TODO: Prune
-    // if (do_codegen) {
-    //     for (instance.threads) |*thread| {
-    //         thread.add_thread_work(Job{
-    //             .id = switch (codegen_backend) {
-    //                 .llvm => .llvm_generate_ir,
-    //             },
-    //         });
-    //     }
-    //
-    //     while (true) {
-    //         var asks_to_do: u64 = 0;
-    //         var jobs_to_do: u64 = 0;
-    //         for (instance.threads) |*thread| {
-    //             jobs_to_do += thread.task_system.job.to_do - thread.task_system.job.completed;
-    //             asks_to_do = thread.task_system.ask.to_do - thread.task_system.ask.completed;
-    //         }
-    //
-    //         if (asks_to_do + jobs_to_do == 0) {
-    //             break;
-    //         }
-    //
-    //         // Check if there is any request
-    //         for (instance.threads) |*thread| {
-    //             for (thread.task_system.ask.entries[thread.task_system.ask.completed..thread.task_system.ask.to_do]) |entry| {
-    //                 switch (entry.id) {
-    //                     else => |t| @panic(@tagName(t)),
-    //                 }
-    //
-    //                 thread.task_system.ask.completed += 1;
-    //             }
-    //         }
-    //     }
-    //
-    //     var objects = PinnedArray([]const u8) {};
-    //     for (instance.threads) |*thread| {
-    //         if (thread.llvm.object) |object| {
-    //             _ = objects.append(object);
-    //         }
-    //     }
-    //
-    //     var libraries = PinnedArray([]const u8){};
-    //
-    //     link(.{
-    //         .output_file_path = "module",
-    //         .extra_arguments = &.{},
-    //         .objects = objects.slice(),
-    //         .link_libc = true,
-    //         .link_libcpp = false,
-    //         .libraries = libraries.slice(),
-    //     }) catch unreachable;
-    // }
-
-    // while (true) {}
 }
 
 const LinkerOptions = struct {
