@@ -8,6 +8,7 @@ const PinnedArray = library.PinnedArray;
 const PinnedHashMap = library.PinnedHashMap;
 const hash_bytes = library.my_hash;
 const byte_equal = library.byte_equal;
+const Atomic = std.atomic.Value;
 
 fn exit(exit_code: u8) noreturn {
     @setCold(true);
@@ -692,13 +693,31 @@ const Thread = struct{
     handle: std.Thread = undefined,
 
     fn add_thread_work(thread: *Thread, job: Job) void {
-        thread.task_system.state = .running;
-        assert(thread.task_system.program_state != .none);
+        @atomicStore(@TypeOf(thread.task_system.state), &thread.task_system.state, .running, .seq_cst);
+        assert(@atomicLoad(@TypeOf(thread.task_system.program_state), &thread.task_system.program_state, .seq_cst) != .none);
         thread.task_system.job.queue_job(job);
     }
 
     fn add_control_work(thread: *Thread, job: Job) void {
         thread.task_system.ask.queue_job(job);
+    }
+
+    fn get_worker_job(thread: *Thread) ?Job {
+        if (thread.task_system.job.get_next_job()) |job| {
+            // std.debug.print("[WORKER] Thread #{} getting job {s}\n", .{thread.get_index(), @tagName(job.id)});
+            return job;
+        }
+
+        return null;
+    }
+
+    fn get_control_job(thread: *Thread) ?Job {
+        if (thread.task_system.ask.get_next_job()) |job| {
+            // std.debug.print("[CONTROL] Getting job {s} from thread #{}\n", .{@tagName(job.id), thread.get_index()});
+            return job;
+        }
+
+        return null;
     }
 
     pub fn get_index(thread: *Thread) u16 {
@@ -752,20 +771,62 @@ const TaskSystem = struct{
 };
 
 const JobQueue = struct{
-    entries: [64]Job = [1]Job{@bitCast(@as(u64, 0))} ** 64,
-    to_do: u64 = 0,
-    completed: u64 = 0,
+    entries: [job_entry_count]Job align(cache_line_size) = [1]Job{@bitCast(@as(u64, 0))} ** job_entry_count,
+    queuer: struct {
+        to_do: u64 = 0,
+        next_write: u64 = 0,
+    } = .{},
+    worker: struct {
+        completed: u64 = 0,
+        next_read: u64 = 0,
+    } = .{},
+    reserved: [padding_byte_count]u8 = [1]u8{0} ** padding_byte_count,
+
+    const job_entry_count = 64;
+    const valuable_size = job_entry_count * @sizeOf(Job) + 4 * @sizeOf(u64);
+    const real_size = std.mem.alignForward(usize, valuable_size, cache_line_size);
+    const padding_byte_count = real_size - valuable_size;
+
+    comptime {
+        assert(@sizeOf(JobQueue) % cache_line_size == 0);
+    }
 
     fn queue_job(job_queue: *JobQueue, job: Job) void {
-        const index = job_queue.to_do;
-        job_queue.entries[index] = job;
-        job_queue.to_do += 1;
+        // std.debug.print("[0x{x}] Queueing job '{s}'\n", .{@intFromPtr(job_queue) & 0xfff, @tagName(job.id)});
+        const index = job_queue.queuer.next_write;
+        assert(index + 1 != @atomicLoad(@TypeOf(job_queue.worker.next_read), &job_queue.worker.next_read, .seq_cst));
+        const ptr = &job_queue.entries[index];
+        if (job.id == .analyze_file and job.count == 0 and job.offset == 0) unreachable;
+        // std.debug.print("Before W 0x{x} - 0x{x}\n", .{@intFromPtr(ptr), job.offset});
+        ptr.* = job;
+        // std.debug.print("After W 0x{x}\n", .{@intFromPtr(ptr)});
+        job_queue.queuer.to_do += 1;
+        job_queue.queuer.next_write = index + 1;
+    }
+
+    fn get_next_job(job_queue: *JobQueue) ?Job{
+        const index = job_queue.worker.next_read;
+        const nw = @atomicLoad(@TypeOf(job_queue.queuer.next_write), &job_queue.queuer.next_write, .seq_cst);
+        if (index != nw) {
+            job_queue.worker.next_read += 1;
+            const job = &job_queue.entries[index];
+            // std.debug.print("[0x{x}] Getting job #{} (0x{x} -\n{}\n) (nw: {})\n", .{@intFromPtr(job_queue) & 0xfff, index, @intFromPtr(job), job.*, nw});
+            if (job.id == .analyze_file and job.count == 0 and job.offset == 0) unreachable;
+            return job.*;
+        }
+
+        return null;
+    }
+
+    fn complete_job(job_queue: *JobQueue) void {
+        job_queue.worker.completed += 1;
     }
 };
 
 const Instance = struct{
     files: PinnedArray(File) = .{},
     file_paths: PinnedArray(u32) = .{},
+    file_mutex: std.Thread.Mutex = .{},
     units: PinnedArray(Unit) = .{},
     arena: *Arena = undefined,
     threads: []Thread = undefined,
@@ -837,6 +898,9 @@ const CodegenBackend = union(enum){
 };
 
 fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) File.Index {
+    instance.file_mutex.lock();
+    defer instance.file_mutex.unlock();
+
     const hash = hash_bytes(file_absolute_path);
     const new_file = instance.files.add_one();
     _ = instance.file_paths.append(hash);
@@ -849,7 +913,7 @@ fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) Fil
             .scope = .{
                 .id = .file,
             },
-            },
+        },
         .source_code = &.{},
         .path = file_absolute_path,
     };
@@ -946,6 +1010,7 @@ const Unit = struct {
         instance.threads[0].task_system.program_state = .analysis;
         instance.threads[0].add_thread_work(Job{
             .offset = @intFromEnum(new_file_index),
+            .count = 1,
             .id = .analyze_file,
         });
         control_thread(unit);
@@ -963,76 +1028,73 @@ fn control_thread(unit: *Unit) void {
         total_is_done = first_ir_done;
 
         for (instance.threads, 0..) |*thread, i| {
-            const jobs_to_do = thread.task_system.job.to_do;
-            const jobs_completed = thread.task_system.job.completed;
-            const worker_pending_tasks = jobs_to_do - jobs_completed;
-            const asks_to_do = thread.task_system.ask.to_do;
-            const asks_completed = thread.task_system.ask.completed;
-            const control_pending_tasks = asks_to_do - asks_completed; 
-            const pending_tasks = worker_pending_tasks + control_pending_tasks;
-            _ = pending_tasks; // autofix
+            // INFO: No need to do an atomic load here since it's only this thread writing to the value
+            const program_state = thread.task_system.program_state;
+            total_is_done = total_is_done and if (@intFromEnum(program_state) >= @intFromEnum(TaskSystem.ProgramState.analysis)) program_state == .llvm_finished_object else true;
 
-            // std.debug.print("Is done: {}\n", .{is_done});
-            total_is_done = total_is_done and if (@intFromEnum(thread.task_system.program_state) >= @intFromEnum(TaskSystem.ProgramState.analysis)) thread.task_system.program_state == .llvm_finished_object else true;
+            var previous_job: Job = undefined;
+            while (thread.get_control_job()) |job| {
+                assert(!(previous_job.id == job.id and previous_job.offset == job.offset and previous_job.count == job.count));
+                switch (job.id) {
+                    .analyze_file => {
+                        const analyze_file_path_hash = job.offset;
+                        const interested_file_index = job.count;
+                        // std.debug.print("[CONTROL] Trying to retrieve file path hash (0x{x}) interested file index: {} in thread #{}\n", .{analyze_file_path_hash, interested_file_index, thread.get_index()});
+                        assert(analyze_file_path_hash != 0);
 
-            if (control_pending_tasks > 0) {
-                for (thread.task_system.ask.entries[asks_completed .. asks_to_do]) |job| {
-                    switch (job.id) {
-                        .analyze_file => {
-                            const analyze_file_path_hash = job.offset;
-                            const interested_file_index = job.count;
-                            for (instance.file_paths.slice()) |file_path_hash| {
-                                if (analyze_file_path_hash == file_path_hash) {
-                                    exit(1);
-                                }
-                            } else {
-                                const thread_index = last_assigned_thread_index % instance.threads.len;
-                                last_assigned_thread_index += 1;
-                                const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
-                                const interested_thread_index: u32 = @intCast(i);
-                                const file_index = add_file(file_absolute_path, &.{interested_thread_index});
-                                _ = instance.files.get(file_index).interested_files.append(&instance.files.pointer[interested_file_index]);
-                                const assigned_thread = &instance.threads[thread_index];
-
-                                assigned_thread.task_system.program_state = .analysis;
-                                assigned_thread.add_thread_work(Job{
-                                    .offset = @intFromEnum(file_index),
-                                    .id = .analyze_file,
-                                });
+                        for (instance.file_paths.slice()) |file_path_hash| {
+                            if (analyze_file_path_hash == file_path_hash) {
+                                exit(1);
                             }
-                        },
-                        .notify_file_resolved => {
-                            const file_index = job.offset;
-                            const thread_index = job.count;
-                            const destination_thread = &instance.threads[thread_index];
-                            const file = instance.files.get(@enumFromInt(file_index));
-                            const file_path_hash = hash_bytes(file.path);
+                        } else {
+                            const thread_index = last_assigned_thread_index % instance.threads.len;
+                            last_assigned_thread_index += 1;
+                            const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
+                            const interested_thread_index: u32 = @intCast(i);
+                            const file_index = add_file(file_absolute_path, &.{interested_thread_index});
+                            _ = instance.files.get(file_index).interested_files.append(&instance.files.pointer[interested_file_index]);
+                            const assigned_thread = &instance.threads[thread_index];
 
-                            destination_thread.add_thread_work(.{
-                                .id = .notify_file_resolved,
-                                .count = @intCast(file_index),
-                                .offset = file_path_hash,
+                            assigned_thread.task_system.program_state = .analysis;
+                            assigned_thread.add_thread_work(Job{
+                                .offset = @intFromEnum(file_index),
+                                .id = .analyze_file,
+                                .count = 1,
                             });
-                        },
-                        .notify_analysis_complete => {
-                            thread.add_thread_work(.{
-                                .id = .llvm_generate_ir,
-                            });
-                        },
-                        .llvm_notify_ir_done => {
-                            thread.add_thread_work(.{
-                                .id = .llvm_emit_object,
-                            });
-                        },
-                        .llvm_notify_object_done => {
-                            thread.task_system.program_state = .llvm_finished_object;
-                            first_ir_done = true;
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
+                        }
+                    },
+                    .notify_file_resolved => {
+                        const file_index = job.offset;
+                        const thread_index = job.count;
+                        const destination_thread = &instance.threads[thread_index];
+                        const file = instance.files.get(@enumFromInt(file_index));
+                        const file_path_hash = hash_bytes(file.path);
+
+                        destination_thread.add_thread_work(.{
+                            .id = .notify_file_resolved,
+                            .count = @intCast(file_index),
+                            .offset = file_path_hash,
+                        });
+                    },
+                    .notify_analysis_complete => {
+                        thread.add_thread_work(.{
+                            .id = .llvm_generate_ir,
+                        });
+                    },
+                    .llvm_notify_ir_done => {
+                        thread.add_thread_work(.{
+                            .id = .llvm_emit_object,
+                        });
+                    },
+                    .llvm_notify_object_done => {
+                        thread.task_system.program_state = .llvm_finished_object;
+                        first_ir_done = true;
+                    },
+                    else => |t| @panic(@tagName(t)),
                 }
 
-                thread.task_system.ask.completed += control_pending_tasks;
+                thread.task_system.ask.complete_job();
+                previous_job = job;
             }
         }
     }
@@ -1224,7 +1286,7 @@ pub fn main() void {
     };
     const thread_count = std.Thread.getCpuCount() catch unreachable;
     const cpu_count = &cpu_count_buffer[0];
-    // cpu_count.* = @intCast(thread_count - 2);
+    instance.arena.align_forward(@alignOf(Thread));
     instance.threads = instance.arena.new_array(Thread, thread_count - 1) catch unreachable;
     cpu_count.* = @intCast(thread_count - 2);
     for (instance.threads) |*thread| {
@@ -1476,326 +1538,319 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
     const thread = &instance.threads[thread_index];
     thread.arena = Arena.init(4 * 1024 * 1024) catch unreachable;
-    
+
     while (true) {
-        const to_do = thread.task_system.job.to_do;
-        const completed = thread.task_system.job.completed;
+        while (thread.get_worker_job()) |job| {
+            const c = thread.task_system.job.worker.completed;
+            switch (job.id) {
+                .analyze_file => {
+                    thread.assigned_file_count += 1;
+                    const file_index = job.offset;
+                    const file = &instance.files.slice()[file_index];
+                    file.state = .analyzing;
+                    file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
+                    file.thread = thread_index;
+                    analyze_file(thread, file_index);
+                },
+                .notify_file_resolved => {
+                    const file_index = job.count;
+                    const file = &instance.files.pointer[file_index];
 
-        if (completed < to_do) {
-            assert(thread.task_system.program_state != .none);
-            assert(thread.task_system.state != .idle);
-            const jobs = thread.task_system.job.entries[completed..to_do];
+                    if (&instance.threads[file.thread] == thread) {
+                        exit_with_error("Threads match!");
+                    } else {
+                        const file_path_hash = job.offset;
+                        for (file.interested_files.slice()) |interested_file| {
+                            if (interested_file.thread == thread.get_index()) {
+                                assert(interested_file.resolved_import_count != interested_file.imports.length);
+                                for (interested_file.imports.slice(), 0..) |import, i| {
+                                    if (import.hash == file_path_hash) {
+                                        const values_per_import = interested_file.values_per_import.get(@enumFromInt(i));
+                                        for (values_per_import.slice()) |value| {
+                                            assert(value.sema.thread == thread.get_index());
+                                            assert(!value.sema.resolved);
+                                            if (!value.sema.resolved) {
+                                                switch (value.sema.id) {
+                                                    .instruction => {
+                                                        const instruction = value.get_payload(.instruction);
+                                                        switch (instruction.id) {
+                                                            .call => {
+                                                                const call: *Call = instruction.get_payload(.call);
+                                                                assert(!call.callable.sema.resolved);
 
-            for (jobs) |job| {
-                switch (job.id) {
-                    .analyze_file => {
-                        thread.assigned_file_count += 1;
-                        const file_index = job.offset;
-                        const file = &instance.files.slice()[file_index];
-                        file.state = .analyzing;
-                        file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
-                        file.thread = thread_index;
-                        analyze_file(thread, file_index);
-                    },
-                    .notify_file_resolved => {
-                        const file_index = job.count;
-                        const file = &instance.files.pointer[file_index];
+                                                                switch (call.callable.sema.id) {
+                                                                    .lazy_expression => {
+                                                                        const lazy_expression = call.callable.get_payload(.lazy_expression);
+                                                                        const names = lazy_expression.names();
+                                                                        assert(names.len > 0);
 
-                        if (&instance.threads[file.thread] == thread) {
-                            exit_with_error("Threads match!");
-                        } else {
-                            const file_path_hash = job.offset;
-                            for (file.interested_files.slice()) |interested_file| {
-                                if (interested_file.thread == thread.get_index()) {
-                                    assert(interested_file.resolved_import_count != interested_file.imports.length);
-                                    for (interested_file.imports.slice(), 0..) |import, i| {
-                                        if (import.hash == file_path_hash) {
-                                            const values_per_import = interested_file.values_per_import.get(@enumFromInt(i));
-                                            for (values_per_import.slice()) |value| {
-                                                assert(value.sema.thread == thread.get_index());
-                                                assert(!value.sema.resolved);
-                                                if (!value.sema.resolved) {
-                                                    switch (value.sema.id) {
-                                                        .instruction => {
-                                                            const instruction = value.get_payload(.instruction);
-                                                            switch (instruction.id) {
-                                                                .call => {
-                                                                    const call: *Call = instruction.get_payload(.call);
-                                                                    assert(!call.callable.sema.resolved);
+                                                                        switch (lazy_expression.u) {
+                                                                            .static => |*static| {
+                                                                                _ = static; // autofix
+                                                                            },
+                                                                            .dynamic => unreachable,
+                                                                        }
 
-                                                                    switch (call.callable.sema.id) {
-                                                                        .lazy_expression => {
-                                                                            const lazy_expression = call.callable.get_payload(.lazy_expression);
-                                                                            const names = lazy_expression.names();
-                                                                            assert(names.len > 0);
+                                                                        const declaration_reference = lazy_expression.u.static.outsider;
+                                                                        switch (declaration_reference.*.id) {
+                                                                            .file => {
+                                                                                assert(names.len == 1);
+                                                                                const file_declaration = declaration_reference.*.get_payload(.file);
+                                                                                assert(file_declaration == file);
 
-                                                                            switch (lazy_expression.u) {
-                                                                                .static => |*static| {
-                                                                                    _ = static; // autofix
-                                                                                },
-                                                                                .dynamic => unreachable,
-                                                                            }
+                                                                                if (file.scope.declarations.get(names[0])) |callable_declaration| switch (callable_declaration.id) {
+                                                                                    .function_definition => {
+                                                                                        const function_definition = callable_declaration.get_payload(.function_definition);
+                                                                                        assert(function_definition.declaration.value.sema.resolved);
+                                                                                        assert(function_definition.declaration.value.sema.resolved);
+                                                                                        assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
+                                                                                        // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
+                                                                                        const external_fn = thread.external_functions.append(function_definition.declaration);
+                                                                                        external_fn.symbol.attributes.@"export" = false;
+                                                                                        external_fn.symbol.attributes.@"extern" = true;
+                                                                                        external_fn.value.sema.thread = thread.get_index();
+                                                                                        external_fn.value.llvm = null;
 
-                                                                            const declaration_reference = lazy_expression.u.static.outsider;
-                                                                            switch (declaration_reference.*.id) {
-                                                                                .file => {
-                                                                                    assert(names.len == 1);
-                                                                                    const file_declaration = declaration_reference.*.get_payload(.file);
-                                                                                    assert(file_declaration == file);
-
-                                                                                    if (file.scope.declarations.get(names[0])) |callable_declaration| switch (callable_declaration.id) {
-                                                                                        .function_definition => {
-                                                                                            const function_definition = callable_declaration.get_payload(.function_definition);
-                                                                                            assert(function_definition.declaration.value.sema.resolved);
-                                                                                            assert(function_definition.declaration.value.sema.resolved);
-                                                                                            assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
-                                                                                            // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
-                                                                                            const external_fn = thread.external_functions.append(function_definition.declaration);
-                                                                                            external_fn.symbol.attributes.@"export" = false;
-                                                                                            external_fn.symbol.attributes.@"extern" = true;
-                                                                                            external_fn.value.sema.thread = thread.get_index();
-                                                                                            external_fn.value.llvm = null;
-
-                                                                                            call.callable = &external_fn.value;
-                                                                                            value.sema.resolved = true;
-                                                                                        },
-                                                                                        else => |t| @panic(@tagName(t)),
-                                                                                        } else exit(1);
+                                                                                        call.callable = &external_fn.value;
+                                                                                        value.sema.resolved = true;
                                                                                     },
                                                                                     else => |t| @panic(@tagName(t)),
-                                                                            }
-                                                                        },
-                                                                        else => |t| @panic(@tagName(t)),
-                                                                    }
-                                                                },
-                                                                else => |t| @panic(@tagName(t)),
-                                                            }
-                                                        },
-                                                        .lazy_expression => {
-                                                            const lazy_expression = value.get_payload(.lazy_expression);
-                                                            assert(lazy_expression.u == .static);
-                                                            for (lazy_expression.u.static.names) |n| {
-                                                                assert(n == 0);
-                                                            }
-                                                            const declaration_reference = lazy_expression.u.static.outsider;
+                                                                                    } else exit(1);
+                                                                                },
+                                                                                else => |t| @panic(@tagName(t)),
+                                                                        }
+                                                                    },
+                                                                    else => |t| @panic(@tagName(t)),
+                                                                }
+                                                            },
+                                                            else => |t| @panic(@tagName(t)),
+                                                        }
+                                                    },
+                                                    .lazy_expression => {
+                                                        const lazy_expression = value.get_payload(.lazy_expression);
+                                                        assert(lazy_expression.u == .static);
+                                                        for (lazy_expression.u.static.names) |n| {
+                                                            assert(n == 0);
+                                                        }
+                                                        const declaration_reference = lazy_expression.u.static.outsider;
 
-                                                            switch (declaration_reference.*.id) {
-                                                                .unresolved_import => {
-                                                                    declaration_reference.* = &file.global_declaration;
-                                                                    value.sema.resolved = true;
-                                                                },
-                                                                else => |t| @panic(@tagName(t)),
-                                                            }
-                                                        },
-                                                        else => |t| @panic(@tagName(t)),
-                                                    }
+                                                        switch (declaration_reference.*.id) {
+                                                            .unresolved_import => {
+                                                                declaration_reference.* = &file.global_declaration;
+                                                                value.sema.resolved = true;
+                                                            },
+                                                            else => |t| @panic(@tagName(t)),
+                                                        }
+                                                    },
+                                                    else => |t| @panic(@tagName(t)),
                                                 }
                                             }
                                         }
                                     }
-
-                                    interested_file.resolved_import_count += 1;
-
-                                    try_resolve_file(thread, interested_file);
                                 }
+
+                                interested_file.resolved_import_count += 1;
+
+                                try_resolve_file(thread, interested_file);
                             }
                         }
-                    },
-                    .llvm_generate_ir => {
-                        if (thread.functions.length > 0) {
-                            const context = LLVM.Context.create();
-                            const module_name: []const u8 = "thread";
-                            const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
-                            const builder = LLVM.Builder.create(context);
-                            const attributes = LLVM.Attributes{
-                                .naked = context.getAttributeFromEnum(.Naked, 0),
-                                .noreturn = context.getAttributeFromEnum(.NoReturn, 0),
-                                .nounwind = context.getAttributeFromEnum(.NoUnwind, 0),
-                                .inreg = context.getAttributeFromEnum(.InReg, 0),
-                                .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
-                            };
+                    }
+                },
+                .llvm_generate_ir => {
+                    if (thread.functions.length > 0) {
+                        const context = LLVM.Context.create();
+                        const module_name: []const u8 = "thread";
+                        const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
+                        const builder = LLVM.Builder.create(context);
+                        const attributes = LLVM.Attributes{
+                            .naked = context.getAttributeFromEnum(.Naked, 0),
+                            .noreturn = context.getAttributeFromEnum(.NoReturn, 0),
+                            .nounwind = context.getAttributeFromEnum(.NoUnwind, 0),
+                            .inreg = context.getAttributeFromEnum(.InReg, 0),
+                            .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
+                        };
 
-                            const target_triple = switch (builtin.os.tag) {
-                                .linux => switch (builtin.cpu.arch) {
-                                    .aarch64 => "aarch64-linux-none",
-                                    .x86_64 => "x86_64-unknown-linux-gnu",
-                                    else => @compileError("CPU not supported"),
-                                },
-                                .macos => "aarch64-apple-macosx-none",
-                                .windows => "x86_64-windows-gnu",
-                                else => @compileError("OS not supported"),
-                            };
-                            const cpu = builtin.cpu.model.llvm_name.?;
+                        const target_triple = switch (builtin.os.tag) {
+                            .linux => switch (builtin.cpu.arch) {
+                                .aarch64 => "aarch64-linux-none",
+                                .x86_64 => "x86_64-unknown-linux-gnu",
+                                else => @compileError("CPU not supported"),
+                            },
+                            .macos => "aarch64-apple-macosx-none",
+                            .windows => "x86_64-windows-gnu",
+                            else => @compileError("OS not supported"),
+                        };
+                        const cpu = builtin.cpu.model.llvm_name.?;
 
-                            var features = PinnedArray(u8){
-                                .pointer = @constCast(""),
-                            };
+                        var features = PinnedArray(u8){
+                            .pointer = @constCast(""),
+                        };
 
-                            const temp_use_native_features = true;
-                            if (temp_use_native_features) {
-                                const feature_list = builtin.cpu.arch.allFeaturesList();
-                                if (feature_list.len > 0) {
-                                    for (feature_list, 0..) |feature, index_usize| {
-                                        const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
-                                        const is_enabled = builtin.cpu.features.isEnabled(index);
+                        const temp_use_native_features = true;
+                        if (temp_use_native_features) {
+                            const feature_list = builtin.cpu.arch.allFeaturesList();
+                            if (feature_list.len > 0) {
+                                for (feature_list, 0..) |feature, index_usize| {
+                                    const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+                                    const is_enabled = builtin.cpu.features.isEnabled(index);
 
-                                        if (feature.llvm_name) |llvm_name| {
-                                            const plus_or_minus = "-+"[@intFromBool(is_enabled)];
-                                            _ = features.append(plus_or_minus);
-                                            features.append_slice(llvm_name);
-                                            features.append_slice(",");
-                                        }
+                                    if (feature.llvm_name) |llvm_name| {
+                                        const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+                                        _ = features.append(plus_or_minus);
+                                        features.append_slice(llvm_name);
+                                        features.append_slice(",");
                                     }
-
-                                    assert(std.mem.endsWith(u8, features.slice(), ","));
-                                    features.length -= 1;
                                 }
+
+                                assert(std.mem.endsWith(u8, features.slice(), ","));
+                                features.length -= 1;
                             }
+                        }
 
-                            const target = blk: {
-                                var error_message: [*]const u8 = undefined;
-                                var error_message_len: usize = 0;
+                        const target = blk: {
+                            var error_message: [*]const u8 = undefined;
+                            var error_message_len: usize = 0;
 
-                                const optional_target = LLVM.bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len);
-                                const target = optional_target orelse {
-                                    exit_with_error(error_message[0..error_message_len]);
+                            const optional_target = LLVM.bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len);
+                            const target = optional_target orelse {
+                                exit_with_error(error_message[0..error_message_len]);
+                            };
+                            break :blk target;
+                        };
+                        const jit = false;
+                        const code_model: LLVM.CodeModel = undefined;
+                        const is_code_model_present = false;
+
+                        // TODO:
+                        const codegen_optimization_level: LLVM.CodegenOptimizationLevel = switch (Optimization.none) {
+                            .none => .none,
+                            .debug_prefer_fast, .debug_prefer_size => .none,
+                            .lightly_optimize_for_speed => .less,
+                            .optimize_for_speed, .optimize_for_size => .default,
+                            .aggressively_optimize_for_speed, .aggressively_optimize_for_size => .aggressive,
+                        };
+                        const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu.ptr, cpu.len, features.pointer, features.length, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit);
+
+                        module.setTargetMachineDataLayout(target_machine);
+                        module.setTargetTriple(target_triple.ptr, target_triple.len);
+
+                        thread.llvm = .{
+                            .context = context,
+                            .module = module,
+                            .builder = builder,
+                            .attributes = attributes,
+                            .target_machine = target_machine,
+                        };
+                        const debug_info = false;
+
+                        for (thread.external_functions.slice()) |*nat_function| {
+                            _ = llvm_get_function(thread, nat_function, true);
+                        }
+
+                        for (thread.functions.slice()) |*nat_function| {
+                            _ = llvm_get_function(thread, &nat_function.declaration, false);
+                        }
+
+                        for (thread.functions.slice()) |*nat_function| {
+                            const function = nat_function.declaration.value.llvm.?.toFunction() orelse unreachable;
+                            const nat_entry_basic_block = thread.basic_blocks.get(nat_function.entry_block);
+                            assert(nat_entry_basic_block.predecessors.length == 0);
+                            const entry_block_name = "entry";
+                            const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
+                            thread.llvm.builder.setInsertPoint(entry_block);
+
+                            for (nat_entry_basic_block.instructions.slice()) |instruction| {
+                                const value: *LLVM.Value = switch (instruction.id) {
+                                    .ret => block: {
+                                        const return_instruction = instruction.get_payload(.ret);
+                                        const return_value = llvm_get_value(thread, return_instruction.value);
+                                        const ret = thread.llvm.builder.createRet(return_value);
+                                        break :block ret.toValue();
+                                    },
+                                    .call => block: {
+                                        const call = instruction.get_payload(.call);
+                                        const callee = llvm_get_value(thread, call.callable);
+                                        const callee_function = callee.toFunction() orelse unreachable;
+                                        const function_type = callee_function.getType();
+
+                                        const arguments: []const *LLVM.Value = &.{};
+                                        const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
+                                        break :block call_i.toValue();
+                                    },
+                                    else => |t| @panic(@tagName(t)),
                                 };
-                                break :blk target;
-                            };
-                            const jit = false;
-                            const code_model: LLVM.CodeModel = undefined;
-                            const is_code_model_present = false;
 
-                            // TODO:
-                            const codegen_optimization_level: LLVM.CodegenOptimizationLevel = switch (Optimization.none) {
-                                .none => .none,
-                                .debug_prefer_fast, .debug_prefer_size => .none,
-                                .lightly_optimize_for_speed => .less,
-                                .optimize_for_speed, .optimize_for_size => .default,
-                                .aggressively_optimize_for_speed, .aggressively_optimize_for_size => .aggressive,
-                            };
-                            const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu.ptr, cpu.len, features.pointer, features.length, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit);
-
-                            module.setTargetMachineDataLayout(target_machine);
-                            module.setTargetTriple(target_triple.ptr, target_triple.len);
-
-                            thread.llvm = .{
-                                .context = context,
-                                .module = module,
-                                .builder = builder,
-                                .attributes = attributes,
-                                .target_machine = target_machine,
-                            };
-                            const debug_info = false;
-
-                            for (thread.external_functions.slice()) |*nat_function| {
-                                _ = llvm_get_function(thread, nat_function, true);
-                            }
-
-                            for (thread.functions.slice()) |*nat_function| {
-                                _ = llvm_get_function(thread, &nat_function.declaration, false);
-                            }
-
-                            for (thread.functions.slice()) |*nat_function| {
-                                const function = nat_function.declaration.value.llvm.?.toFunction() orelse unreachable;
-                                const nat_entry_basic_block = thread.basic_blocks.get(nat_function.entry_block);
-                                assert(nat_entry_basic_block.predecessors.length == 0);
-                                const entry_block_name = "entry";
-                                const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
-                                thread.llvm.builder.setInsertPoint(entry_block);
-
-                                for (nat_entry_basic_block.instructions.slice()) |instruction| {
-                                    const value: *LLVM.Value = switch (instruction.id) {
-                                        .ret => block: {
-                                            const return_instruction = instruction.get_payload(.ret);
-                                            const return_value = llvm_get_value(thread, return_instruction.value);
-                                            const ret = thread.llvm.builder.createRet(return_value);
-                                            break :block ret.toValue();
-                                        },
-                                        .call => block: {
-                                            const call = instruction.get_payload(.call);
-                                            const callee = llvm_get_value(thread, call.callable);
-                                            const callee_function = callee.toFunction() orelse unreachable;
-                                            const function_type = callee_function.getType();
-
-                                            const arguments: []const *LLVM.Value = &.{};
-                                            const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
-                                            break :block call_i.toValue();
-                                        },
-                                        else => |t| @panic(@tagName(t)),
-                                    };
-
-                                    instruction.value.llvm = value;
-                                }
-
-                                if (debug_info) {
-                                    const file_index = nat_function.declaration.file;
-                                    const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
-                                    const subprogram = function.getSubprogram();
-                                    llvm_file.builder.finalizeSubprogram(subprogram, function);
-                                }
-
-                                const verify_function = false;
-                                if (verify_function) {
-                                    var message: []const u8 = undefined;
-                                    const verification_success = function.verify(&message.ptr, &message.len);
-                                    if (!verification_success) {
-                                        var function_msg: []const u8 = undefined;
-                                        function.toString(&function_msg.ptr, &function_msg.len);
-                                        write(function_msg);
-                                        write("\n");
-                                        exit_with_error(message);
-                                    }
-                                }
+                                instruction.value.llvm = value;
                             }
 
                             if (debug_info) {
-                                const file_index = thread.functions.slice()[0].declaration.file;
+                                const file_index = nat_function.declaration.file;
                                 const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
-                                llvm_file.builder.finalize();
+                                const subprogram = function.getSubprogram();
+                                llvm_file.builder.finalizeSubprogram(subprogram, function);
                             }
 
-                            const verify_module = true;
-                            if (verify_module) {
-                                var verification_message: []const u8 = undefined;
-                                const verification_success = thread.llvm.module.verify(&verification_message.ptr, &verification_message.len);
+                            const verify_function = false;
+                            if (verify_function) {
+                                var message: []const u8 = undefined;
+                                const verification_success = function.verify(&message.ptr, &message.len);
                                 if (!verification_success) {
-                                    const print_module = true;
-                                    if (print_module) {
-                                        var module_content: []const u8 = undefined;
-                                        thread.llvm.module.toString(&module_content.ptr, &module_content.len);
-                                        write(module_content);
-                                        write("\n");
-                                    }
-
-                                    exit_with_error(verification_message);
+                                    var function_msg: []const u8 = undefined;
+                                    function.toString(&function_msg.ptr, &function_msg.len);
+                                    write(function_msg);
+                                    write("\n");
+                                    exit_with_error(message);
                                 }
                             }
-
-                            thread.add_control_work(.{
-                                .id = .llvm_notify_ir_done,
-                            });
                         }
-                    },
-                    .llvm_emit_object => {
-                        const thread_object = std.fmt.allocPrint(std.heap.page_allocator, "thread{}.o", .{thread.get_index()}) catch unreachable;
-                        thread.llvm.object = thread_object;
-                        const disable_verify = false;
-                        const result = thread.llvm.module.addPassesToEmitFile(thread.llvm.target_machine, thread_object.ptr, thread_object.len, LLVM.CodeGenFileType.object, disable_verify);
-                        if (!result) {
-                            @panic("can't generate machine code");
+
+                        if (debug_info) {
+                            const file_index = thread.functions.slice()[0].declaration.file;
+                            const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
+                            llvm_file.builder.finalize();
+                        }
+
+                        const verify_module = true;
+                        if (verify_module) {
+                            var verification_message: []const u8 = undefined;
+                            const verification_success = thread.llvm.module.verify(&verification_message.ptr, &verification_message.len);
+                            if (!verification_success) {
+                                const print_module = true;
+                                if (print_module) {
+                                    var module_content: []const u8 = undefined;
+                                    thread.llvm.module.toString(&module_content.ptr, &module_content.len);
+                                    write(module_content);
+                                    write("\n");
+                                }
+
+                                exit_with_error(verification_message);
+                            }
                         }
 
                         thread.add_control_work(.{
-                            .id = .llvm_notify_object_done,
+                            .id = .llvm_notify_ir_done,
                         });
-                        // std.debug.print("Thread #{} emitted object and notified\n", .{thread_index});
-                    },
-                    else => |t| @panic(@tagName(t)),
-                }
+                    }
+                },
+                .llvm_emit_object => {
+                    const thread_object = std.fmt.allocPrint(std.heap.page_allocator, "thread{}.o", .{thread.get_index()}) catch unreachable;
+                    thread.llvm.object = thread_object;
+                    const disable_verify = false;
+                    const result = thread.llvm.module.addPassesToEmitFile(thread.llvm.target_machine, thread_object.ptr, thread_object.len, LLVM.CodeGenFileType.object, disable_verify);
+                    if (!result) {
+                        @panic("can't generate machine code");
+                    }
 
-                thread.task_system.job.completed += 1;
+                    thread.add_control_work(.{
+                        .id = .llvm_notify_object_done,
+                    });
+                    // std.debug.print("Thread #{} emitted object and notified\n", .{thread_index});
+                },
+                else => |t| @panic(@tagName(t)),
             }
+
+            thread.task_system.job.complete_job();
+            assert(thread.task_system.job.worker.completed == c + 1);
         }
 
         std.atomic.spinLoopHint();
@@ -2269,6 +2324,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     const directory = std.fs.openDirAbsolute(directory_path, .{}) catch unreachable;
                     const file_path = library.realpath(thread.arena, directory, string_literal) catch unreachable;
                     const file_path_hash = intern_identifier(&thread.identifiers, file_path);
+                    // std.debug.print("Interning '{s}' (0x{x}) in thread #{}\n", .{file_path, file_path_hash, thread.get_index()});
                     
                     for (thread.imports.slice()) |import| {
                         const pending_file_hash = import.hash;
@@ -2312,8 +2368,7 @@ fn try_resolve_file(thread: *Thread, file: *File) void {
         thread.analyzed_file_count += 1;
 
         if (thread.analyzed_file_count == thread.assigned_file_count) {
-            // TODO: should this be atomic?
-            if (thread.task_system.job.to_do == thread.task_system.job.completed + 1) {
+            if (@atomicLoad(@TypeOf(thread.task_system.job.queuer.to_do), &thread.task_system.job.queuer.to_do, .seq_cst) == thread.task_system.job.worker.completed + 1) {
                 thread.add_control_work(.{
                     .id = .notify_analysis_complete,
                 });

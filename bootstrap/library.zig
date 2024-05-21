@@ -70,12 +70,16 @@ pub const Arena = struct {
         }
     }
 
-    pub inline fn new(arena: *Arena, comptime T: type) !*T {
+    pub fn align_forward(arena: *Arena, alignment: u64) void {
+        arena.position = std.mem.alignForward(u64, arena.position, alignment);
+    }
+
+    pub fn new(arena: *Arena, comptime T: type) !*T {
         const result: *T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T))));
         return result;
     }
 
-    pub inline fn new_array(arena: *Arena, comptime T: type, count: usize) ![]T {
+    pub fn new_array(arena: *Arena, comptime T: type, count: usize) ![]T {
         const result: [*]T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T) * count)));
         return result[0..count];
     }
@@ -765,11 +769,11 @@ pub fn exit_with_error() noreturn {
 pub fn read_file(arena: *Arena, directory: std.fs.Dir, file_relative_path: []const u8) []const u8 {
     const source_file = directory.openFile(file_relative_path, .{}) catch |err| {
         const stdout = std.io.getStdOut();
-        stdout.writeAll("Can't find file ") catch {};
+        stdout.writeAll("Can't find file '") catch {};
         stdout.writeAll(file_relative_path) catch {};
         // stdout.writeAll(" in directory ") catch {};
         // stdout.writeAll(file.package.directory.path) catch {};
-        stdout.writeAll(" for error ") catch {};
+        stdout.writeAll("' for error ") catch {};
         stdout.writeAll(@errorName(err)) catch {};
         @panic("Unrecoverable error");
     };
