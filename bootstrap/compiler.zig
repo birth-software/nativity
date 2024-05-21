@@ -742,6 +742,7 @@ const TaskSystem = struct{
         analysis_resolution,
         llvm_generate_ir,
         llvm_emit_object,
+        llvm_finished_object,
     };
 
     const ThreadState = enum{
@@ -956,8 +957,11 @@ const Unit = struct {
 fn control_thread(unit: *Unit) void {
     var last_assigned_thread_index: u32 = 1;
     var first_ir_done = false;
-    while (true) {
-        var total_is_done: bool = first_ir_done;
+
+    var total_is_done: bool = false;
+    while (!total_is_done) {
+        total_is_done = first_ir_done;
+
         for (instance.threads, 0..) |*thread, i| {
             const jobs_to_do = thread.task_system.job.to_do;
             const jobs_completed = thread.task_system.job.completed;
@@ -966,10 +970,10 @@ fn control_thread(unit: *Unit) void {
             const asks_completed = thread.task_system.ask.completed;
             const control_pending_tasks = asks_to_do - asks_completed; 
             const pending_tasks = worker_pending_tasks + control_pending_tasks;
+            _ = pending_tasks; // autofix
 
-            const is_done = pending_tasks == 0;
             // std.debug.print("Is done: {}\n", .{is_done});
-            total_is_done = total_is_done and is_done;
+            total_is_done = total_is_done and if (@intFromEnum(thread.task_system.program_state) >= @intFromEnum(TaskSystem.ProgramState.analysis)) thread.task_system.program_state == .llvm_finished_object else true;
 
             if (control_pending_tasks > 0) {
                 for (thread.task_system.ask.entries[asks_completed .. asks_to_do]) |job| {
@@ -1021,6 +1025,7 @@ fn control_thread(unit: *Unit) void {
                             });
                         },
                         .llvm_notify_object_done => {
+                            thread.task_system.program_state = .llvm_finished_object;
                             first_ir_done = true;
                         },
                         else => |t| @panic(@tagName(t)),
@@ -1030,10 +1035,6 @@ fn control_thread(unit: *Unit) void {
                 thread.task_system.ask.completed += control_pending_tasks;
             }
         }
-
-        if (total_is_done) {
-            break;
-        }
     }
 
     var objects = PinnedArray([]const u8){};
@@ -1042,6 +1043,10 @@ fn control_thread(unit: *Unit) void {
             _ = objects.append(object);
         }
     }
+
+    // for (instance.threads) |*thread| {
+    //     std.debug.print("Thread #{}: {s}\n", .{thread.get_index(), @tagName(thread.task_system.program_state)});
+    // }
 
     assert(objects.length > 0);
 
@@ -1218,7 +1223,6 @@ pub fn main() void {
         .executable_directory = executable_directory,
     };
     const thread_count = std.Thread.getCpuCount() catch unreachable;
-    std.debug.print("Thread count: {}\n", .{thread_count});
     const cpu_count = &cpu_count_buffer[0];
     // cpu_count.* = @intCast(thread_count - 2);
     instance.threads = instance.arena.new_array(Thread, thread_count - 1) catch unreachable;
