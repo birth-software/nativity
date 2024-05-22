@@ -1,0 +1,6 @@
+import "file.nat";
+
+fn [cc(.c)] main [export]() s32
+{
+    return file.foo();
+}
