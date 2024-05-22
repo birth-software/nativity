@@ -1851,7 +1851,8 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                     }
                 },
                 .llvm_emit_object => {
-                    const thread_object = std.fmt.allocPrint(std.heap.page_allocator, "thread{}.o", .{thread.get_index()}) catch unreachable;
+                    const timestamp = std.time.nanoTimestamp();
+                    const thread_object = std.fmt.allocPrint(std.heap.page_allocator, "nat/{s}_thread{}_{}.o", .{std.fs.path.basename(std.fs.path.dirname(instance.files.get(@enumFromInt(0)).path).?), thread.get_index(), timestamp}) catch unreachable;
                     thread.llvm.object = thread_object;
                     const disable_verify = false;
                     const result = thread.llvm.module.addPassesToEmitFile(thread.llvm.target_machine, thread_object.ptr, thread_object.len, LLVM.CodeGenFileType.object, disable_verify);
