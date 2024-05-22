@@ -70,12 +70,16 @@ pub const Arena = struct {
         }
     }
 
-    pub inline fn new(arena: *Arena, comptime T: type) !*T {
+    pub fn align_forward(arena: *Arena, alignment: u64) void {
+        arena.position = std.mem.alignForward(u64, arena.position, alignment);
+    }
+
+    pub fn new(arena: *Arena, comptime T: type) !*T {
         const result: *T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T))));
         return result;
     }
 
-    pub inline fn new_array(arena: *Arena, comptime T: type, count: usize) ![]T {
+    pub fn new_array(arena: *Arena, comptime T: type, count: usize) ![]T {
         const result: [*]T = @ptrCast(@alignCast(try arena.allocate(@sizeOf(T) * count)));
         return result[0..count];
     }
@@ -155,17 +159,19 @@ const pinned_array_page_size = 2 * 1024 * 1024;
 const pinned_array_max_size = std.math.maxInt(u32) - pinned_array_page_size;
 const pinned_array_default_granularity = pinned_array_page_size;
 
+const small_granularity = std.mem.page_size;
+const large_granularity = 2 * 1024 * 1024;
 // This must be used with big arrays, which are not resizeable (can't be cleared)
 pub fn PinnedArray(comptime T: type) type {
-    return PinnedArrayAdvanced(T, null);
+    return PinnedArrayAdvanced(T, null, small_granularity);
 }
 
 // This must be used with big arrays, which are not resizeable (can't be cleared)
-pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
+pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type, comptime granularity: comptime_int) type {
     return struct {
-        pointer: [*]T = @constCast((&[_]T{}).ptr),
+        pointer: [*]T = undefined,
         length: u32 = 0,
-        granularity: u32 = 0,
+        committed: u32 = 0,
 
         pub const Index = if (MaybeIndex) |I| getIndexForType(T, I) else enum(u32) {
             null = 0xffff_ffff,
@@ -193,38 +199,36 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
             return array.get_unchecked(i);
         }
 
-        pub fn get_index(array: *Array, item: *T) Index {
+        pub fn get_index(array: *Array, item: *T) u32 {
             const many_item: [*]T = @ptrCast(item);
-            const result = @intFromPtr(many_item) - @intFromPtr(array.pointer);
+            const result: u32 = @intCast(@intFromPtr(many_item) - @intFromPtr(array.pointer));
             assert(result < pinned_array_max_size);
-            return @enumFromInt(@divExact(result, @sizeOf(T)));
+            return @divExact(result, @sizeOf(T));
         }
 
-        pub fn init(granularity: u32) !Array {
-            assert(granularity & 0xfff == 0);
-            const raw_ptr = try reserve(pinned_array_max_size);
-            try commit(raw_ptr, granularity);
-            return Array{
-                .pointer = @alignCast(@ptrCast(raw_ptr)),
-                .length = 0,
-                .granularity = granularity,
-            };
-        }
-
-        pub fn init_with_default_granularity() !Array {
-            return try Array.init(pinned_array_default_granularity);
+        pub fn get_typed_index(array: *Array, item: *T) Index {
+            return @enumFromInt(array.get_index(item));
         }
 
         pub fn ensure_capacity(array: *Array, additional: u32) void {
+            if (array.committed == 0) {
+                assert(array.length == 0);
+                array.pointer = @alignCast(@ptrCast(reserve(pinned_array_max_size) catch unreachable));
+            }
+
             const length = array.length;
             const size = length * @sizeOf(T);
-            const granularity_aligned_size = align_forward(size, array.granularity);
+            const granularity_aligned_size = align_forward(size, granularity);
             const new_size = size + additional * @sizeOf(T);
+
             if (granularity_aligned_size < new_size) {
                 assert((length + additional) * @sizeOf(T) <= pinned_array_max_size);
-                const new_granularity_aligned_size = align_forward(new_size, array.granularity);
-                const ptr: [*]u8 = @ptrCast(array.pointer);
-                commit(ptr + granularity_aligned_size, new_granularity_aligned_size - granularity_aligned_size) catch unreachable;
+                const new_granularity_aligned_size = align_forward(new_size, granularity);
+                const pointer: [*]u8 = @ptrCast(array.pointer);
+                const commit_pointer = pointer + granularity_aligned_size;
+                const commit_size = new_granularity_aligned_size - granularity_aligned_size;
+                commit(commit_pointer, commit_size) catch unreachable;
+                array.committed += @intCast(@divExact(commit_size, granularity));
             }
         }
 
@@ -233,8 +237,12 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
             return array.append_with_capacity(item);
         }
 
-        pub fn append_index(array: *Array, item: T) Index {
+        pub fn append_index(array: *Array, item: T) u32 {
             return array.get_index(array.append(item));
+        }
+
+        pub fn append_typed_index(array: *Array, item: T) Index {
+            return array.get_typed_index(array.append(item));
         }
 
         pub fn append_slice(array: *Array, items: []const T) void {
@@ -242,21 +250,33 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
             array.append_slice_with_capacity(items);
         }
 
-        pub fn append_with_capacity(array: *Array, item: T) *T {
+        pub fn add_one_with_capacity(array: *Array) *T {
             const index = array.length;
             assert(index * @sizeOf(T) < pinned_array_max_size);
             array.length += 1;
             const ptr = &array.pointer[index];
+            return ptr;
+        }
+
+        pub fn add_one(array: *Array) *T{
+            array.ensure_capacity(1);
+            return array.add_one_with_capacity();
+        }
+
+        pub fn append_with_capacity(array: *Array, item: T) *T {
+            const ptr = array.add_one_with_capacity();
             ptr.* = item;
             return ptr;
         }
 
         pub fn append_slice_with_capacity(array: *Array, items: []const T) void {
-            const index = array.length;
-            const count: u32 = @intCast(items.len);
-            assert((index + count - 1) * @sizeOf(T) < pinned_array_max_size);
-            array.length += count;
-            @memcpy(array.pointer[index..][0..count], items);
+            if (items.len > 0) {
+                const index = array.length;
+                const count: u32 = @intCast(items.len);
+                assert((index + count - 1) * @sizeOf(T) < pinned_array_max_size);
+                array.length += count;
+                @memcpy(array.pointer[index..][0..count], items);
+            }
         }
 
         pub fn insert(array: *@This(), index: u32, item: T) void {
@@ -267,6 +287,14 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type) type {
             const dst = array.slice()[index + 1 ..];
             copy_backwards(T, dst, src);
             array.slice()[index] = item;
+        }
+
+        pub fn in_range(array: *@This(), item: *T) bool {
+            if (array.committed == 0) return false;
+            if (@intFromPtr(item) < @intFromPtr(array.pointer)) return false;
+            const top = @intFromPtr(array.pointer) + array.committed * granularity;
+            if (@intFromPtr(item) >= top) return false;
+            return true;
         }
     };
 }
@@ -385,30 +413,18 @@ const pinned_hash_map_max_size = std.math.maxInt(u32) - pinned_hash_map_page_siz
 const pinned_hash_map_default_granularity = pinned_hash_map_page_size;
 
 pub fn PinnedHashMap(comptime K: type, comptime V: type) type {
+    return PinnedHashMapAdvanced(K, V, small_granularity);
+}
+
+pub fn PinnedHashMapAdvanced(comptime K: type, comptime V: type, comptime granularity: comptime_int) type {
     return struct {
-        key_pointer: [*]K,
-        value_pointer: [*]V,
-        length: u32,
-        granularity: u32,
-        committed: u32,
+        key_pointer: [*]K = undefined,
+        value_pointer: [*]V = undefined,
+        length: u64 = 0,
+        committed_key: u32 = 0,
+        committed_value: u32 = 0,
 
         const Map = @This();
-
-        pub fn init(granularity: u32) !Map {
-            assert(granularity & 0xfff == 0);
-            const key_raw_pointer = try reserve(pinned_hash_map_max_size);
-            try commit(key_raw_pointer, granularity);
-            const value_raw_pointer = try reserve(pinned_hash_map_max_size);
-            try commit(value_raw_pointer, granularity);
-
-            return Map{
-                .key_pointer = @alignCast(@ptrCast(key_raw_pointer)),
-                .value_pointer = @alignCast(@ptrCast(value_raw_pointer)),
-                .length = 0,
-                .granularity = granularity,
-                .committed = 1,
-            };
-        }
 
         pub fn get_pointer(map: *Map, key: K) ?*V {
             for (map.keys(), 0..) |k, i| {
@@ -437,7 +453,7 @@ pub fn PinnedHashMap(comptime K: type, comptime V: type) type {
             }
         }
 
-        pub fn put(map: *@This(), key: K, value: V) !void {
+        pub fn put(map: *@This(), key: K, value: V) void {
             if (map.get_pointer(key)) |value_pointer| {
                 value_pointer.* = value;
             } else {
@@ -447,45 +463,57 @@ pub fn PinnedHashMap(comptime K: type, comptime V: type) type {
             }
         }
 
-        pub fn put_no_clobber(map: *@This(), key: K, value: V) !void {
+        pub fn put_no_clobber(map: *@This(), key: K, value: V) void {
             assert(map.get_pointer(key) == null);
             const len = map.length;
             map.ensure_capacity(len + 1);
             map.put_at_with_capacity(len, key, value);
         }
 
-        fn put_at_with_capacity(map: *@This(), index: u32, key: K, value: V) void {
+        fn put_at_with_capacity(map: *@This(), index: u64, key: K, value: V) void {
             map.length += 1;
             assert(index < map.length);
             map.key_pointer[index] = key;
             map.value_pointer[index] = value;
         }
 
-        fn ensure_capacity(map: *Map, additional: u32) void {
+        fn ensure_capacity(map: *Map, additional: u64) void {
+            if (map.committed_key == 0) {
+                map.key_pointer = @alignCast(@ptrCast(reserve(pinned_hash_map_max_size) catch unreachable));
+                map.value_pointer = @alignCast(@ptrCast(reserve(pinned_hash_map_max_size) catch unreachable));
+            }
+
             const length = map.length;
             assert((length + additional) * @sizeOf(K) <= pinned_array_max_size);
 
             {
                 const key_size = length * @sizeOf(K);
-                const key_granularity_aligned_size = align_forward(key_size, map.granularity);
+                const key_granularity_aligned_size = align_forward(key_size, granularity);
                 const key_new_size = key_size + additional * @sizeOf(K);
 
                 if (key_granularity_aligned_size < key_new_size) {
-                    const new_key_granularity_aligned_size = align_forward(key_new_size, map.granularity);
+                    const new_key_granularity_aligned_size = align_forward(key_new_size, granularity);
                     const key_pointer: [*]u8 = @ptrCast(map.key_pointer);
-                    commit(key_pointer + key_granularity_aligned_size, new_key_granularity_aligned_size - key_granularity_aligned_size) catch unreachable;
+                    const commit_pointer = key_pointer + key_granularity_aligned_size;
+                    const commit_size = new_key_granularity_aligned_size - key_granularity_aligned_size;
+                    commit(commit_pointer, commit_size) catch unreachable;
+                    map.committed_key += @intCast(@divExact(commit_size, granularity));
                 }
             }
 
             {
                 const value_size = length * @sizeOf(V);
-                const value_granularity_aligned_size = align_forward(value_size, map.granularity);
+                const value_granularity_aligned_size = align_forward(value_size, granularity);
                 const value_new_size = value_size + additional * @sizeOf(K);
 
                 if (value_granularity_aligned_size < value_new_size) {
-                    const new_value_granularity_aligned_size = align_forward(value_new_size, map.granularity);
+                    const new_value_granularity_aligned_size = align_forward(value_new_size, granularity);
                     const value_pointer: [*]u8 = @ptrCast(map.value_pointer);
                     commit(value_pointer + value_granularity_aligned_size, new_value_granularity_aligned_size - value_granularity_aligned_size) catch unreachable;
+                    const commit_pointer = value_pointer + value_granularity_aligned_size;
+                    const commit_size = new_value_granularity_aligned_size - value_granularity_aligned_size;
+                    commit(commit_pointer, commit_size) catch unreachable;
+                    map.committed_value += @intCast(@divExact(commit_size, granularity));
                 }
             }
         }
@@ -736,4 +764,51 @@ pub fn align_forward(value: u64, alignment: u64) u64 {
 pub fn exit_with_error() noreturn {
     @breakpoint();
     std.posix.exit(1);
+}
+
+pub fn read_file(arena: *Arena, directory: std.fs.Dir, file_relative_path: []const u8) []const u8 {
+    const source_file = directory.openFile(file_relative_path, .{}) catch |err| {
+        const stdout = std.io.getStdOut();
+        stdout.writeAll("Can't find file '") catch {};
+        stdout.writeAll(file_relative_path) catch {};
+        // stdout.writeAll(" in directory ") catch {};
+        // stdout.writeAll(file.package.directory.path) catch {};
+        stdout.writeAll("' for error ") catch {};
+        stdout.writeAll(@errorName(err)) catch {};
+        @panic("Unrecoverable error");
+    };
+
+    const file_size = source_file.getEndPos() catch unreachable;
+    var file_buffer = arena.new_array(u8, file_size) catch unreachable;
+
+    const read_byte_count = source_file.readAll(file_buffer) catch unreachable;
+    assert(read_byte_count == file_size);
+    source_file.close();
+
+    //TODO: adjust file maximum size
+    return file_buffer[0..read_byte_count];
+}
+
+pub fn self_exe_path(arena: *Arena) ![]const u8 {
+    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    return try arena.duplicate_bytes(try std.fs.selfExePath(&buffer));
+}
+
+pub fn realpath(arena: *Arena, dir: std.fs.Dir, relative_path: []const u8) ![]const u8 {
+    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const stack_realpath = try dir.realpath(relative_path, &buffer);
+    const heap_realpath = try arena.new_array(u8, stack_realpath.len);
+    @memcpy(heap_realpath, stack_realpath);
+    return heap_realpath;
+}
+
+pub fn argument_copy_zero_terminated(arena: *Arena, args: []const []const u8) ![:null]?[*:0]u8 {
+    var result = try arena.new_array(?[*:0]u8, args.len + 1);
+    result[args.len] = null;
+
+    for (args, 0..) |argument, i| {
+        result[i] = try arena.duplicate_bytes_zero_terminated(argument);
+    }
+
+    return result[0..args.len :null];
 }

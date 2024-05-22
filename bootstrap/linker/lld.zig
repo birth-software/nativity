@@ -1,5 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
+
+const builtin = @import("builtin");
 const linker = @import("linker.zig");
 
 const library = @import("../library.zig");
@@ -11,7 +13,7 @@ const write = Compilation.write;
 pub fn link(context: *const Compilation.Context, options: linker.Options) !void {
     assert(options.backend == .lld);
     var argv = try PinnedArray([]const u8).init_with_default_granularity();
-    const driver_program = switch (@import("builtin").os.tag) {
+    const driver_program = switch (builtin.os.tag) {
         .windows => "lld-link",
         .linux => "ld.lld",
         .macos => "ld64.lld",
@@ -20,8 +22,8 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     _ = argv.append(driver_program);
     _ = argv.append("--error-limit=0");
 
-    switch (@import("builtin").cpu.arch) {
-        .aarch64 => switch (@import("builtin").os.tag) {
+    switch (builtin.cpu.arch) {
+        .aarch64 => switch (builtin.os.tag) {
             .linux => {
                 _ = argv.append("-znow");
                 _ = argv.append_slice(&.{ "-m", "aarch64linux" });
@@ -42,12 +44,12 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     }
 
     const ci = @import("configuration").ci;
-    switch (@import("builtin").os.tag) {
+    switch (builtin.os.tag) {
         .macos => {
             _ = argv.append("-dynamic");
             argv.append_slice(&.{ "-platform_version", "macos", "13.4.1", "13.3" });
             _ = argv.append("-arch");
-            _ = argv.append(switch (@import("builtin").cpu.arch) {
+            _ = argv.append(switch (builtin.cpu.arch) {
                 .aarch64 => "arm64",
                 else => |t| @panic(@tagName(t)),
             });
@@ -98,7 +100,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
                     argv.append_slice(&.{ "-L", "/usr/lib64" });
 
                     _ = argv.append("-dynamic-linker");
-                    switch (@import("builtin").cpu.arch) {
+                    switch (builtin.cpu.arch) {
                         .x86_64 => _ = argv.append("/lib64/ld-linux-x86-64.so.2"),
                         .aarch64 => _ = argv.append("/lib/ld-linux-aarch64.so.1"),
                         else => unreachable,
@@ -130,7 +132,7 @@ pub fn link(context: *const Compilation.Context, options: linker.Options) !void 
     var stdout_len: usize = 0;
     var stderr_ptr: [*]const u8 = undefined;
     var stderr_len: usize = 0;
-    const result = switch (@import("builtin").os.tag) {
+    const result = switch (builtin.os.tag) {
         .linux => NativityLLDLinkELF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
         .macos => NativityLLDLinkMachO(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),
         .windows => NativityLLDLinkCOFF(argv_zero_terminated.ptr, argv_zero_terminated.len, &stdout_ptr, &stdout_len, &stderr_ptr, &stderr_len),

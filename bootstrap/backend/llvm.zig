@@ -3424,17 +3424,6 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
     const target_machine = target.createTargetMachine(target_triple.ptr, target_triple.len, cpu, cpu.len, features.pointer, features.length, LLVM.RelocationModel.static, code_model, is_code_model_present, codegen_optimization_level, jit) orelse unreachable;
     llvm.module.setTargetMachineDataLayout(target_machine);
     llvm.module.setTargetTriple(target_triple.ptr, target_triple.len);
-    const file_path = unit.descriptor.executable_path;
-    const object_file_path = blk: {
-        const slice = try context.arena.new_array(u8, file_path.len + 3);
-        @memcpy(slice[0..file_path.len], file_path);
-        slice[file_path.len] = '.';
-        slice[file_path.len + 1] = 'o';
-        slice[file_path.len + 2] = 0;
-        const object_file_path = slice[0 .. slice.len - 1 :0];
-        break :blk object_file_path;
-    };
-
     if (unit.descriptor.optimization != .none) {
         const optimization_level: LLVM.OptimizationLevel = switch (unit.descriptor.optimization) {
             .none => unreachable,
@@ -3448,6 +3437,17 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
 
         llvm.module.runOptimizationPipeline(target_machine, optimization_level);
     }
+    const file_path = unit.descriptor.executable_path;
+    const object_file_path = blk: {
+        const slice = try context.arena.new_array(u8, file_path.len + 3);
+        @memcpy(slice[0..file_path.len], file_path);
+        slice[file_path.len] = '.';
+        slice[file_path.len + 1] = 'o';
+        slice[file_path.len + 2] = 0;
+        const object_file_path = slice[0 .. slice.len - 1 :0];
+        break :blk object_file_path;
+    };
+
 
     const disable_verify = false;
     const result = llvm.module.addPassesToEmitFile(target_machine, object_file_path.ptr, object_file_path.len, LLVM.CodeGenFileType.object, disable_verify);
