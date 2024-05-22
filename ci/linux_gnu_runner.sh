@@ -14,11 +14,7 @@ download_zig master x86_64-linux
 
 # Build and test
 
-i=$((0))
-while ((i < 1000)); do
-    zig build run -Dthird_party_ci=true -Dprint_stack_trace=true -Doptimize=Debug -- exe -main_source_file retest/standalone/first/main.nat
-    zig build run -Dthird_party_ci=true -Dprint_stack_trace=true -Doptimize=ReleaseSafe -- exe -main_source_file retest/standalone/first/main.nat
-    zig build run -Dthird_party_ci=true -Dprint_stack_trace=true -Doptimize=ReleaseSmall -- exe -main_source_file retest/standalone/first/main.nat
-    zig build run -Dthird_party_ci=true -Dprint_stack_trace=true -Doptimize=ReleaseFast -- exe -main_source_file retest/standalone/first/main.nat
-    i=$((i + 1))
-done
+zig build test -Dthird_party_ci=true -Doptimize=Debug
+zig build test -Dthird_party_ci=true -Doptimize=ReleaseSafe
+zig build test -Dthird_party_ci=true -Doptimize=ReleaseSmall
+zig build test -Dthird_party_ci=true -Doptimize=ReleaseFast
