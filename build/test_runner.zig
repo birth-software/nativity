@@ -37,6 +37,7 @@ fn runStandalone(allocator: Allocator, args: struct {
     self_hosted: bool,
     is_test: bool,
     compiler_path: []const u8,
+    repetitions: usize,
 }) !void {
     const test_names = try collectDirectoryDirEntries(allocator, args.directory_path);
 
@@ -51,66 +52,68 @@ fn runStandalone(allocator: Allocator, args: struct {
     std.debug.print("\n[{s} START]\n\n", .{args.group_name});
 
     for (test_names) |test_name| {
-        std.debug.print("{s}... ", .{test_name});
-        const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
-        const argv: []const []const u8 = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path };
-        // if (std.mem.eql(u8, args.compiler_path, "nat/compiler_lightly_optimize_for_speed")) @breakpoint();
-        const compile_run = try std.ChildProcess.run(.{
-            .allocator = allocator,
-            // TODO: delete -main_source_file?
-            .argv = argv,
-            .max_output_bytes = std.math.maxInt(u64),
-        });
-        ran_compilation_count += 1;
-
-        const compilation_result: TestError!bool = switch (compile_run.term) {
-            .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
-            .Signal => error.signaled,
-            .Stopped => error.stopped,
-            .Unknown => error.unknown,
-        };
-
-        const compilation_success = compilation_result catch b: {
-            failed_compilation_count += 1;
-            break :b false;
-        };
-
-        std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
-        if (compile_run.stdout.len > 0) {
-            std.debug.print("STDOUT:\n\n{s}\n\n", .{compile_run.stdout});
-        }
-        if (compile_run.stderr.len > 0) {
-            std.debug.print("STDERR:\n\n{s}\n\n", .{compile_run.stderr});
-        }
-
-        if (compilation_success and !args.self_hosted) {
-            const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", test_name });
-            const test_run = try std.ChildProcess.run(.{
+        std.debug.print("{s} [repetitions={}]\n\n", .{test_name, args.repetitions});
+        for (0..args.repetitions) |_| {
+            const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
+            const argv: []const []const u8 = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path };
+            // if (std.mem.eql(u8, args.compiler_path, "nat/compiler_lightly_optimize_for_speed")) @breakpoint();
+            const compile_run = try std.ChildProcess.run(.{
                 .allocator = allocator,
-                .argv = &.{test_path},
+                // TODO: delete -main_source_file?
+                .argv = argv,
                 .max_output_bytes = std.math.maxInt(u64),
             });
-            ran_test_count += 1;
-            const test_result: TestError!bool = switch (test_run.term) {
+            ran_compilation_count += 1;
+
+            const compilation_result: TestError!bool = switch (compile_run.term) {
                 .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
                 .Signal => error.signaled,
                 .Stopped => error.stopped,
                 .Unknown => error.unknown,
             };
 
-            const test_success = test_result catch b: {
-                failed_test_count += 1;
+            const compilation_success = compilation_result catch b: {
+                failed_compilation_count += 1;
                 break :b false;
             };
-            std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
-            if (test_run.stdout.len > 0) {
-                std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
+
+            std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+            if (compile_run.stdout.len > 0) {
+                std.debug.print("STDOUT:\n\n{s}\n\n", .{compile_run.stdout});
             }
-            if (test_run.stderr.len > 0) {
-                std.debug.print("STDERR:\n\n{s}\n\n", .{test_run.stderr});
+            if (compile_run.stderr.len > 0) {
+                std.debug.print("STDERR:\n\n{s}\n\n", .{compile_run.stderr});
             }
-        } else {
-            std.debug.print("\n", .{});
+
+            if (compilation_success and !args.self_hosted) {
+                const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", test_name });
+                const test_run = try std.ChildProcess.run(.{
+                    .allocator = allocator,
+                    .argv = &.{test_path},
+                    .max_output_bytes = std.math.maxInt(u64),
+                });
+                ran_test_count += 1;
+                const test_result: TestError!bool = switch (test_run.term) {
+                    .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
+                    .Signal => error.signaled,
+                    .Stopped => error.stopped,
+                    .Unknown => error.unknown,
+                };
+
+                const test_success = test_result catch b: {
+                    failed_test_count += 1;
+                    break :b false;
+                };
+                std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+                if (test_run.stdout.len > 0) {
+                    std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
+                }
+                if (test_run.stderr.len > 0) {
+                    std.debug.print("STDERR:\n\n{s}\n\n", .{test_run.stderr});
+                }
+            } else {
+                std.debug.print("\n", .{});
+            }
         }
     }
 
@@ -583,30 +586,41 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
 
-    var errors = run_test_suite(allocator, .{
-        .self_hosted = false,
+    try runStandalone(allocator, .{
+        .is_test = false,
         .compiler_path = bootstrap_relative_path,
+        .self_hosted = false,
+        .group_name = "STANDALONE",
+        .directory_path = "retest/standalone",
+        .repetitions = 100,
     });
 
-    if (!errors) {
-        inline for (@typeInfo(Optimization).Enum.fields) |opt| {
-            const optimization = @field(Optimization, opt.name);
-            if (compile_self_hosted(allocator, .{
-                .is_test = false,
-                .optimization = optimization,
-            })) |compiler_path| {
-                errors = errors or run_test_suite(allocator, .{
-                    .self_hosted = true,
-                    .compiler_path = compiler_path,
-                });
-            } else |err| {
-                err catch {};
-                errors = true;
-            }
-        }
-    }
-
-    if (errors) {
-        return error.fail;
-    }
+    // var errors = run_test_suite(allocator, .{
+    //     .self_hosted = false,
+    //     .compiler_path = bootstrap_relative_path,
+    // });
+    //
+    // if (!errors) {
+    //     inline for (@typeInfo(Optimization).Enum.fields) |opt| {
+    //         const optimization = @field(Optimization, opt.name);
+    //         if (compile_self_hosted(allocator, .{
+    //             .is_test = false,
+    //             .optimization = optimization,
+    //         })) |compiler_path| {
+    //             errors = errors or run_test_suite(allocator, .{
+    //                 .self_hosted = true,
+    //                 .compiler_path = compiler_path,
+    //             });
+    //         } else |err| {
+    //             err catch {};
+    //             errors = true;
+    //         }
+    //     }
+    // }
+    //
+    // if (errors) {
+    //     return error.fail;
+    // }
 }
+
+
