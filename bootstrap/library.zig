@@ -346,6 +346,15 @@ pub fn getIndexForType(comptime T: type, comptime E: type) type {
     return Result;
 }
 
+fn JointEnum(comptime enums: []const type, comptime backing_type: ?type) type {
+    _ = backing_type; // autofix
+    _ = enums; // autofix
+    return @Type(.{
+        .Enum = .{
+        },
+    });
+}
+
 pub fn my_hash(bytes: []const u8) u32 {
     const fnv_offset = 14695981039346656037;
     const fnv_prime = 1099511628211;

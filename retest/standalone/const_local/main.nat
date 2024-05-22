@@ -1,0 +1,5 @@
+fn [cc(.c)] main [export]() s32
+{
+    >result: s32 = 0;
+    return result;
+}

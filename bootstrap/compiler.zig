@@ -75,9 +75,15 @@ fn is_identifier_char(ch: u8) bool {
     return is_identifier_start_ch or is_digit;
 }
 
+const Side = enum {
+    left,
+    right,
+};
+
 const GlobalSymbol = struct{
     attributes: Attributes = .{},
-    name: u32,
+    global_declaration: GlobalDeclaration,
+
     const Attributes = struct{
         @"export": bool = false,
         @"extern": bool = false,
@@ -86,6 +92,26 @@ const GlobalSymbol = struct{
         @"export",
         @"extern",
 
+        const Mask = std.EnumSet(Attribute);
+    };
+};
+
+const Mutability = enum(u1){
+    @"const" = 0,
+    @"var" = 1,
+};
+
+const LocalSymbol = struct {
+    attributes: Attributes = .{},
+    local_declaration: LocalDeclaration,
+    type: *Type,
+    instruction: Instruction,
+    alignment: u32,
+
+    const Attributes = struct{
+        mutability: Mutability = .@"const",
+    };
+    const Attribute = enum{
         const Mask = std.EnumSet(Attribute);
     };
 };
@@ -251,11 +277,12 @@ const Parser = struct{
                 exit(1);
             }
         } else {
-            exit(1);
+            exit_with_error("Unrecognized type expression");
         }
     }
 
-    fn parse_typed_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: *Type) *Value {
+    fn parse_typed_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: *Type, side: Side) *Value {
+        _ = side; // autofix
         _ = &analyzer;
         const src = file.source_code;
         assert(ty.sema.id != .unresolved);
@@ -302,65 +329,106 @@ const Parser = struct{
             }
         } else if (is_alpha_start) {
             var resolved = true;
+            _ = &resolved; // autofix
             const identifier = parser.parse_identifier(thread, src);
-            const lazy_expression = thread.lazy_expressions.add_one();
 
-            if (file.scope.declarations.get_pointer(identifier)) |declaration_reference| {
-                switch (declaration_reference.*.id) {
-                    .unresolved_import => {
-                        comptime assert(@TypeOf(declaration_reference.*.*) == GlobalDeclaration);
-                        const import: *Import = declaration_reference.*.get_payload(.unresolved_import);
-                        assert(!import.resolved);
-                        resolved = false;
-                        const import_index = for (file.imports.slice(), 0..) |existing_import, i| {
-                            if (import == existing_import) break i;
-                        } else unreachable;
-                        lazy_expression.* = LazyExpression.init(declaration_reference, thread);
-                        
-                        while (true) {
-                            switch (src[parser.i]) {
-                                '.' => {
-                                    parser.i += 1;
-                                    const right = parser.parse_identifier(thread, src);
-                                    lazy_expression.add(right);
-                                },
-                                '(' => break,
-                                else => @panic((src.ptr + parser.i)[0..1]),
-                            }
-                        }
-                        
-                        switch (src[parser.i]) {
-                            '(' => {
-                                parser.i += 1;
-                                // TODO: arguments
-                                parser.expect_character(src, ')');
+            if (analyzer.current_scope.get_declaration(identifier)) |lookup_result| {
+                switch (src[parser.i]) {
+                    '.' => {
+                        switch (lookup_result.declaration.*.id) {
+                            .global => {
+                                const global_declaration = lookup_result.declaration.*.get_payload(.global);
+                                switch (global_declaration.id) {
+                                    .unresolved_import => {
+                                        const import: *Import = global_declaration.get_payload(.unresolved_import);
+                                        assert(!import.resolved);
+                                        resolved = false;
+                                        const import_index = for (file.imports.slice(), 0..) |existing_import, i| {
+                                            if (import == existing_import) break i;
+                                        } else unreachable;
+                                        const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(@ptrCast(lookup_result.declaration), thread));
 
-                                const call = thread.calls.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = false,
-                                                .id = .instruction,
+                                        while (true) {
+                                            switch (src[parser.i]) {
+                                                '.' => {
+                                                    parser.i += 1;
+                                                    const right = parser.parse_identifier(thread, src);
+                                                    lazy_expression.add(right);
+                                                },
+                                                '(' => break,
+                                                else => @panic((src.ptr + parser.i)[0..1]),
+                                            }
+                                        }
+
+                                        switch (src[parser.i]) {
+                                            '(' => {
+                                                parser.i += 1;
+                                                // TODO: arguments
+                                                parser.expect_character(src, ')');
+
+                                                const call = thread.calls.append(.{
+                                                    .instruction = .{
+                                                        .value = .{
+                                                            .sema = .{
+                                                                .thread = thread.get_index(),
+                                                                .resolved = false,
+                                                                .id = .instruction,
+                                                            },
+                                                            },
+                                                        .id = .call,
+                                                    },
+                                                    .callable = &lazy_expression.value,
+                                                });
+                                                _ = analyzer.current_basic_block.instructions.append(&call.instruction);
+
+                                                _ = file.values_per_import.get(@enumFromInt(import_index)).append(&call.instruction.value);
+                                                return &call.instruction.value;
                                             },
-                                            },
-                                        .id = .call,
+                                            else => @panic((src.ptr + parser.i)[0..1]),
+                                        }
                                     },
-                                    .callable = &lazy_expression.value,
-                                });
-                                _ = analyzer.current_basic_block.instructions.append(&call.instruction);
-
-                                _ = file.values_per_import.get(@enumFromInt(import_index)).append(&call.instruction.value);
-                                return &call.instruction.value;
+                                    else => |t| @panic(@tagName(t)),
+                                }
                             },
-                            else => @panic((src.ptr + parser.i)[0..1]),
+                            else => |t| @panic(@tagName(t)),
+                        }
+                        exit(1);
+                    },
+                    ';' => {
+                        switch (lookup_result.declaration.*.id) {
+                            .local => {
+                                const local_declaration = lookup_result.declaration.*.get_payload(.local);
+                                const local_symbol = local_declaration.to_symbol();
+
+                                switch (typecheck(ty, local_symbol.type)) {
+                                    .success => {
+                                        const load = thread.loads.append(.{
+                                            .instruction = .{
+                                                .value = .{
+                                                    .sema = .{
+                                                        .thread = thread.get_index(),
+                                                        .resolved = true,
+                                                        .id = .instruction,
+                                                    },
+                                                },
+                                                .id = .load,
+                                            },
+                                            .value = &local_symbol.instruction.value,
+                                            .type = local_symbol.type,
+                                            .alignment = local_symbol.type.alignment,
+                                            .is_volatile = false,
+                                        });
+                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        return &load.instruction.value;
+                                    },
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
                         }
                     },
-                    else => |t| @panic(@tagName(t)),
+                    else => exit(1),
                 }
-            } else {
-                exit(1);
-            }
+            } else exit(1);
         } else {
             exit(1);
         }
@@ -457,9 +525,9 @@ const Value = struct {
     };
     const id_to_value_map = std.EnumArray(Id, type).init(.{
         .constant_int = ConstantInt,
-        .lazy_expression = LazyExpression,
-        .instruction = Instruction,
         .function_declaration = Function.Declaration,
+        .instruction = Instruction,
+        .lazy_expression = LazyExpression,
     });
 
     fn get_payload(value: *Value, comptime id: Id) *id_to_value_map.get(id) {
@@ -470,13 +538,15 @@ const Value = struct {
 
 const Type = struct {
     llvm: ?*LLVM.Type = null,
+    // TODO: ZIG BUG: if this is a packed struct, the initialization is broken
     sema: struct {
         thread: u16,
         id: Id,
         resolved: bool,
         reserved: u7 = 0,
     },
-    reserved: u32 = 0,
+    size: u64,
+    alignment: u32,
 
     const Id = enum(u8){
         unresolved,
@@ -486,10 +556,8 @@ const Type = struct {
 
     const Integer = struct {
         type: Type,
-        bit_count: u16,
         signedness: Signedness,
-        reserved: u7 = 0,
-        id: Id = .integer,
+        bit_count: u16,
 
         const Signedness = enum(u1){
             unsigned,
@@ -524,7 +592,40 @@ fn parse_keyword(identifier: []const u8) u32 {
 }
 
 const Scope = struct {
+    declarations: PinnedHashMap(u32, *Declaration) = .{},
+    parent: ?*Scope,
     id: Id,
+
+    pub fn get_global_declaration(scope: *Scope, name: u32) ?*GlobalDeclaration {
+        assert(scope.id == .file);
+        return @ptrCast(scope.get_declaration_one_level(name));
+    }
+
+    pub fn get_declaration_one_level(scope: *Scope, name: u32) ?Declaration.Reference {
+        const result = scope.declarations.get_pointer(name);
+        return result;
+    }
+
+    const DeclarationLookupResult = struct {
+        declaration: Declaration.Reference,
+        scope: *Scope,
+    };
+
+    pub fn get_declaration(scope: *Scope, name: u32) ?DeclarationLookupResult{ 
+        var s: ?*Scope = scope;
+        while (s) |search_scope| {
+            if (search_scope.get_declaration_one_level(name)) |declaration| {
+                return .{
+                    .declaration = declaration,
+                    .scope = search_scope,
+                };
+            }
+
+            s = search_scope.parent;
+        }
+
+        return null;
+    }
 
     const Id = enum{
         file,
@@ -538,7 +639,15 @@ const Range = struct{
     end: u32,
 };
 
+const LocalDeclaration = struct {
+    declaration: Declaration,
+    fn to_symbol(local_declaration: *LocalDeclaration) *LocalSymbol {
+        return @alignCast(@fieldParentPtr("local_declaration", local_declaration));
+    }
+};
+
 const GlobalDeclaration = struct {
+    declaration: Declaration,
     id: Id,
 
     const Id = enum(u8) {
@@ -559,7 +668,8 @@ const GlobalDeclaration = struct {
         assert(global_declaration.id == id);
         // Function definition has to be upcast twice
         if (id == .function_definition) {
-            const function_declaration: *Function.Declaration = @alignCast(@fieldParentPtr("global_declaration", global_declaration));
+            const global_symbol: *GlobalSymbol = @alignCast(@fieldParentPtr("global_declaration", global_declaration));
+            const function_declaration: *Function.Declaration = @alignCast(@fieldParentPtr("global_symbol", global_symbol));
             const function_definition: *Function = @alignCast(@fieldParentPtr("declaration", function_declaration));
             return function_definition;
         }
@@ -578,9 +688,33 @@ const BasicBlock = struct{
     const Index = PinnedArray(BasicBlock).Index;
 };
 
+const Declaration = struct {
+    name: u32,
+    id: Id,
+
+    const Reference = **Declaration;
+
+    const Id = enum {
+        local,
+        global,
+    };
+
+    const id_to_declaration_map = std.EnumArray(Id, type).init(.{
+        .global = GlobalDeclaration,
+        .local = LocalDeclaration,
+    });
+
+    fn get_payload(declaration: *Declaration, comptime id: Id) *id_to_declaration_map.get(id) {
+        assert(declaration.id == id);
+        return @fieldParentPtr("declaration", declaration);
+    }
+};
+
 const Function = struct{
     declaration: Function.Declaration,
     entry_block: BasicBlock.Index,
+    stack_slots: PinnedArray(*LocalSymbol) = .{},
+    scope: Function.Scope,
 
     const Attributes = struct{
         calling_convention: CallingConvention = .custom,
@@ -595,14 +729,22 @@ const Function = struct{
     const Declaration = struct {
         attributes: Attributes = .{},
         value: Value,
-        symbol: GlobalSymbol,
-        global_declaration: GlobalDeclaration,
+        global_symbol: GlobalSymbol,
         return_type: *Type,
         argument_types: []const Type = &.{},
         file: u32,
     };
-};
 
+    const Scope = struct {
+        scope: compiler.Scope,
+
+        pub fn lookup_declaration(scope: *Function.Scope, parent: bool) ?*compiler.Declaration {
+            _ = scope;
+            _ = parent;
+            unreachable;
+        }
+    };
+};
 
 const Instruction = struct{
     value: Value,
@@ -610,14 +752,20 @@ const Instruction = struct{
 
     const Id = enum{
         call,
+        load,
+        local_symbol,
         ret,
         ret_void,
+        store,
     };
 
     const id_to_instruction_map = std.EnumArray(Id, type).init(.{
         .call = Call,
+        .local_symbol = LocalSymbol,
+        .load = Load,
         .ret = Return,
         .ret_void = void,
+        .store = Store,
     });
 
     fn get_payload(instruction: *Instruction, comptime id: Id) *id_to_instruction_map.get(id) {
@@ -632,11 +780,25 @@ const ConstantInt = struct{
     type: *Type,
 };
 
-
 const Call = struct{
     instruction: Instruction,
     callable: *Value,
-    const Index = PinnedArray(Call).Index;
+};
+
+const Load = struct {
+    instruction: Instruction,
+    value: *Value,
+    type: *Type,
+    alignment: u32,
+    is_volatile: bool,
+};
+
+const Store = struct {
+    instruction: Instruction,
+    destination: *Value,
+    source: *Value,
+    alignment: u32,
+    is_volatile: bool,
 };
 
 const Return = struct{
@@ -652,6 +814,19 @@ const Import = struct {
     files: PinnedArray(*File) = .{},
 };
 
+const LocalBlock = struct {
+    scope: Scope,
+};
+
+fn get_power_of_two_byte_count_from_bit_count(bit_count: u32) u32 {
+    if (bit_count == 0) unreachable;
+    if (bit_count <= 8) return 1;
+    if (bit_count <= 16) return 2;
+    if (bit_count <= 32) return 4;
+    if (bit_count <= 64) return 8;
+    unreachable;
+}
+
 const Thread = struct{
     arena: *Arena = undefined,
     functions: PinnedArray(Function) = .{},
@@ -663,9 +838,13 @@ const Thread = struct{
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
     // pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
     calls: PinnedArray(Call) = .{},
+    loads: PinnedArray(Load) = .{},
+    stores: PinnedArray(Store) = .{},
     returns: PinnedArray(Return) = .{},
     lazy_expressions: PinnedArray(LazyExpression) = .{},
     imports: PinnedArray(Import) = .{},
+    local_blocks: PinnedArray(LocalBlock) = .{},
+    local_symbols: PinnedArray(LocalSymbol) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -680,7 +859,9 @@ const Thread = struct{
         var integers: [128]Type.Integer = undefined;
         for ([_]Type.Integer.Signedness{.unsigned, .signed }) |signedness| {
             for (1..64 + 1) |bit_count| {
-                integers[@intFromEnum(signedness) * @as(usize, 64) + bit_count - 1] = .{
+                const integer_type_index = @intFromEnum(signedness) * @as(usize, 64) + bit_count - 1; 
+                const byte_count = get_power_of_two_byte_count_from_bit_count(bit_count);
+                integers[integer_type_index] = .{
                     .type = .{
                         .sema = .{
                             // We can fieldParentPtr to the thread
@@ -688,7 +869,9 @@ const Thread = struct{
                             .id = .integer,
                             .resolved = true,
                         },
-                        },
+                        .size = byte_count,
+                        .alignment = byte_count,
+                    },
                     .bit_count = bit_count,
                     .signedness = signedness,
                 };
@@ -899,7 +1082,6 @@ const File = struct{
 
     const Scope = struct {
         scope: compiler.Scope,
-        declarations: PinnedHashMap(u32, *GlobalDeclaration) = .{},
     };
 
     const Index = PinnedArray(File).Index;
@@ -925,11 +1107,16 @@ fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) Fil
     const new_file_index = instance.files.get_typed_index(new_file);
     new_file.* = .{
         .global_declaration = .{
+            .declaration = .{
+                .name = std.math.maxInt(u32),
+                .id = .global,
+            },
             .id = .file,
         },
         .scope = .{
             .scope = .{
                 .id = .file,
+                .parent = null,
             },
         },
         .source_code = &.{},
@@ -1523,6 +1710,7 @@ const CallingConvention = enum{
 const Analyzer = struct{
     current_basic_block: *BasicBlock = undefined,
     current_function: *Function = undefined,
+    current_scope: *Scope = undefined,
 };
 
 const brace_open = 0x7b;
@@ -1615,27 +1803,31 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                                                 assert(names.len == 1);
                                                                                 const file_declaration = declaration_reference.*.get_payload(.file);
                                                                                 assert(file_declaration == file);
+                                                                                if (file.scope.scope.declarations.get(names[0])) |callable_declaration| {
+                                                                                    const global_declaration = callable_declaration.get_payload(.global);
+                                                                                    switch (global_declaration.id) {
+                                                                                        .function_definition => {
+                                                                                            const function_definition = global_declaration.get_payload(.function_definition);
+                                                                                            assert(function_definition.declaration.value.sema.resolved);
+                                                                                            assert(function_definition.declaration.value.sema.resolved);
+                                                                                            assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
+                                                                                            // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
+                                                                                            const external_fn = thread.external_functions.append(function_definition.declaration);
+                                                                                            external_fn.global_symbol.attributes.@"export" = false;
+                                                                                            external_fn.global_symbol.attributes.@"extern" = true;
+                                                                                            external_fn.value.sema.thread = thread.get_index();
+                                                                                            external_fn.value.llvm = null;
 
-                                                                                if (file.scope.declarations.get(names[0])) |callable_declaration| switch (callable_declaration.id) {
-                                                                                    .function_definition => {
-                                                                                        const function_definition = callable_declaration.get_payload(.function_definition);
-                                                                                        assert(function_definition.declaration.value.sema.resolved);
-                                                                                        assert(function_definition.declaration.value.sema.resolved);
-                                                                                        assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
-                                                                                        // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
-                                                                                        const external_fn = thread.external_functions.append(function_definition.declaration);
-                                                                                        external_fn.symbol.attributes.@"export" = false;
-                                                                                        external_fn.symbol.attributes.@"extern" = true;
-                                                                                        external_fn.value.sema.thread = thread.get_index();
-                                                                                        external_fn.value.llvm = null;
-
-                                                                                        call.callable = &external_fn.value;
-                                                                                        value.sema.resolved = true;
-                                                                                    },
-                                                                                    else => |t| @panic(@tagName(t)),
-                                                                                    } else exit(1);
-                                                                                },
-                                                                                else => |t| @panic(@tagName(t)),
+                                                                                            call.callable = &external_fn.value;
+                                                                                            value.sema.resolved = true;
+                                                                                        },
+                                                                                        else => |t| @panic(@tagName(t)),
+                                                                                    }
+                                                                                } else {
+                                                                                    unreachable;
+                                                                                }
+                                                                            },
+                                                                            else => |t| @panic(@tagName(t)),
                                                                         }
                                                                     },
                                                                     else => |t| @panic(@tagName(t)),
@@ -1777,14 +1969,13 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
                             thread.llvm.builder.setInsertPoint(entry_block);
 
+                            for (nat_function.stack_slots.slice()) |local_slot| {
+                                const alloca_type = llvm_get_type(thread, local_slot.type);
+                                local_slot.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, local_slot.alignment).toValue();
+                            }
+
                             for (nat_entry_basic_block.instructions.slice()) |instruction| {
                                 const value: *LLVM.Value = switch (instruction.id) {
-                                    .ret => block: {
-                                        const return_instruction = instruction.get_payload(.ret);
-                                        const return_value = llvm_get_value(thread, return_instruction.value);
-                                        const ret = thread.llvm.builder.createRet(return_value);
-                                        break :block ret.toValue();
-                                    },
                                     .call => block: {
                                         const call = instruction.get_payload(.call);
                                         const callee = llvm_get_value(thread, call.callable);
@@ -1794,6 +1985,27 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         const arguments: []const *LLVM.Value = &.{};
                                         const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
                                         break :block call_i.toValue();
+                                    },
+                                    .load => block: {
+                                        const load = instruction.get_payload(.load);
+                                        const load_value = llvm_get_value(thread, load.value);
+                                        const load_type = llvm_get_type(thread, load.type);
+                                        // TODO: precise alignment
+                                        const load_instruction = builder.createLoad(load_type, load_value, load.is_volatile, "", "".len, load.alignment);
+                                        break :block load_instruction.toValue();
+                                    },
+                                    .store => block: {
+                                        const store = instruction.get_payload(.store);
+                                        const destination = llvm_get_value(thread, store.destination);
+                                        const source = llvm_get_value(thread, store.source);
+                                        const store_instruction = builder.createStore(source, destination, store.is_volatile, store.alignment);
+                                        break :block store_instruction.toValue();
+                                    },
+                                    .ret => block: {
+                                        const return_instruction = instruction.get_payload(.ret);
+                                        const return_value = llvm_get_value(thread, return_instruction.value);
+                                        const ret = thread.llvm.builder.createRet(return_value);
+                                        break :block ret.toValue();
                                     },
                                     else => |t| @panic(@tagName(t)),
                                 };
@@ -1963,7 +2175,7 @@ fn llvm_get_file(thread: *Thread, file_index: u32) *LLVMFile {
 fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, override_extern: bool) *LLVM.Value.Constant.Function {
     if (nat_function.value.llvm) |llvm| return llvm.toFunction() orelse unreachable else {
         _ = override_extern; // autofix
-        const function_name = thread.identifiers.get(nat_function.symbol.name) orelse unreachable;
+        const function_name = thread.identifiers.get(nat_function.global_symbol.global_declaration.declaration.name) orelse unreachable;
         const return_type = llvm_get_type(thread, nat_function.return_type);
         var argument_types = PinnedArray(*LLVM.Type){};
         _ = &argument_types;
@@ -1973,8 +2185,8 @@ fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, overr
         }
         const is_var_args = false;
         const function_type = LLVM.getFunctionType(return_type, argument_types.pointer, argument_types.length, is_var_args);
-        const is_extern_function = nat_function.symbol.attributes.@"extern";
-        const export_or_extern = nat_function.symbol.attributes.@"export" or is_extern_function; 
+        const is_extern_function = nat_function.global_symbol.attributes.@"extern";
+        const export_or_extern = nat_function.global_symbol.attributes.@"export" or is_extern_function; 
         const linkage: LLVM.Linkage = switch (export_or_extern) {
             true => .@"extern",
             false => .internal,
@@ -2050,11 +2262,161 @@ fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, overr
     }
 }
 
+pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser, file: *File) void {
+    const src = file.source_code;
+    const function = analyzer.current_function;
+    const block_start = parser.i;
+    const block_line = parser.current_line + 1;
+    _ = block_line; // autofix
+    const block_column = block_start - parser.line_offset + 1;
+    _ = block_column; // autofix
+    parser.expect_character(src, brace_open);
+    const local_block = thread.local_blocks.append(.{
+        .scope = .{
+            .id = .local,
+            .parent = analyzer.current_scope,
+        },
+    });
+    analyzer.current_scope = &local_block.scope;
+    parser.skip_space(src);
+
+    while (true) {
+        parser.skip_space(src);
+
+        const statement_start_ch = src[parser.i];
+
+        if (statement_start_ch == brace_close) {
+            break;
+        }
+
+        switch (statement_start_ch) {
+            'r' => {
+                const identifier = parser.parse_raw_identifier(src);
+
+                if (byte_equal(identifier, "return")) {
+                    parser.skip_space(src);
+
+                    if (function.declaration.return_type.sema.id != .unresolved) {
+                        const return_value = parser.parse_typed_expression(analyzer, thread, file, function.declaration.return_type, .right);
+                        parser.expect_character(src, ';');
+
+                        const return_expression = thread.returns.append(.{
+                            .instruction = .{
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = return_value.sema.resolved,
+                                        .id = .instruction,
+                                    },
+                                    },
+                                .id = .ret,
+                            },
+                            .value = return_value,
+                        });
+
+                        _ = analyzer.current_basic_block.instructions.append(&return_expression.instruction);
+                        analyzer.current_basic_block.is_terminated = true;
+                    } else  {
+                        exit(1);
+                    }
+                } else {
+                    exit(1);
+                }
+            },
+            // Local variable
+            '>' => {
+                parser.i += 1;
+
+                parser.skip_space(src);
+
+                const local_name = parser.parse_identifier(thread, src);
+                if (analyzer.current_scope.get_declaration(local_name)) |lookup_result| {
+                    _ = lookup_result;
+                    exit_with_error("Existing declaration with the same name");
+                }
+
+
+                const has_local_attributes = src[parser.i] == '[';
+                parser.i += @intFromBool(has_local_attributes);
+
+                if (has_local_attributes) {
+                    exit_with_error("TODO: local attributes");
+                }
+
+                parser.expect_character(src, ':');
+
+                parser.skip_space(src);
+
+                const local_type = parser.parse_type_expression(thread, src);
+
+                parser.skip_space(src);
+
+                parser.expect_character(src, '=');
+
+                parser.skip_space(src);
+
+                const local_initial_value = parser.parse_typed_expression(analyzer, thread, file, local_type, .right);
+
+                parser.expect_character(src, ';');
+
+                const local_symbol = thread.local_symbols.append(.{
+                    .local_declaration = .{
+                        .declaration = .{
+                            .id = .local,
+                            .name = local_name,
+                        },
+                    },
+                    .type = local_type,
+                    .instruction = .{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = local_type.sema.resolved and local_initial_value.sema.resolved,
+                                .id = .instruction,
+                            },
+                        },
+                        .id = .local_symbol,
+                    },
+                    .alignment = local_type.alignment,
+                });
+
+                _ = analyzer.current_function.stack_slots.append(local_symbol);
+
+                const store = thread.stores.append(.{
+                    .instruction = .{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .instruction,
+                            },
+                        },
+                        .id = .store,
+                    },
+                    .destination = &local_symbol.instruction.value,
+                    .source = local_initial_value,
+                    .alignment = local_symbol.alignment,
+                    .is_volatile = false,
+                });
+                _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+
+                local_block.scope.declarations.put_no_clobber(local_name, &local_symbol.local_declaration.declaration);
+            },
+            else => {
+                exit_with_error("Unrecognized statement initial char");
+            },
+        }
+    }
+
+    parser.expect_character(src, brace_close);
+}
+
 pub fn analyze_file(thread: *Thread, file_index: u32) void {
     const file = instance.files.get(@enumFromInt(file_index));
     const src = file.source_code;
+
     if (src.len > std.math.maxInt(u32)) {
-        exit(1);
+        exit_with_error("File too big");
     }
 
     file.functions.start = @intCast(thread.functions.length);
@@ -2065,7 +2427,9 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
     while (true) {
         parser.skip_space(src);
 
-        if (parser.i >= src.len) break;
+        if (parser.i >= src.len) {
+            break;
+        }
 
         const declaration_start_i = parser.i;
         const declaration_start_ch = src[declaration_start_i];
@@ -2097,11 +2461,14 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     function.* = .{
                         .declaration = .{
                             .return_type = undefined,
-                            .symbol = .{
-                                .name = undefined,
-                            },
-                            .global_declaration = .{
-                                .id = .function_definition,
+                            .global_symbol = .{
+                                .global_declaration = .{
+                                    .declaration = .{
+                                        .name = std.math.maxInt(u32),
+                                        .id = .global,
+                                    },
+                                    .id = .function_definition,
+                                },
                             },
                             .file = file_index,
                             .value = .{
@@ -2110,6 +2477,12 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                     .resolved = true, // TODO: is this correct?
                                     .id = .function_declaration,
                                 },
+                            },
+                        },
+                        .scope = .{
+                            .scope = .{
+                                .id = .function,
+                                .parent = &file.scope.scope,
                             },
                         },
                         .entry_block = entry_block_index,
@@ -2182,14 +2555,14 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         parser.skip_space(src);
                     }
 
-                    function.declaration.symbol.name = parser.parse_identifier(thread, src);
+                    function.declaration.global_symbol.global_declaration.declaration.name = parser.parse_identifier(thread, src);
 
                     parser.skip_space(src);
 
-                    const has_symbol_attributes = src[parser.i] == '[';
-                    parser.i += @intFromBool(has_symbol_attributes);
+                    const has_global_attributes = src[parser.i] == '[';
+                    parser.i += @intFromBool(has_global_attributes);
 
-                    if (has_symbol_attributes) {
+                    if (has_global_attributes) {
                         var attribute_mask = GlobalSymbol.Attribute.Mask.initEmpty();
 
                         while (true) {
@@ -2240,7 +2613,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     const split_modules = true;
                     if (split_modules) {
-                        function.declaration.symbol.attributes.@"export" = true;
+                        function.declaration.global_symbol.attributes.@"export" = true;
                     }
 
                     parser.expect_character(src, '(');
@@ -2261,60 +2634,19 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     parser.skip_space(src);
 
-                    const block_start = parser.i;
-                    const block_line = parser.current_line + 1;
-                    _ = block_line; // autofix
-                    const block_column = block_start - parser.line_offset + 1;
-                    _ = block_column; // autofix
-                                      //
-                    parser.expect_character(src, brace_open);
-                    file.scope.declarations.put_no_clobber(function.declaration.symbol.name, &function.declaration.global_declaration);
-                    //
-                    parser.skip_space(src);
+                    file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
 
-                    while (true) {
-                        parser.skip_space(src);
-
-                        if (src[parser.i] == brace_close) break;
-
-                        if (src[parser.i] == 'r') {
-                            const identifier = parser.parse_raw_identifier(src);
-
-                            if (byte_equal(identifier, "return")) {
-                                parser.skip_space(src);
-
-                                if (function.declaration.return_type.sema.id != .unresolved) {
-                                    const return_value = parser.parse_typed_expression(&analyzer, thread, file, function.declaration.return_type);
-                                    parser.expect_character(src, ';');
-
-                                    const return_expression = thread.returns.append(.{
-                                        .instruction = .{
-                                            .value = .{
-                                                .sema = .{
-                                                    .thread = thread.get_index(),
-                                                    .resolved = return_value.sema.resolved,
-                                                    .id = .instruction,
-                                                },
-                                            },
-                                            .id = .ret,
-                                        },
-                                        .value = return_value,
-                                    });
-
-                                    _ = analyzer.current_basic_block.instructions.append(&return_expression.instruction);
-                                    analyzer.current_basic_block.is_terminated = true;
-                                } else  {
-                                    exit(1);
-                                }
-                            } else {
-                                exit(1);
-                            }
-                        } else {
-                            exit(1);
-                        }
+                    analyzer.current_scope = &analyzer.current_function.scope.scope;
+                    
+                    switch (src[parser.i]) {
+                        '{' => {
+                            analyze_local_block(thread, &analyzer, &parser, file);
+                        },
+                        ';' => {
+                            unreachable;
+                        },
+                        else => exit_with_error("Unexpected character to close function declaration"),
                     }
-
-                    parser.expect_character(src, brace_close);
                 } else {
                     exit(1);
                 }
@@ -2353,14 +2685,18 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     } else {
                         const import = thread.imports.append(.{
                             .global_declaration = .{
+                                .declaration = .{
+                                    .id = .global,
+                                    .name = std.math.maxInt(u32),
+                                },
                                 .id = .unresolved_import,
                             },
                             .hash = file_path_hash,
                         });
                         _ = import.files.append(file);
                         _ = file.imports.append(import);
-                        file.scope.declarations.put_no_clobber(filename_without_extension_hash, &import.global_declaration);
-                        const global_declaration_reference = file.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable;
+                        file.scope.scope.declarations.put_no_clobber(filename_without_extension_hash, &import.global_declaration.declaration);
+                        const global_declaration_reference: **GlobalDeclaration = @ptrCast(file.scope.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable);
                         const import_values = file.values_per_import.append(.{});
                         const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(global_declaration_reference, thread));
                         _ = import_values.append(&lazy_expression.value);
@@ -2403,6 +2739,17 @@ fn try_resolve_file(thread: *Thread, file: *File) void {
                 .count = @intCast(ti),
             });
         }
+    }
+}
+
+const TypecheckResult = enum{
+    success,
+};
+fn typecheck(expected: *Type, have: *Type) TypecheckResult {
+    if (expected == have) {
+        return TypecheckResult.success;
+    } else {
+        exit(1);
     }
 }
 
