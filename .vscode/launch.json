@@ -12,7 +12,7 @@
             "args": [
                 "exe",
                 "-main_source_file",
-                "test/build/c-abi/main.nat",
+                "retest/standalone/first/main.nat"
             ],
             "cwd": "${workspaceFolder}",
         },

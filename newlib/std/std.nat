@@ -1,0 +1,4 @@
+fn[extern] exit(exit_code: s32) noreturn;
+fn my_exit(exit_code: s32) noreturn {
+    exit(exit_code);
+}
