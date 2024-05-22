@@ -10,6 +10,12 @@ const hash_bytes = library.my_hash;
 const byte_equal = library.byte_equal;
 const Atomic = std.atomic.Value;
 
+const weak_memory_model = switch (builtin.cpu.arch) {
+    .aarch64 => true,
+    .x86_64 => false,
+    else => @compileError("Error: unknown arch"),
+};
+
 fn exit(exit_code: u8) noreturn {
     @setCold(true);
     // if (builtin.mode == .Debug) {
@@ -794,34 +800,34 @@ const JobQueue = struct{
     fn queue_job(job_queue: *JobQueue, job: Job) void {
         // std.debug.print("[0x{x}] Queueing job '{s}'\n", .{@intFromPtr(job_queue) & 0xfff, @tagName(job.id)});
         const index = job_queue.queuer.next_write;
-        @fence(.seq_cst);
+        if (weak_memory_model) @fence(.seq_cst);
         assert(index + 1 != @atomicLoad(@TypeOf(job_queue.worker.next_read), &job_queue.worker.next_read, .seq_cst));
-        @fence(.seq_cst);
+        if (weak_memory_model)         @fence(.seq_cst);
         const ptr = &job_queue.entries[index];
         //if (job.id == .analyze_file and job.count == 0 and job.offset == 0) unreachable;
         // std.debug.print("Before W 0x{x} - 0x{x}\n", .{@intFromPtr(ptr), job.offset});
         ptr.* = job;
-        @fence(.seq_cst);
+        if (weak_memory_model) @fence(.seq_cst);
         // std.debug.print("After W 0x{x}\n", .{@intFromPtr(ptr)});
         job_queue.queuer.to_do += 1;
-        @fence(.seq_cst);
+        if (weak_memory_model) @fence(.seq_cst);
         job_queue.queuer.next_write = index + 1;
-        @fence(.seq_cst);
+        if (weak_memory_model) @fence(.seq_cst);
     }
 
     fn get_next_job(job_queue: *JobQueue) ?Job{
         const index = job_queue.worker.next_read;
-        @fence(.seq_cst);
+        if (weak_memory_model) @fence(.seq_cst);
         const nw = @atomicLoad(@TypeOf(job_queue.queuer.next_write), &job_queue.queuer.next_write, .seq_cst);
-        @fence(.seq_cst);
+        if (weak_memory_model) @fence(.seq_cst);
         if (index != nw) {
-            @fence(.seq_cst);
+            if (weak_memory_model) @fence(.seq_cst);
             job_queue.worker.next_read += 1;
-            @fence(.seq_cst);
+            if (weak_memory_model) @fence(.seq_cst);
             const job_ptr = &job_queue.entries[index];
-        @fence(.seq_cst);
+            if (weak_memory_model) @fence(.seq_cst);
             const job = job_ptr.*;
-            @fence(.seq_cst);
+            if (weak_memory_model) @fence(.seq_cst);
             // std.debug.print("[0x{x}] Getting job #{} (0x{x} -\n{}\n) (nw: {})\n", .{@intFromPtr(job_queue) & 0xfff, index, @intFromPtr(job), job.*, nw});
             //if (job.id == .analyze_file and job.count == 0 and job.offset == 0) unreachable;
             return job;
