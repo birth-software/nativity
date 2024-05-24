@@ -1227,10 +1227,13 @@ const Unit = struct {
 fn control_thread(unit: *Unit) void {
     var last_assigned_thread_index: u32 = 1;
     var first_ir_done = false;
-
     var total_is_done: bool = false;
+    var iterations_without_work_done: u32 = 0;
+
     while (!total_is_done) {
         total_is_done = first_ir_done;
+
+        var task_done_this_iteration: u32 = 0;
 
         for (instance.threads, 0..) |*thread, i| {
             // INFO: No need to do an atomic load here since it's only this thread writing to the value
@@ -1300,7 +1303,14 @@ fn control_thread(unit: *Unit) void {
 
                 thread.task_system.ask.complete_job();
                 previous_job = job;
+                task_done_this_iteration += 1;
             }
+        }
+
+        iterations_without_work_done += @intFromBool(task_done_this_iteration == 0);
+
+        if (iterations_without_work_done > 5) {
+            std.time.sleep(100);
         }
     }
 
@@ -1762,7 +1772,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                     const file_index = job.count;
                     const file = &instance.files.pointer[file_index];
 
-                    if (&instance.threads[file.thread] == thread) {
+                    if (thread == &instance.threads[file.thread]) {
                         exit_with_error("Threads match!");
                     } else {
                         const file_path_hash = job.offset;
@@ -2084,6 +2094,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
             assert(thread.task_system.job.worker.completed == c + 1);
         }
 
+        std.time.sleep(1000);
         std.atomic.spinLoopHint();
     }
 }
