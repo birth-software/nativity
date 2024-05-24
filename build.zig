@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) !void {
     const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse (!is_ci and enable_editor);
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
     const sanitize = b.option(bool, "sanitize", "This option enables sanitizers for the compiler") orelse false;
+    const sleep_on_thread_hot_loops = b.option(bool, "sleep_on_thread_hot_loops", "This option enables sleep calls on hot threaded loops") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
         .windows => true,
@@ -39,6 +40,7 @@ pub fn build(b: *std.Build) !void {
     compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
     compiler_options.addOption(bool, "ci", is_ci);
     compiler_options.addOption(bool, "editor", use_editor);
+    compiler_options.addOption(bool, "sleep_on_thread_hot_loops", sleep_on_thread_hot_loops);
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",

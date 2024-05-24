@@ -1,4 +1,5 @@
 const compiler = @This();
+const configuration = @import("configuration");
 const std = @import("std");
 const builtin = @import("builtin");
 const library = @import("library.zig");
@@ -1309,8 +1310,12 @@ fn control_thread(unit: *Unit) void {
 
         iterations_without_work_done += @intFromBool(task_done_this_iteration == 0);
 
-        if (iterations_without_work_done > 5) {
-            std.time.sleep(100);
+        if (configuration.sleep_on_thread_hot_loops) {
+            if (iterations_without_work_done > 5) {
+                std.time.sleep(100);
+            }
+        } else {
+            std.atomic.spinLoopHint();
         }
     }
 
@@ -1580,7 +1585,7 @@ pub fn link(options: LinkerOptions) void {
         _ = argv.append(object);
     }
 
-    const ci = @import("configuration").ci;
+    const ci = configuration.ci;
     switch (builtin.os.tag) {
         .macos => {
             _ = argv.append("-dynamic");
@@ -2094,8 +2099,11 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
             assert(thread.task_system.job.worker.completed == c + 1);
         }
 
-        std.time.sleep(1000);
-        std.atomic.spinLoopHint();
+        if (configuration.sleep_on_thread_hot_loops) {
+            std.time.sleep(1000);
+        } else {
+            std.atomic.spinLoopHint();
+        }
     }
 }
 
@@ -3943,7 +3951,7 @@ pub const LLVM = struct {
 
 pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
     @setCold(true);
-    const print_stack_trace = @import("configuration").print_stack_trace;
+    const print_stack_trace = configuration.print_stack_trace;
     switch (print_stack_trace) {
         true => @call(.always_inline, std.builtin.default_panic, .{ message, stack_trace, return_address }),
         false => {
