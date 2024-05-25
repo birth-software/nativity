@@ -282,55 +282,93 @@ const Parser = struct{
         }
     }
 
-    fn parse_typed_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: *Type, side: Side) *Value {
-        _ = side; // autofix
-        _ = &analyzer;
+    fn parse_constant_integer(parser: *Parser, thread: *Thread, file: *File, ty: *Type) *ConstantInt {
         const src = file.source_code;
-        assert(ty.sema.id != .unresolved);
-        const starting_ch = src[parser.i];
+        const starting_index = parser.i;
+        const starting_ch = src[starting_index];
+        if (starting_ch == '0') {
+            const follow_up_character = src[parser.i + 1];
+            const is_hex_start = follow_up_character == 'x';
+            const is_octal_start = follow_up_character == 'o';
+            const is_bin_start = follow_up_character == 'b';
+            const is_prefixed_start = is_hex_start or is_octal_start or is_bin_start;
+            const follow_up_alpha = is_alphabetic(follow_up_character);
+            const follow_up_digit = is_decimal_digit(follow_up_character);
+            const is_valid_after_zero = is_space(follow_up_character) or (!follow_up_digit and !follow_up_alpha);
+
+            if (is_prefixed_start) {
+                exit(1);
+            } else if (is_valid_after_zero) {
+                parser.i += 1;
+                const constant_int = thread.constant_ints.append(.{
+                    .value = .{
+                        .sema = .{
+                            .thread = thread.get_index(),
+                            .resolved = true,
+                            .id = .constant_int,
+                        },
+                        },
+                    .n = 0,
+                    .type = ty,
+                });
+                return constant_int;
+            } else {
+                exit(1);
+            }
+        }
+
+        while (is_decimal_digit(src[parser.i])) {
+            parser.i += 1;
+        }
+
+        const character_count = parser.i - starting_index;
+        const slice = src[starting_index..][0..character_count];
+        var i = character_count;
+        var integer: u64 = 0;
+        var factor: u64 = 1;
+
+        while (i > 0) {
+            i -= 1;
+            const ch = slice[i];
+            const int = ch - '0';
+            const extra = int * factor;
+            integer += extra;
+            factor *= 10;
+        }
+
+        const constant_int = thread.constant_ints.append(.{
+            .value = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                    .id = .constant_int,
+                },
+                },
+            .n = integer,
+            .type = ty,
+        });
+
+        return constant_int;
+    }
+
+    fn parse_single_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, maybe_type: ?*Type, side: Side) *Value {
+        _ = side; // autofix
+        const src = file.source_code;
+        const starting_index = parser.i;
+        const starting_ch = src[starting_index];
         const is_digit_start = is_decimal_digit(starting_ch);
         const is_alpha_start = is_alphabetic(starting_ch);
-
         if (is_digit_start) {
+            const ty = maybe_type orelse exit(1);
             switch (ty.sema.id) {
                 .integer => {
-                    if (starting_ch == '0') {
-                        const follow_up_character = src[parser.i + 1];
-                        const is_hex_start = follow_up_character == 'x';
-                        const is_octal_start = follow_up_character == 'o';
-                        const is_bin_start = follow_up_character == 'b';
-                        const is_prefixed_start = is_hex_start or is_octal_start or is_bin_start;
-                        const follow_up_alpha = is_alphabetic(follow_up_character);
-                        const follow_up_digit = is_decimal_digit(follow_up_character);
-                        const is_valid_after_zero = is_space(follow_up_character) or (!follow_up_digit and !follow_up_alpha);
-
-                        if (is_prefixed_start) {
-                            exit(1);
-                        } else if (is_valid_after_zero) {
-                            parser.i += 1;
-                            const constant_int = thread.constant_ints.append(.{
-                                .value = .{
-                                    .sema = .{
-                                        .thread = thread.get_index(),
-                                        .resolved = true,
-                                        .id = .constant_int,
-                                    },
-                                    },
-                                .n = 0,
-                                .type = ty,
-                            });
-                            return &constant_int.value;
-                        } else {
-                            exit(1);
-                        }
-                    }
-                    exit(0);
+                    const constant_int = parser.parse_constant_integer(thread, file, ty);
+                    return &constant_int.value;
                 },
                 else => unreachable,
             }
         } else if (is_alpha_start) {
             var resolved = true;
-            _ = &resolved; // autofix
             const identifier = parser.parse_identifier(thread, src);
 
             if (analyzer.current_scope.get_declaration(identifier)) |lookup_result| {
@@ -375,7 +413,7 @@ const Parser = struct{
                                                                 .resolved = false,
                                                                 .id = .instruction,
                                                             },
-                                                            },
+                                                        },
                                                         .id = .call,
                                                     },
                                                     .callable = &lazy_expression.value,
@@ -393,36 +431,37 @@ const Parser = struct{
                             },
                             else => |t| @panic(@tagName(t)),
                         }
-                        exit(1);
                     },
-                    ';' => {
+                    ' ', ';' => {
                         switch (lookup_result.declaration.*.id) {
                             .local => {
                                 const local_declaration = lookup_result.declaration.*.get_payload(.local);
                                 const local_symbol = local_declaration.to_symbol();
 
-                                switch (typecheck(ty, local_symbol.type)) {
-                                    .success => {
-                                        const load = thread.loads.append(.{
-                                            .instruction = .{
-                                                .value = .{
-                                                    .sema = .{
-                                                        .thread = thread.get_index(),
-                                                        .resolved = true,
-                                                        .id = .instruction,
-                                                    },
-                                                },
-                                                .id = .load,
-                                            },
-                                            .value = &local_symbol.instruction.value,
-                                            .type = local_symbol.type,
-                                            .alignment = local_symbol.type.alignment,
-                                            .is_volatile = false,
-                                        });
-                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
-                                        return &load.instruction.value;
-                                    },
+                                if (maybe_type) |ty| {
+                                    switch (typecheck(ty, local_symbol.type)) {
+                                        .success => {},
+                                    }
                                 }
+
+                                const load = thread.loads.append(.{
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                            },
+                                        .id = .load,
+                                    },
+                                    .value = &local_symbol.instruction.value,
+                                    .type = local_symbol.type,
+                                    .alignment = local_symbol.type.alignment,
+                                    .is_volatile = false,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                return &load.instruction.value;
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -432,6 +471,88 @@ const Parser = struct{
             } else exit(1);
         } else {
             exit(1);
+        }
+    }
+
+    const CurrentOperation = enum{
+        none,
+        add,
+        add_assign,
+        sub,
+        sub_assign,
+    };
+
+    fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
+        const src = file.source_code;
+
+        var current_operation = CurrentOperation.none;
+        var previous_value: *Value = undefined;
+        while (true) {
+            const current_value = parser.parse_single_expression(analyzer, thread, file, ty, side);
+            parser.skip_space(src);
+
+            switch (current_operation) {
+                .none => {
+                    previous_value = current_value;
+                },
+                .add, .sub => {
+                    const add = thread.integer_binary_operations.append(.{
+                        .instruction = .{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .instruction,
+                                },
+                            },
+                            .id = .integer_binary_operation,
+                        },
+                        .left = previous_value,
+                        .right = current_value,
+                        .id = switch (current_operation) {
+                            .none, .add_assign, .sub_assign => unreachable,
+                            inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
+                        },
+                        .type = if (ty) |t| t else current_value.get_type(),
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&add.instruction);
+                    previous_value = &add.instruction.value;
+                },
+                .add_assign, .sub_assign => unreachable,
+            }
+
+            switch (src[parser.i]) {
+                ';' => return previous_value,
+                '+' => {
+                    current_operation = .add;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .add_assign;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '-' => {
+                    current_operation = .sub;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .sub_assign;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                else => @panic((src.ptr + parser.i)[0..1]),
+            }
         }
     }
 };
@@ -494,20 +615,6 @@ const LazyExpression = struct {
     }
 };
 
-// fn Descriptor(comptime Id: type, comptime Integer: type) type {
-//     return packed struct(Integer) {
-//         index: @Type(.{
-//             .Int = .{
-//                 .signedness = .unsigned,
-//                 .bits = @typeInfo(Integer).Int.bits - @typeInfo(@typeInfo(Id).Enum.tag_type).Int.bits,
-//             },
-//         }),
-//         id: Id,
-//
-//         pub const Index = PinnedArray(@This()).Index;
-//     };
-// }
-
 const Value = struct {
     llvm: ?*LLVM.Value = null,
     sema: packed struct(u32) {
@@ -534,6 +641,26 @@ const Value = struct {
     fn get_payload(value: *Value, comptime id: Id) *id_to_value_map.get(id) {
         assert(value.sema.id == id);
         return @fieldParentPtr("value", value);
+    }
+
+    fn get_type(value: *Value) *Type {
+        return switch (value.sema.id) {
+            .instruction => blk: {
+                const instruction = value.get_payload(.instruction);
+                break :blk switch (instruction.id) {
+                    .integer_binary_operation => block: {
+                        const bin_op = instruction.get_payload(.integer_binary_operation);
+                        break :block bin_op.type;
+                    },
+                    .load => block: {
+                        const load = instruction.get_payload(.load);
+                        break :block load.type;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
+            },
+            else => |t| @panic(@tagName(t)),
+        };
     }
 };
 
@@ -747,11 +874,18 @@ const Function = struct{
     };
 };
 
+const ConstantInt = struct{
+    value: Value,
+    n: u64,
+    type: *Type,
+};
+
 const Instruction = struct{
     value: Value,
     id: Id,
 
     const Id = enum{
+        integer_binary_operation,
         call,
         load,
         local_symbol,
@@ -762,6 +896,7 @@ const Instruction = struct{
 
     const id_to_instruction_map = std.EnumArray(Id, type).init(.{
         .call = Call,
+        .integer_binary_operation = IntegerBinaryOperation,
         .local_symbol = LocalSymbol,
         .load = Load,
         .ret = Return,
@@ -775,10 +910,17 @@ const Instruction = struct{
     }
 };
 
-const ConstantInt = struct{
-    value: Value,
-    n: u64,
+const IntegerBinaryOperation = struct {
+    instruction: Instruction,
+    left: *Value,
+    right: *Value,
     type: *Type,
+    id: Id,
+
+    const Id = enum{
+        add,
+        sub,
+    };
 };
 
 const Call = struct{
@@ -839,6 +981,7 @@ const Thread = struct{
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
     // pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
     calls: PinnedArray(Call) = .{},
+    integer_binary_operations: PinnedArray(IntegerBinaryOperation) = .{},
     loads: PinnedArray(Load) = .{},
     stores: PinnedArray(Store) = .{},
     returns: PinnedArray(Return) = .{},
@@ -1991,15 +2134,12 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                             for (nat_entry_basic_block.instructions.slice()) |instruction| {
                                 const value: *LLVM.Value = switch (instruction.id) {
-                                    .call => block: {
-                                        const call = instruction.get_payload(.call);
-                                        const callee = llvm_get_value(thread, call.callable);
-                                        const callee_function = callee.toFunction() orelse unreachable;
-                                        const function_type = callee_function.getType();
-
-                                        const arguments: []const *LLVM.Value = &.{};
-                                        const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
-                                        break :block call_i.toValue();
+                                    .store => block: {
+                                        const store = instruction.get_payload(.store);
+                                        const destination = llvm_get_value(thread, store.destination);
+                                        const source = llvm_get_value(thread, store.source);
+                                        const store_instruction = builder.createStore(source, destination, store.is_volatile, store.alignment);
+                                        break :block store_instruction.toValue();
                                     },
                                     .load => block: {
                                         const load = instruction.get_payload(.load);
@@ -2009,18 +2149,33 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         const load_instruction = builder.createLoad(load_type, load_value, load.is_volatile, "", "".len, load.alignment);
                                         break :block load_instruction.toValue();
                                     },
-                                    .store => block: {
-                                        const store = instruction.get_payload(.store);
-                                        const destination = llvm_get_value(thread, store.destination);
-                                        const source = llvm_get_value(thread, store.source);
-                                        const store_instruction = builder.createStore(source, destination, store.is_volatile, store.alignment);
-                                        break :block store_instruction.toValue();
-                                    },
                                     .ret => block: {
                                         const return_instruction = instruction.get_payload(.ret);
                                         const return_value = llvm_get_value(thread, return_instruction.value);
                                         const ret = thread.llvm.builder.createRet(return_value);
                                         break :block ret.toValue();
+                                    },
+                                    .integer_binary_operation => block: {
+                                        const integer_binary_operation = instruction.get_payload(.integer_binary_operation);
+                                        const left = llvm_get_value(thread, integer_binary_operation.left);
+                                        const right = llvm_get_value(thread, integer_binary_operation.right);
+                                        const integer_type = integer_binary_operation.type.get_payload(.integer);
+                                        const no_unsigned_wrapping = integer_type.signedness == .unsigned;
+                                        const no_signed_wrapping = integer_type.signedness == .signed;
+                                        break :block switch (integer_binary_operation.id) {
+                                            .add => builder.createAdd(left, right, "", "".len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .sub => builder.createSub(left, right, "", "".len, no_unsigned_wrapping, no_signed_wrapping),
+                                        };
+                                    },
+                                    .call => block: {
+                                        const call = instruction.get_payload(.call);
+                                        const callee = llvm_get_value(thread, call.callable);
+                                        const callee_function = callee.toFunction() orelse unreachable;
+                                        const function_type = callee_function.getType();
+
+                                        const arguments: []const *LLVM.Value = &.{};
+                                        const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
+                                        break :block call_i.toValue();
                                     },
                                     else => |t| @panic(@tagName(t)),
                                 };
@@ -2056,12 +2211,14 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         }
 
                         const verify_module = true;
+                        const print_module_at_failure = true;
+                        const print_module = false;
+
                         if (verify_module) {
                             var verification_message: []const u8 = undefined;
                             const verification_success = thread.llvm.module.verify(&verification_message.ptr, &verification_message.len);
                             if (!verification_success) {
-                                const print_module = true;
-                                if (print_module) {
+                                if (print_module_at_failure) {
                                     var module_content: []const u8 = undefined;
                                     thread.llvm.module.toString(&module_content.ptr, &module_content.len);
                                     write(module_content);
@@ -2070,6 +2227,13 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                                 exit_with_error(verification_message);
                             }
+                        }
+
+                        if (print_module) {
+                            var module_content: []const u8 = undefined;
+                            thread.llvm.module.toString(&module_content.ptr, &module_content.len);
+                            write(module_content);
+                            write("\n");
                         }
 
                         thread.add_control_work(.{
@@ -2316,7 +2480,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     parser.skip_space(src);
 
                     if (function.declaration.return_type.sema.id != .unresolved) {
-                        const return_value = parser.parse_typed_expression(analyzer, thread, file, function.declaration.return_type, .right);
+                        const return_value = parser.parse_expression(analyzer, thread, file, function.declaration.return_type, .right);
                         parser.expect_character(src, ';');
 
                         const return_expression = thread.returns.append(.{
@@ -2362,19 +2526,50 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     exit_with_error("TODO: local attributes");
                 }
 
-                parser.expect_character(src, ':');
-
                 parser.skip_space(src);
 
-                const local_type = parser.parse_type_expression(thread, src);
+                const LocalResult = struct {
+                    initial_value: *Value,
+                    type: *Type,
+                };
+                const result: LocalResult = switch (src[parser.i]) {
+                    ':' => block: {
+                        parser.i += 1;
+
+                        parser.skip_space(src);
+
+                        const local_type = parser.parse_type_expression(thread, src);
+
+                        parser.skip_space(src);
+                        parser.expect_character(src, '=');
+
+                        parser.skip_space(src);
+
+                        const local_initial_value = parser.parse_expression(analyzer, thread, file, local_type, .right);
+
+                        break :block .{
+                            .initial_value = local_initial_value,
+                            .type = local_type,
+                        };
+                    },
+                    '=' => block: {
+                        parser.i += 1;
+
+                        parser.skip_space(src);
+
+                        const local_initial_value = parser.parse_expression(analyzer, thread, file, null, .right);
+
+                        const local_type = local_initial_value.get_type();
+
+                        break :block .{
+                            .initial_value = local_initial_value,
+                            .type = local_type,
+                        };
+                    },
+                    else => exit(1),
+                };
 
                 parser.skip_space(src);
-
-                parser.expect_character(src, '=');
-
-                parser.skip_space(src);
-
-                const local_initial_value = parser.parse_typed_expression(analyzer, thread, file, local_type, .right);
 
                 parser.expect_character(src, ';');
 
@@ -2384,19 +2579,19 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             .id = .local,
                             .name = local_name,
                         },
-                    },
-                    .type = local_type,
+                        },
+                    .type = result.type,
                     .instruction = .{
                         .value = .{
                             .sema = .{
                                 .thread = thread.get_index(),
-                                .resolved = local_type.sema.resolved and local_initial_value.sema.resolved,
+                                .resolved = result.type.sema.resolved and result.initial_value.sema.resolved,
                                 .id = .instruction,
                             },
-                        },
+                            },
                         .id = .local_symbol,
                     },
-                    .alignment = local_type.alignment,
+                    .alignment = result.type.alignment,
                 });
 
                 _ = analyzer.current_function.stack_slots.append(local_symbol);
@@ -2409,11 +2604,11 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                 .resolved = true,
                                 .id = .instruction,
                             },
-                        },
+                            },
                         .id = .store,
                     },
                     .destination = &local_symbol.instruction.value,
-                    .source = local_initial_value,
+                    .source = result.initial_value,
                     .alignment = local_symbol.alignment,
                     .is_volatile = false,
                 });
