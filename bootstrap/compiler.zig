@@ -480,6 +480,8 @@ const Parser = struct{
         add_assign,
         sub,
         sub_assign,
+        @"and",
+        and_assign,
     };
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
@@ -495,7 +497,7 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .add, .sub => {
+                .add, .sub, .@"and" => {
                     const add = thread.integer_binary_operations.append(.{
                         .instruction = .{
                             .value = .{
@@ -510,7 +512,7 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .add_assign, .sub_assign => unreachable,
+                            .none, .add_assign, .sub_assign, .and_assign => unreachable,
                             inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
                         .type = if (ty) |t| t else current_value.get_type(),
@@ -518,7 +520,7 @@ const Parser = struct{
                     _ = analyzer.current_basic_block.instructions.append(&add.instruction);
                     previous_value = &add.instruction.value;
                 },
-                .add_assign, .sub_assign => unreachable,
+                .add_assign, .sub_assign, .and_assign => unreachable,
             }
 
             switch (src[parser.i]) {
@@ -544,6 +546,20 @@ const Parser = struct{
                     switch (src[parser.i]) {
                         '=' => {
                             current_operation = .sub_assign;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '&' => {
+                    current_operation = .@"and";
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .and_assign;
                             parser.i += 1;
                         },
                         else => {},
@@ -920,6 +936,7 @@ const IntegerBinaryOperation = struct {
     const Id = enum{
         add,
         sub,
+        @"and",
     };
 };
 
@@ -2162,9 +2179,11 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         const integer_type = integer_binary_operation.type.get_payload(.integer);
                                         const no_unsigned_wrapping = integer_type.signedness == .unsigned;
                                         const no_signed_wrapping = integer_type.signedness == .signed;
+                                        const name = "";
                                         break :block switch (integer_binary_operation.id) {
-                                            .add => builder.createAdd(left, right, "", "".len, no_unsigned_wrapping, no_signed_wrapping),
-                                            .sub => builder.createSub(left, right, "", "".len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .@"and" => builder.createAnd(left, right, name, name.len),
                                         };
                                     },
                                     .call => block: {
