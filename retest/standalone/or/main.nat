@@ -1,0 +1,7 @@
+fn [cc(.c)] main [export] () s32 {
+    >a: s32 = 0xffff;
+    >b: s32 = 0xffff0000;
+    >c: s32 = 0xffffffff;
+    >result = c - (a | b);
+    return result;
+}

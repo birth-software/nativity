@@ -58,6 +58,10 @@ fn is_decimal_digit(ch: u8) bool {
     return ch >= '0' and ch <= '9';
 }
 
+fn is_hex_digit(ch: u8) bool {
+    return (is_decimal_digit(ch) or ((ch == 'a' or ch == 'A') or (ch == 'b' or ch == 'B'))) or (((ch == 'c' or ch == 'C') or (ch == 'd' or ch == 'D')) or ((ch == 'e' or ch == 'E') or (ch == 'f' or ch == 'F')));
+}
+
 fn is_alphabetic(ch: u8) bool {
     const lower =  is_lower(ch);
     const upper =  is_upper(ch);
@@ -225,6 +229,40 @@ const Parser = struct{
         }
     }
 
+    pub fn parse_hex(slice: []const u8) u64 {
+        var i = slice.len;
+        var integer: u64 = 0;
+        var factor: u64 = 1;
+
+        while (i > 0) {
+            i -= 1;
+            const ch = slice[i];
+            switch (ch) {
+                '0'...'9' => {
+                    const int = ch - '0';
+                    const extra = int * factor;
+                    integer += extra;
+                    factor *= 16;
+                },
+                'a'...'f' => {
+                    const int = ch - 'a' + 10;
+                    const extra = int * factor;
+                    integer += extra;
+                    factor *= 16;
+                },
+                'A'...'F' => {
+                    const int = ch - 'A' + 10;
+                    const extra = int * factor;
+                    integer += extra;
+                    factor *= 16;
+                },
+                else => exit(1),
+            }
+        }
+
+        return integer;
+    }
+
     fn parse_type_expression(parser: *Parser, thread: *Thread, src: []const u8) *Type {
         const starting_ch = src[parser.i];
         const is_start_u = starting_ch == 'u';
@@ -297,6 +335,51 @@ const Parser = struct{
             const is_valid_after_zero = is_space(follow_up_character) or (!follow_up_digit and !follow_up_alpha);
 
             if (is_prefixed_start) {
+                const Prefix = enum {
+                    hexadecimal,
+                    octal,
+                    binary,
+                };
+                const prefix: Prefix = switch (follow_up_character) {
+                    'x' => .hexadecimal,
+                    'o' => .octal,
+                    'b' => .binary,
+                    else => unreachable,
+                };
+
+                parser.i += 2;
+
+                const start = parser.i;
+
+                switch (prefix) {
+                    .hexadecimal => {
+                        while (is_hex_digit(src[parser.i])) {
+                            parser.i += 1;
+                        }
+
+                        const slice = src[start..parser.i];
+                        const number = parse_hex(slice);
+
+                        const constant_int = thread.constant_ints.append(.{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .constant_int,
+                                },
+                            },
+                            .n = number,
+                            .type = ty,
+                        });
+                        return constant_int;
+                    },
+                    .octal => {
+                        unreachable;
+                    },
+                    .binary => {
+                        unreachable;
+                    },
+                }
                 exit(1);
             } else if (is_valid_after_zero) {
                 parser.i += 1;
@@ -358,6 +441,7 @@ const Parser = struct{
         const starting_ch = src[starting_index];
         const is_digit_start = is_decimal_digit(starting_ch);
         const is_alpha_start = is_alphabetic(starting_ch);
+
         if (is_digit_start) {
             const ty = maybe_type orelse exit(1);
             switch (ty.sema.id) {
@@ -432,7 +516,7 @@ const Parser = struct{
                             else => |t| @panic(@tagName(t)),
                         }
                     },
-                    ' ', ';' => {
+                    ' ', ';', ')' => {
                         switch (lookup_result.declaration.*.id) {
                             .local => {
                                 const local_declaration = lookup_result.declaration.*.get_payload(.local);
@@ -482,6 +566,8 @@ const Parser = struct{
         sub_assign,
         @"and",
         and_assign,
+        @"or",
+        or_assign,
     };
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
@@ -490,14 +576,22 @@ const Parser = struct{
         var current_operation = CurrentOperation.none;
         var previous_value: *Value = undefined;
         while (true) {
-            const current_value = parser.parse_single_expression(analyzer, thread, file, ty, side);
+            var current_value: *Value = undefined;
+            if (src[parser.i] == '(') {
+                parser.i += 1;
+                current_value = parser.parse_expression(analyzer, thread, file, ty, side);
+                parser.expect_character(src, ')');
+            } else {
+                current_value = parser.parse_single_expression(analyzer, thread, file, ty, side);
+            }
+
             parser.skip_space(src);
 
             switch (current_operation) {
                 .none => {
                     previous_value = current_value;
                 },
-                .add, .sub, .@"and" => {
+                .add, .sub, .@"and", .@"or" => {
                     const add = thread.integer_binary_operations.append(.{
                         .instruction = .{
                             .value = .{
@@ -512,7 +606,7 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .add_assign, .sub_assign, .and_assign => unreachable,
+                            .none, .add_assign, .sub_assign, .and_assign, .or_assign => unreachable,
                             inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
                         .type = if (ty) |t| t else current_value.get_type(),
@@ -520,11 +614,11 @@ const Parser = struct{
                     _ = analyzer.current_basic_block.instructions.append(&add.instruction);
                     previous_value = &add.instruction.value;
                 },
-                .add_assign, .sub_assign, .and_assign => unreachable,
+                .add_assign, .sub_assign, .and_assign, .or_assign => unreachable,
             }
 
             switch (src[parser.i]) {
-                ';' => return previous_value,
+                ')', ';' => return previous_value,
                 '+' => {
                     current_operation = .add;
                     parser.i += 1;
@@ -560,6 +654,20 @@ const Parser = struct{
                     switch (src[parser.i]) {
                         '=' => {
                             current_operation = .and_assign;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '|' => {
+                    current_operation = .@"or";
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .or_assign;
                             parser.i += 1;
                         },
                         else => {},
@@ -937,6 +1045,7 @@ const IntegerBinaryOperation = struct {
         add,
         sub,
         @"and",
+        @"or",
     };
 };
 
@@ -2184,6 +2293,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .@"and" => builder.createAnd(left, right, name, name.len),
+                                            .@"or" => builder.createOr(left, right, name, name.len),
                                         };
                                     },
                                     .call => block: {

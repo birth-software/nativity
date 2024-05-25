@@ -821,3 +821,4 @@ pub fn argument_copy_zero_terminated(arena: *Arena, args: []const []const u8) ![
 
     return result[0..args.len :null];
 }
+
