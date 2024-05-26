@@ -564,6 +564,8 @@ const Parser = struct{
         add_assign,
         sub,
         sub_assign,
+        mul,
+        mul_assign,
         @"and",
         and_assign,
         @"or",
@@ -599,7 +601,7 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .add, .sub, .@"and", .@"or", .xor, .shift_left, .arithmetic_shift_right, .logical_shift_right => {
+                .add, .sub, .mul, .@"and", .@"or", .xor, .shift_left, .arithmetic_shift_right, .logical_shift_right => {
                     const add = thread.integer_binary_operations.append(.{
                         .instruction = .{
                             .value = .{
@@ -614,7 +616,7 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .add_assign, .sub_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign => unreachable,
+                            .none, .add_assign, .sub_assign, .mul_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign => unreachable,
                             inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
                         .type = if (ty) |t| t else current_value.get_type(),
@@ -622,7 +624,7 @@ const Parser = struct{
                     _ = analyzer.current_basic_block.instructions.append(&add.instruction);
                     previous_value = &add.instruction.value;
                 },
-                .add_assign, .sub_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
+                .add_assign, .sub_assign, .mul_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
             }
 
             switch (src[parser.i]) {
@@ -648,6 +650,20 @@ const Parser = struct{
                     switch (src[parser.i]) {
                         '=' => {
                             current_operation = .sub_assign;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '*' => {
+                    current_operation = .mul;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .mul_assign;
                             parser.i += 1;
                         },
                         else => {},
@@ -1121,6 +1137,7 @@ const IntegerBinaryOperation = struct {
     const Id = enum{
         add,
         sub,
+        mul,
         @"and",
         @"or",
         @"xor",
@@ -2374,6 +2391,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         break :block switch (integer_binary_operation.id) {
                                             .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .mul => builder.createMultiply(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .@"and" => builder.createAnd(left, right, name, name.len),
                                             .@"or" => builder.createOr(left, right, name, name.len),
                                             .@"xor" => builder.createXor(left, right, name, name.len),
