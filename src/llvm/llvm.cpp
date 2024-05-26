@@ -794,6 +794,12 @@ extern "C" Function* NativityLLVMValueToFunction(Value* value)
     return function;
 }
 
+extern "C" BasicBlock* NativityLLVMValueToBasicBlock(Value* value)
+{
+    auto* basic_block = dyn_cast<BasicBlock>(value);
+    return basic_block;
+}
+
 extern "C" bool NativityLLVMTypeIsPointer(Type* type)
 {
     bool is_pointer = type->isPointerTy();

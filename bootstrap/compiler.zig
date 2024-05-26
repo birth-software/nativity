@@ -457,6 +457,50 @@ const Parser = struct{
 
             if (analyzer.current_scope.get_declaration(identifier)) |lookup_result| {
                 switch (src[parser.i]) {
+                    '(' => {
+                        parser.i += 1;
+                        parser.skip_space(src);
+
+                        switch (lookup_result.declaration.*.id) {
+                            .local => unreachable,
+                            .global => {
+                                const global = lookup_result.declaration.*.get_payload(.global);
+                                switch (global.id) {
+                                    .function_definition => {
+                                        const function_definition = global.get_payload(.function_definition);
+                                        const declaration_argument_count = function_definition.declaration.argument_types.len;
+                                        const argument_count: u32 = 0;
+                                        while (src[parser.i] != ')') {
+                                            unreachable;
+                                        }
+                                        parser.i += 1;
+
+                                        if (declaration_argument_count != argument_count) {
+                                            exit(1);
+                                        }
+
+                                        const call = thread.calls.append(.{
+                                            .instruction = .{
+                                                .value = .{
+                                                    .sema = .{
+                                                        .thread = thread.get_index(),
+                                                        .resolved = true,
+                                                        .id = .instruction,
+                                                    },
+                                                },
+                                                .id = .call,
+                                            },
+                                            .callable = &function_definition.declaration.value,
+                                        });
+                                        _ = analyzer.current_basic_block.instructions.append(&call.instruction);
+                                        return &call.instruction.value;
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+                            },
+                        }
+
+                    },
                     '.' => {
                         switch (lookup_result.declaration.*.id) {
                             .global => {
@@ -560,6 +604,7 @@ const Parser = struct{
 
     const CurrentOperation = enum{
         none,
+        assign,
         add,
         add_assign,
         sub,
@@ -582,6 +627,8 @@ const Parser = struct{
         arithmetic_shift_right_assign,
         logical_shift_right,
         logical_shift_right_assign,
+
+        compare_equal,
     };
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
@@ -589,14 +636,19 @@ const Parser = struct{
 
         var current_operation = CurrentOperation.none;
         var previous_value: *Value = undefined;
+        var iterations: usize = 0;
+        var it_ty: ?*Type = ty;
         while (true) {
+            if (iterations == 1 and it_ty == null) {
+                it_ty = previous_value.get_type();
+            }
             var current_value: *Value = undefined;
             if (src[parser.i] == '(') {
                 parser.i += 1;
-                current_value = parser.parse_expression(analyzer, thread, file, ty, side);
+                current_value = parser.parse_expression(analyzer, thread, file, it_ty, side);
                 parser.expect_character(src, ')');
             } else {
-                current_value = parser.parse_single_expression(analyzer, thread, file, ty, side);
+                current_value = parser.parse_single_expression(analyzer, thread, file, it_ty, side);
             }
 
             parser.skip_space(src);
@@ -605,8 +657,34 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
+                .compare_equal => {
+                    switch (current_operation) {
+                        else => unreachable,
+                        inline .compare_equal => |co| {
+                            const string = @tagName(co)["compare_".len..];
+                            const comparison = @field(IntegerCompare.Id, string);
+                            const compare = thread.integer_compares.append(.{
+                                .instruction = .{
+                                    .value = .{
+                                        .sema = .{
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                            .id = .instruction,
+                                        },
+                                    },
+                                    .id = .integer_compare,
+                                },
+                                .left = previous_value,
+                                .right = current_value,
+                                .id = comparison,
+                            });
+                            _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+                            previous_value = &compare.instruction.value;
+                        }
+                    }
+                },
                 .add, .sub, .mul, .udiv, .sdiv, .@"and", .@"or", .xor, .shift_left, .arithmetic_shift_right, .logical_shift_right => {
-                    const add = thread.integer_binary_operations.append(.{
+                    const i = thread.integer_binary_operations.append(.{
                         .instruction = .{
                             .value = .{
                                 .sema = .{
@@ -620,19 +698,33 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign => unreachable,
+                            .none, .assign, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign, .compare_equal => unreachable,
                             inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
-                        .type = if (ty) |t| t else current_value.get_type(),
+                        .type = if (it_ty) |t| t else current_value.get_type(),
                     });
-                    _ = analyzer.current_basic_block.instructions.append(&add.instruction);
-                    previous_value = &add.instruction.value;
+                    _ = analyzer.current_basic_block.instructions.append(&i.instruction);
+                    previous_value = &i.instruction.value;
                 },
-                .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
+                .assign, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
             }
 
             switch (src[parser.i]) {
                 ')', ';' => return previous_value,
+                '=' => {
+                    current_operation = .assign;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .compare_equal;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
                 '+' => {
                     current_operation = .add;
                     parser.i += 1;
@@ -676,7 +768,7 @@ const Parser = struct{
                     parser.skip_space(src);
                 },
                 '/' => {
-                    const int_ty = ty orelse previous_value.get_type();
+                    const int_ty = it_ty orelse previous_value.get_type();
                     const integer_type = int_ty.get_payload(.integer);
                     current_operation = switch (integer_type.signedness) {
                         .unsigned => .udiv,
@@ -769,7 +861,7 @@ const Parser = struct{
 
                     switch (src[parser.i]) {
                         '>' => {
-                            const int_ty = ty orelse unreachable;
+                            const int_ty = it_ty orelse unreachable;
                             const integer_type = int_ty.get_payload(.integer);
                             current_operation = switch (integer_type.signedness) {
                                 .unsigned => .logical_shift_right,
@@ -796,6 +888,8 @@ const Parser = struct{
                 },
                 else => @panic((src.ptr + parser.i)[0..1]),
             }
+
+            iterations += 1;
         }
     }
 };
@@ -869,12 +963,15 @@ const Value = struct {
     reserved: u32 = 0,
 
     const Id = enum(u8){
+        basic_block,
         constant_int,
         lazy_expression,
         instruction,
         function_declaration,
     };
+
     const id_to_value_map = std.EnumArray(Id, type).init(.{
+        .basic_block = BasicBlock,
         .constant_int = ConstantInt,
         .function_declaration = Function.Declaration,
         .instruction = Instruction,
@@ -899,8 +996,25 @@ const Value = struct {
                         const load = instruction.get_payload(.load);
                         break :block load.type;
                     },
+                    .call => {
+                        const call = instruction.get_payload(.call);
+                        switch (call.callable.sema.id) {
+                            .function_declaration => {
+                                const function_declaration = call.callable.get_payload(.function_declaration);
+                                return function_declaration.return_type;
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    },
+                    .integer_compare => {
+                        return &instance.threads[value.sema.thread].integers[0].type;
+                    },
                     else => |t| @panic(@tagName(t)),
                 };
+            },
+            .constant_int => {
+                const constant_int = value.get_payload(.constant_int);
+                return constant_int.type;
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -949,7 +1063,9 @@ const Type = struct {
 };
 
 const Keyword = enum{
+    @"else",
     @"for",
+    @"if",
 };
 
 fn parse_keyword(identifier: []const u8) u32 {
@@ -1052,11 +1168,21 @@ const GlobalDeclaration = struct {
 };
 
 const BasicBlock = struct{
+    value: Value,
     instructions: PinnedArray(*Instruction) = .{},
-    predecessors: PinnedArray(u32) = .{},
+    predecessors: PinnedArray(*BasicBlock) = .{},
     is_terminated: bool = false,
+    command_node: CommandList.Node = .{
+        .data = {},
+    },
+
+    const CommandList = std.DoublyLinkedList(void);
 
     const Index = PinnedArray(BasicBlock).Index;
+
+    pub fn get_llvm(basic_block: *BasicBlock) *LLVM.Value.BasicBlock{
+        return basic_block.value.llvm.?.toBasicBlock() orelse unreachable; 
+    }
 };
 
 const Declaration = struct {
@@ -1083,7 +1209,7 @@ const Declaration = struct {
 
 const Function = struct{
     declaration: Function.Declaration,
-    entry_block: BasicBlock.Index,
+    entry_block: *BasicBlock,
     stack_slots: PinnedArray(*LocalSymbol) = .{},
     scope: Function.Scope,
 
@@ -1128,7 +1254,9 @@ const Instruction = struct{
     id: Id,
 
     const Id = enum{
+        branch,
         integer_binary_operation,
+        integer_compare,
         call,
         load,
         local_symbol,
@@ -1138,8 +1266,10 @@ const Instruction = struct{
     };
 
     const id_to_instruction_map = std.EnumArray(Id, type).init(.{
+        .branch = Branch,
         .call = Call,
         .integer_binary_operation = IntegerBinaryOperation,
+        .integer_compare = IntegerCompare,
         .local_symbol = LocalSymbol,
         .load = Load,
         .ret = Return,
@@ -1173,6 +1303,26 @@ const IntegerBinaryOperation = struct {
         arithmetic_shift_right,
         logical_shift_right,
     };
+};
+
+const IntegerCompare = struct {
+    instruction: Instruction,
+    left: *Value,
+    right: *Value,
+    // type: *Type,
+    id: Id,
+
+    const Id = enum{
+        equal,
+        not_equal,
+    };
+};
+
+const Branch = struct {
+    instruction: Instruction,
+    condition: *Value,
+    taken: *BasicBlock,
+    not_taken: *BasicBlock,
 };
 
 const Call = struct{
@@ -1232,8 +1382,10 @@ const Thread = struct{
     task_system: TaskSystem = .{},
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
     // pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
+    branches: PinnedArray(Branch) = .{},
     calls: PinnedArray(Call) = .{},
     integer_binary_operations: PinnedArray(IntegerBinaryOperation) = .{},
+    integer_compares: PinnedArray(IntegerCompare) = .{},
     loads: PinnedArray(Load) = .{},
     stores: PinnedArray(Store) = .{},
     returns: PinnedArray(Return) = .{},
@@ -2373,78 +2525,133 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                         for (thread.functions.slice()) |*nat_function| {
                             const function = nat_function.declaration.value.llvm.?.toFunction() orelse unreachable;
-                            const nat_entry_basic_block = thread.basic_blocks.get(nat_function.entry_block);
-                            assert(nat_entry_basic_block.predecessors.length == 0);
-                            const entry_block_name = "entry";
-                            const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
-                            thread.llvm.builder.setInsertPoint(entry_block);
+                            var basic_block_command_buffer = BasicBlock.CommandList{};
+                            var emit_allocas = true;
+                            {
+                                const nat_entry_basic_block = nat_function.entry_block;
+                                assert(nat_entry_basic_block.predecessors.length == 0);
+                                const entry_block_name = "entry";
+                                const entry_block = thread.llvm.context.createBasicBlock(entry_block_name, entry_block_name.len, function, null);
+                                nat_entry_basic_block.value.llvm = entry_block.toValue();
 
-                            for (nat_function.stack_slots.slice()) |local_slot| {
-                                const alloca_type = llvm_get_type(thread, local_slot.type);
-                                local_slot.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, local_slot.alignment).toValue();
+                                basic_block_command_buffer.append(&nat_entry_basic_block.command_node);
                             }
 
-                            for (nat_entry_basic_block.instructions.slice()) |instruction| {
-                                const value: *LLVM.Value = switch (instruction.id) {
-                                    .store => block: {
-                                        const store = instruction.get_payload(.store);
-                                        const destination = llvm_get_value(thread, store.destination);
-                                        const source = llvm_get_value(thread, store.source);
-                                        const store_instruction = builder.createStore(source, destination, store.is_volatile, store.alignment);
-                                        break :block store_instruction.toValue();
-                                    },
-                                    .load => block: {
-                                        const load = instruction.get_payload(.load);
-                                        const load_value = llvm_get_value(thread, load.value);
-                                        const load_type = llvm_get_type(thread, load.type);
-                                        // TODO: precise alignment
-                                        const load_instruction = builder.createLoad(load_type, load_value, load.is_volatile, "", "".len, load.alignment);
-                                        break :block load_instruction.toValue();
-                                    },
-                                    .ret => block: {
-                                        const return_instruction = instruction.get_payload(.ret);
-                                        const return_value = llvm_get_value(thread, return_instruction.value);
-                                        const ret = thread.llvm.builder.createRet(return_value);
-                                        break :block ret.toValue();
-                                    },
-                                    .integer_binary_operation => block: {
-                                        const integer_binary_operation = instruction.get_payload(.integer_binary_operation);
-                                        const left = llvm_get_value(thread, integer_binary_operation.left);
-                                        const right = llvm_get_value(thread, integer_binary_operation.right);
-                                        const integer_type = integer_binary_operation.type.get_payload(.integer);
-                                        const no_unsigned_wrapping = integer_type.signedness == .unsigned;
-                                        const no_signed_wrapping = integer_type.signedness == .signed;
-                                        const name = "";
-                                        const is_exact = false;
-                                        break :block switch (integer_binary_operation.id) {
-                                            .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
-                                            .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
-                                            .mul => builder.createMultiply(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
-                                            .udiv => builder.createUDiv(left, right, name, name.len, is_exact),
-                                            .sdiv => builder.createSDiv(left, right, name, name.len, is_exact),
-                                            .@"and" => builder.createAnd(left, right, name, name.len),
-                                            .@"or" => builder.createOr(left, right, name, name.len),
-                                            .@"xor" => builder.createXor(left, right, name, name.len),
-                                            .shift_left => builder.createShiftLeft(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
-                                            .arithmetic_shift_right => builder.createArithmeticShiftRight(left, right, name, name.len, is_exact),
-                                            .logical_shift_right => builder.createLogicalShiftRight(left, right, name, name.len, is_exact),
-                                        };
-                                    },
-                                    .call => block: {
-                                        const call = instruction.get_payload(.call);
-                                        const callee = llvm_get_value(thread, call.callable);
-                                        const callee_function = callee.toFunction() orelse unreachable;
-                                        const function_type = callee_function.getType();
 
-                                        const arguments: []const *LLVM.Value = &.{};
-                                        const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
-                                        break :block call_i.toValue();
-                                    },
-                                    else => |t| @panic(@tagName(t)),
-                                };
+                            while (basic_block_command_buffer.len != 0) {
+                                const basic_block_node = basic_block_command_buffer.first orelse unreachable;
+                                const basic_block: *BasicBlock = @fieldParentPtr("command_node", basic_block_node);
+                                const llvm_basic_block = basic_block.get_llvm();
+                                thread.llvm.builder.setInsertPoint(llvm_basic_block);
 
-                                instruction.value.llvm = value;
+                                var last_block = basic_block_node;
+
+                                if (emit_allocas) {
+                                    for (nat_function.stack_slots.slice()) |local_slot| {
+                                        const alloca_type = llvm_get_type(thread, local_slot.type);
+                                        local_slot.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, local_slot.alignment).toValue();
+                                    }
+                                    emit_allocas = false;
+                                }
+
+                                for (basic_block.instructions.slice()) |instruction| {
+                                    const value: *LLVM.Value = switch (instruction.id) {
+                                        .store => block: {
+                                            const store = instruction.get_payload(.store);
+                                            const destination = llvm_get_value(thread, store.destination);
+                                            const source = llvm_get_value(thread, store.source);
+                                            const store_instruction = builder.createStore(source, destination, store.is_volatile, store.alignment);
+                                            break :block store_instruction.toValue();
+                                        },
+                                        .load => block: {
+                                            const load = instruction.get_payload(.load);
+                                            const load_value = llvm_get_value(thread, load.value);
+                                            const load_type = llvm_get_type(thread, load.type);
+                                            // TODO: precise alignment
+                                            const load_instruction = builder.createLoad(load_type, load_value, load.is_volatile, "", "".len, load.alignment);
+                                            break :block load_instruction.toValue();
+                                        },
+                                        .ret => block: {
+                                            const return_instruction = instruction.get_payload(.ret);
+                                            const return_value = llvm_get_value(thread, return_instruction.value);
+                                            const ret = thread.llvm.builder.createRet(return_value);
+                                            break :block ret.toValue();
+                                        },
+                                        .integer_binary_operation => block: {
+                                            const integer_binary_operation = instruction.get_payload(.integer_binary_operation);
+                                            const left = llvm_get_value(thread, integer_binary_operation.left);
+                                            const right = llvm_get_value(thread, integer_binary_operation.right);
+                                            const integer_type = integer_binary_operation.type.get_payload(.integer);
+                                            const no_unsigned_wrapping = integer_type.signedness == .unsigned;
+                                            const no_signed_wrapping = integer_type.signedness == .signed;
+                                            const name = "";
+                                            const is_exact = false;
+                                            break :block switch (integer_binary_operation.id) {
+                                                .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                                .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                                .mul => builder.createMultiply(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                                .udiv => builder.createUDiv(left, right, name, name.len, is_exact),
+                                                .sdiv => builder.createSDiv(left, right, name, name.len, is_exact),
+                                                .@"and" => builder.createAnd(left, right, name, name.len),
+                                                .@"or" => builder.createOr(left, right, name, name.len),
+                                                .@"xor" => builder.createXor(left, right, name, name.len),
+                                                .shift_left => builder.createShiftLeft(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                                .arithmetic_shift_right => builder.createArithmeticShiftRight(left, right, name, name.len, is_exact),
+                                                .logical_shift_right => builder.createLogicalShiftRight(left, right, name, name.len, is_exact),
+                                            };
+                                        },
+                                        .call => block: {
+                                            const call = instruction.get_payload(.call);
+                                            const callee = llvm_get_value(thread, call.callable);
+                                            const callee_function = callee.toFunction() orelse unreachable;
+                                            const function_type = callee_function.getType();
+
+                                            const arguments: []const *LLVM.Value = &.{};
+                                            const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
+                                            break :block call_i.toValue();
+                                        },
+                                        .integer_compare => block: {
+                                            const compare = instruction.get_payload(.integer_compare);
+                                            const type_a = compare.left.get_type();
+                                            const type_b = compare.right.get_type();
+                                            assert(type_a == type_b);
+                                            const left = llvm_get_value(thread, compare.left);
+                                            const right = llvm_get_value(thread, compare.right);
+                                            const name = "";
+                                            const comparison: LLVM.Value.Instruction.ICmp.Kind = switch (compare.id) {
+                                                .equal => .eq,
+                                                .not_equal => .ne,
+                                            };
+
+                                            const cmp = builder.createICmp(comparison, left, right, name, name.len);
+                                            break :block cmp;
+                                        },
+                                        .branch => block: {
+                                            const branch = instruction.get_payload(.branch);
+                                            basic_block_command_buffer.insertAfter(last_block, &branch.taken.command_node);
+                                            basic_block_command_buffer.insertAfter(&branch.taken.command_node, &branch.not_taken.command_node);
+                                            last_block = &branch.not_taken.command_node;
+
+                                            const taken = thread.llvm.context.createBasicBlock("", "".len, function, null);
+                                            branch.taken.value.llvm = taken.toValue();
+                                            const not_taken = thread.llvm.context.createBasicBlock("", "".len, function, null);
+                                            branch.not_taken.value.llvm = not_taken.toValue();
+
+                                            const condition = llvm_get_value(thread, branch.condition);
+                                            const branch_weights = null;
+                                            const unpredictable = null;
+                                            const br = builder.createConditionalBranch(condition, taken, not_taken, branch_weights, unpredictable);
+                                            break :block br.toValue();
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    };
+
+                                    instruction.value.llvm = value;
+                                }
+
+                                _ = basic_block_command_buffer.popFirst();
                             }
+
 
                             if (debug_info) {
                                 const file_index = nat_function.declaration.file;
@@ -2879,6 +3086,131 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
                 local_block.scope.declarations.put_no_clobber(local_name, &local_symbol.local_declaration.declaration);
             },
+            'i' => {
+                if (src[parser.i + 1] == 'f') {
+                    parser.i += 2;
+
+                    parser.skip_space(src);
+
+                    parser.expect_character(src, '(');
+
+                    parser.skip_space(src);
+
+                    const condition = parser.parse_expression(analyzer, thread, file, null, .right);
+
+                    parser.skip_space(src);
+
+                    parser.expect_character(src, ')');
+
+                    parser.skip_space(src);
+
+                    const condition_type = condition.get_type();
+
+                    const zero = thread.constant_ints.append(.{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .constant_int,
+                            },
+                        },
+                        .n = 0,
+                        .type = condition_type,
+                    });
+
+                    const compare = thread.integer_compares.append(.{
+                        .instruction = .{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .instruction,
+                                },
+                            },
+                            .id = .integer_compare,
+                        },
+                        .left = condition,
+                        .right = &zero.value,
+                        .id = .not_equal,
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+
+                    const taken_block = thread.basic_blocks.append(.{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .basic_block,
+                            },
+                        },
+                    });
+                    const exit_block = thread.basic_blocks.append(.{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .basic_block,
+                            },
+                        },
+                    });
+                    const original_block = analyzer.current_basic_block;
+
+                    const branch = thread.branches.append(.{
+                        .instruction = .{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .instruction,
+                                },
+                            },
+                            .id = .branch,
+                        },
+                        .condition = &compare.instruction.value,
+                        .taken = taken_block,
+                        .not_taken = exit_block,
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&branch.instruction);
+
+                    analyzer.current_basic_block.is_terminated = true;
+
+                    analyzer.current_basic_block = branch.taken;
+                    _ = branch.taken.predecessors.append(original_block);
+
+                    switch (src[parser.i]) {
+                        '{' =>{ 
+                            analyze_local_block(thread, analyzer, parser, file);
+                        },
+                        else => @panic((src.ptr + parser.i)[0..1]),
+                    }
+
+                    parser.skip_space(src);
+
+                    if (src[parser.i] == 'e') {
+                        if (byte_equal(src[parser.i..][0.."else".len], "else")) {
+                            parser.i += "else".len;
+                            _ = branch.taken.predecessors.append(original_block);
+                            analyzer.current_basic_block = branch.not_taken;
+
+                            parser.skip_space(src);
+
+                            switch (src[parser.i]) {
+                                '{' =>{ 
+                                    analyze_local_block(thread, analyzer, parser, file);
+                                },
+                                else => @panic((src.ptr + parser.i)[0..1]),
+                            }
+                        } else {
+                            unreachable;
+                        }
+                    } else {
+                        unreachable;
+                    }
+
+                } else {
+                    unreachable;
+                }
+            },
             else => {
                 exit_with_error("Unrecognized statement initial char");
             },
@@ -2929,8 +3261,15 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     parser.skip_space(src);
 
                     const function = thread.functions.add_one();
-                    const entry_block = thread.basic_blocks.append(.{});
-                    const entry_block_index = thread.basic_blocks.get_typed_index(entry_block);
+                    const entry_block = thread.basic_blocks.append(.{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .basic_block,
+                            },
+                        },
+                    });
 
                     analyzer.current_function = function;
                     analyzer.current_basic_block = entry_block;
@@ -2962,7 +3301,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 .parent = &file.scope.scope,
                             },
                         },
-                        .entry_block = entry_block_index,
+                        .entry_block = entry_block,
                     };
 
                     const has_function_attributes = src[parser.i] == '[';
@@ -3937,6 +4276,7 @@ pub const LLVM = struct {
         const toConstant = bindings.NativityLLVMValueToConstant;
         const toFunction = bindings.NativityLLVMValueToFunction;
         const toAlloca = bindings.NativityLLVMValueToAlloca;
+        const toBasicBlock = bindings.NativityLLVMValueToBasicBlock;
         const toString = bindings.NativityLLVMValueToString;
 
         pub const IntrinsicID = enum(u32) {

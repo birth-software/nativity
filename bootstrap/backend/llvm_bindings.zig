@@ -123,6 +123,7 @@ pub extern fn NativityLLVMGetStruct(struct_type: *LLVM.Type.Struct, constant_ptr
 
 pub extern fn NativityLLVMValueToConstant(value: *LLVM.Value) ?*LLVM.Value.Constant;
 pub extern fn NativityLLVMValueToFunction(value: *LLVM.Value) ?*LLVM.Value.Constant.Function;
+pub extern fn NativityLLVMValueToBasicBlock(value: *LLVM.Value) ?*LLVM.Value.BasicBlock;
 
 pub extern fn NativityLLVMTypeIsPointer(type: *LLVM.Type) bool;
 pub extern fn NativityLLVMTypeIsInteger(type: *LLVM.Type) bool;
