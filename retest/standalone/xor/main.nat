@@ -1,0 +1,7 @@
+fn [cc(.c)] main [export] () s32 {
+    >a: s32 = 561;
+    >b: s32 = 124;
+    >c = a ^ b;
+    >d = a ^ b;
+    return c ^ d;
+}
