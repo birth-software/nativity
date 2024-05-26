@@ -566,6 +566,10 @@ const Parser = struct{
         sub_assign,
         mul,
         mul_assign,
+        udiv,
+        udiv_assign,
+        sdiv,
+        sdiv_assign,
         @"and",
         and_assign,
         @"or",
@@ -601,7 +605,7 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .add, .sub, .mul, .@"and", .@"or", .xor, .shift_left, .arithmetic_shift_right, .logical_shift_right => {
+                .add, .sub, .mul, .udiv, .sdiv, .@"and", .@"or", .xor, .shift_left, .arithmetic_shift_right, .logical_shift_right => {
                     const add = thread.integer_binary_operations.append(.{
                         .instruction = .{
                             .value = .{
@@ -616,7 +620,7 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .add_assign, .sub_assign, .mul_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign => unreachable,
+                            .none, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign => unreachable,
                             inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
                         .type = if (ty) |t| t else current_value.get_type(),
@@ -624,7 +628,7 @@ const Parser = struct{
                     _ = analyzer.current_basic_block.instructions.append(&add.instruction);
                     previous_value = &add.instruction.value;
                 },
-                .add_assign, .sub_assign, .mul_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
+                .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
             }
 
             switch (src[parser.i]) {
@@ -664,6 +668,28 @@ const Parser = struct{
                     switch (src[parser.i]) {
                         '=' => {
                             current_operation = .mul_assign;
+                            parser.i += 1;
+                        },
+                        else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '/' => {
+                    const int_ty = ty orelse previous_value.get_type();
+                    const integer_type = int_ty.get_payload(.integer);
+                    current_operation = switch (integer_type.signedness) {
+                        .unsigned => .udiv,
+                        .signed => .sdiv,
+                    };
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = switch (integer_type.signedness) {
+                                .unsigned => .udiv_assign,
+                                .signed => .sdiv_assign,
+                            };
                             parser.i += 1;
                         },
                         else => {},
@@ -1138,6 +1164,8 @@ const IntegerBinaryOperation = struct {
         add,
         sub,
         mul,
+        udiv,
+        sdiv,
         @"and",
         @"or",
         @"xor",
@@ -2392,6 +2420,8 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .mul => builder.createMultiply(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .udiv => builder.createUDiv(left, right, name, name.len, is_exact),
+                                            .sdiv => builder.createSDiv(left, right, name, name.len, is_exact),
                                             .@"and" => builder.createAnd(left, right, name, name.len),
                                             .@"or" => builder.createOr(left, right, name, name.len),
                                             .@"xor" => builder.createXor(left, right, name, name.len),
