@@ -1,0 +1,7 @@
+fn [cc(.c)] main [export] () s32 {
+    >dividend: s32 = 30;
+    >divisor: s32 = 6;
+    >result = dividend / divisor;
+    >n: s32 = 5;
+    return n - result;
+}
