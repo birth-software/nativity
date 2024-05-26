@@ -570,6 +570,12 @@ const Parser = struct{
         or_assign,
         @"xor",
         xor_assign,
+        shift_left,
+        shift_left_assign,
+        arithmetic_shift_right,
+        arithmetic_shift_right_assign,
+        logical_shift_right,
+        logical_shift_right_assign,
     };
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
@@ -593,7 +599,7 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .add, .sub, .@"and", .@"or", .xor => {
+                .add, .sub, .@"and", .@"or", .xor, .shift_left, .arithmetic_shift_right, .logical_shift_right => {
                     const add = thread.integer_binary_operations.append(.{
                         .instruction = .{
                             .value = .{
@@ -608,7 +614,7 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .add_assign, .sub_assign, .and_assign, .or_assign, .xor_assign => unreachable,
+                            .none, .add_assign, .sub_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign => unreachable,
                             inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
                         .type = if (ty) |t| t else current_value.get_type(),
@@ -616,7 +622,7 @@ const Parser = struct{
                     _ = analyzer.current_basic_block.instructions.append(&add.instruction);
                     previous_value = &add.instruction.value;
                 },
-                .add_assign, .sub_assign, .and_assign, .or_assign, .xor_assign => unreachable,
+                .add_assign, .sub_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
             }
 
             switch (src[parser.i]) {
@@ -687,6 +693,61 @@ const Parser = struct{
                             parser.i += 1;
                         },
                         else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '<' => {
+                    // TODO
+                    current_operation = undefined;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '<' => {
+                            current_operation = .shift_left;
+                            parser.i += 1;
+
+                            switch (src[parser.i]) {
+                                '=' => {
+                                    current_operation = .shift_left_assign;
+                                    parser.i += 1;
+                                },
+                                else => {},
+                            }
+                        },
+                        else => unreachable,
+                    }
+
+                    parser.skip_space(src);
+                },
+                '>' => {
+                    // TODO
+                    current_operation = undefined;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '>' => {
+                            const int_ty = ty orelse unreachable;
+                            const integer_type = int_ty.get_payload(.integer);
+                            current_operation = switch (integer_type.signedness) {
+                                .unsigned => .logical_shift_right,
+                                .signed => .arithmetic_shift_right,
+                            };
+                            parser.i += 1;
+
+                            switch (src[parser.i]) {
+                                '=' => {
+                                    current_operation = switch (integer_type.signedness) {
+                                        .unsigned => .logical_shift_right_assign,
+                                        .signed => .arithmetic_shift_right_assign,
+                                    };
+
+                                    parser.i += 1;
+                                },
+                                else => {},
+                            }
+                        },
+                        else => unreachable,
                     }
 
                     parser.skip_space(src);
@@ -1063,6 +1124,9 @@ const IntegerBinaryOperation = struct {
         @"and",
         @"or",
         @"xor",
+        shift_left,
+        arithmetic_shift_right,
+        logical_shift_right,
     };
 };
 
@@ -2306,12 +2370,16 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         const no_unsigned_wrapping = integer_type.signedness == .unsigned;
                                         const no_signed_wrapping = integer_type.signedness == .signed;
                                         const name = "";
+                                        const is_exact = false;
                                         break :block switch (integer_binary_operation.id) {
                                             .add => builder.createAdd(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .sub => builder.createSub(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
                                             .@"and" => builder.createAnd(left, right, name, name.len),
                                             .@"or" => builder.createOr(left, right, name, name.len),
                                             .@"xor" => builder.createXor(left, right, name, name.len),
+                                            .shift_left => builder.createShiftLeft(left, right, name, name.len, no_unsigned_wrapping, no_signed_wrapping),
+                                            .arithmetic_shift_right => builder.createArithmeticShiftRight(left, right, name, name.len, is_exact),
+                                            .logical_shift_right => builder.createLogicalShiftRight(left, right, name, name.len, is_exact),
                                         };
                                     },
                                     .call => block: {
