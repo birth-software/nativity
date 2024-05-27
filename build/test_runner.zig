@@ -57,7 +57,7 @@ fn runStandalone(allocator: Allocator, args: struct {
             const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
             const argv: []const []const u8 = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path };
             // if (std.mem.eql(u8, args.compiler_path, "nat/compiler_lightly_optimize_for_speed")) @breakpoint();
-            const compile_run = try std.ChildProcess.run(.{
+            const compile_run = try std.process.Child.run(.{
                 .allocator = allocator,
                 // TODO: delete -main_source_file?
                 .argv = argv,
@@ -87,7 +87,7 @@ fn runStandalone(allocator: Allocator, args: struct {
 
             if (compilation_success and !args.self_hosted) {
                 const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", test_name });
-                const test_run = try std.ChildProcess.run(.{
+                const test_run = try std.process.Child.run(.{
                     .allocator = allocator,
                     .argv = &.{test_path},
                     .max_output_bytes = std.math.maxInt(u64),

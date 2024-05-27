@@ -6,7 +6,7 @@ const os = builtin.os.tag;
 
 fn discover_brew_prefix(b: *std.Build, library_name: []const u8) ![]const u8 {
     assert(os == .macos);
-    const result = try std.ChildProcess.run(.{
+    const result = try std.process.Child.run(.{
         .allocator = b.allocator,
         .argv = &.{ "brew", "--prefix", library_name },
     });
@@ -47,7 +47,6 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("build/fetcher.zig"),
         .target = native_target,
         .optimize = .Debug,
-        .single_threaded = true,
     });
 
     var target_query = b.standardTargetOptionsQueryOnly(switch (@import("builtin").os.tag) {
@@ -452,7 +451,7 @@ pub fn build(b: *std.Build) !void {
                     compiler.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib/llvm-18/lib" });
                 } else {
-                    const result = try std.ChildProcess.run(.{
+                    const result = try std.process.Child.run(.{
                         .allocator = b.allocator,
                         .argv = &.{
                             "c++", "--version",
@@ -592,7 +591,6 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("build/test_runner.zig"),
         .target = native_target,
         .optimize = optimization,
-        .single_threaded = true,
     });
     b.default_step.dependOn(&test_runner.step);
 
