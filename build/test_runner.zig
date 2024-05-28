@@ -40,6 +40,7 @@ fn runStandalone(allocator: Allocator, args: struct {
     repetitions: usize,
 }) !void {
     const test_names = try collectDirectoryDirEntries(allocator, args.directory_path);
+    std.debug.assert(args.repetitions > 0);
 
     const total_compilation_count = test_names.len;
     var ran_compilation_count: usize = 0;
@@ -52,7 +53,7 @@ fn runStandalone(allocator: Allocator, args: struct {
     std.debug.print("\n[{s} START]\n\n", .{args.group_name});
 
     for (test_names) |test_name| {
-        std.debug.print("{s} [repetitions={}]\n\n", .{test_name, args.repetitions});
+        std.debug.print("{s} [repetitions={}]{s}", .{test_name, args.repetitions, if (args.repetitions > 1) "\n\n" else ""});
         for (0..args.repetitions) |_| {
             const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
             const argv: []const []const u8 = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path };
