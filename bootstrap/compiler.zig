@@ -1176,9 +1176,9 @@ const BasicBlock = struct{
         .data = {},
     },
 
-    const CommandList = std.DoublyLinkedList(void);
+    pub const Reference = **BasicBlock;
 
-    const Index = PinnedArray(BasicBlock).Index;
+    const CommandList = std.DoublyLinkedList(void);
 
     pub fn get_llvm(basic_block: *BasicBlock) *LLVM.Value.BasicBlock{
         return basic_block.value.llvm.?.toBasicBlock() orelse unreachable; 
@@ -1255,11 +1255,13 @@ const Instruction = struct{
 
     const Id = enum{
         branch,
+        call,
         integer_binary_operation,
         integer_compare,
-        call,
+        jump,
         load,
         local_symbol,
+        phi,
         ret,
         ret_void,
         store,
@@ -1270,8 +1272,10 @@ const Instruction = struct{
         .call = Call,
         .integer_binary_operation = IntegerBinaryOperation,
         .integer_compare = IntegerCompare,
+        .jump = Jump,
         .local_symbol = LocalSymbol,
         .load = Load,
+        .phi = Phi,
         .ret = Return,
         .ret_void = void,
         .store = Store,
@@ -1315,6 +1319,7 @@ const IntegerCompare = struct {
     const Id = enum{
         equal,
         not_equal,
+        not_zero,
     };
 };
 
@@ -1323,6 +1328,11 @@ const Branch = struct {
     condition: *Value,
     taken: *BasicBlock,
     not_taken: *BasicBlock,
+};
+
+const Jump = struct {
+    instruction: Instruction,
+    basic_block: *BasicBlock,
 };
 
 const Call = struct{
@@ -1346,10 +1356,20 @@ const Store = struct {
     is_volatile: bool,
 };
 
+const Phi = struct {
+    instruction: Instruction,
+    type: *Type,
+    nodes: PinnedArray(Node) = .{},
+
+    const Node = struct {
+        value: *Value,
+        basic_block: *BasicBlock,
+    };
+};
+
 const Return = struct{
     instruction: Instruction,
     value: *Value,
-    const Index = PinnedArray(Call).Index;
 };
 
 const Import = struct {
@@ -1383,11 +1403,13 @@ const Thread = struct{
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
     // pending_values_per_file: PinnedArray(PinnedArray(*Value)) = .{},
     branches: PinnedArray(Branch) = .{},
+    jumps: PinnedArray(Jump) = .{},
     calls: PinnedArray(Call) = .{},
     integer_binary_operations: PinnedArray(IntegerBinaryOperation) = .{},
     integer_compares: PinnedArray(IntegerCompare) = .{},
     loads: PinnedArray(Load) = .{},
     stores: PinnedArray(Store) = .{},
+    phis: PinnedArray(Phi) = .{},
     returns: PinnedArray(Return) = .{},
     lazy_expressions: PinnedArray(LazyExpression) = .{},
     imports: PinnedArray(Import) = .{},
@@ -1631,8 +1653,6 @@ const File = struct{
     const Scope = struct {
         scope: compiler.Scope,
     };
-
-    const Index = PinnedArray(File).Index;
 };
 
 var instance = Instance{};
@@ -1645,14 +1665,14 @@ const CodegenBackend = union(enum){
     },
 };
 
-fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) File.Index {
+fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) u32 {
     instance.file_mutex.lock();
     defer instance.file_mutex.unlock();
 
     const hash = hash_bytes(file_absolute_path);
     const new_file = instance.files.add_one();
     _ = instance.file_paths.append(hash);
-    const new_file_index = instance.files.get_typed_index(new_file);
+    const new_file_index = instance.files.get_index(new_file);
     new_file.* = .{
         .global_declaration = .{
             .declaration = .{
@@ -1762,7 +1782,7 @@ const Unit = struct {
         const new_file_index = add_file(main_source_file_absolute, &.{});
         instance.threads[0].task_system.program_state = .analysis;
         instance.threads[0].add_thread_work(Job{
-            .offset = @intFromEnum(new_file_index),
+            .offset = new_file_index,
             .count = 1,
             .id = .analyze_file,
         });
@@ -1808,12 +1828,12 @@ fn control_thread(unit: *Unit) void {
                             const file_absolute_path = thread.identifiers.get(analyze_file_path_hash).?;
                             const interested_thread_index: u32 = @intCast(i);
                             const file_index = add_file(file_absolute_path, &.{interested_thread_index});
-                            _ = instance.files.get(file_index).interested_files.append(&instance.files.pointer[interested_file_index]);
+                            _ = instance.files.get_unchecked(file_index).interested_files.append(&instance.files.pointer[interested_file_index]);
                             const assigned_thread = &instance.threads[thread_index];
 
                             assigned_thread.task_system.program_state = .analysis;
                             assigned_thread.add_thread_work(Job{
-                                .offset = @intFromEnum(file_index),
+                                .offset = file_index,
                                 .id = .analyze_file,
                                 .count = 1,
                             });
@@ -2270,13 +2290,18 @@ const CallingConvention = enum{
 };
 
 const Analyzer = struct{
-    current_basic_block: *BasicBlock = undefined,
-    current_function: *Function = undefined,
-    current_scope: *Scope = undefined,
+    current_basic_block: *BasicBlock,
+    current_function: *Function,
+    current_scope: *Scope,
+    exit_blocks: PinnedArray(*BasicBlock) = .{},
+    return_block: ?*BasicBlock = null,
+    return_phi: ?*Phi = null,
 };
 
-const brace_open = 0x7b;
-const brace_close = 0x7d;
+const brace_open = '{';
+const brace_close = '}';
+
+const pointer_token = '*';
 
 const cache_line_size = switch (builtin.os.tag) {
     .macos => 128,
@@ -2537,6 +2562,8 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 basic_block_command_buffer.append(&nat_entry_basic_block.command_node);
                             }
 
+                            var phis = PinnedArray(*Phi){};
+                            var llvm_phi_nodes = PinnedArray(*LLVM.Value.Instruction.PhiNode){};
 
                             while (basic_block_command_buffer.len != 0) {
                                 const basic_block_node = basic_block_command_buffer.first orelse unreachable;
@@ -2616,15 +2643,21 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const type_b = compare.right.get_type();
                                             assert(type_a == type_b);
                                             const left = llvm_get_value(thread, compare.left);
-                                            const right = llvm_get_value(thread, compare.right);
-                                            const name = "";
-                                            const comparison: LLVM.Value.Instruction.ICmp.Kind = switch (compare.id) {
-                                                .equal => .eq,
-                                                .not_equal => .ne,
-                                            };
+                                            if (compare.id == .not_zero) {
+                                                const is_not_null = builder.createIsNotNull(left, "", "".len);
+                                                break :block is_not_null;
+                                            } else {
+                                                const right = llvm_get_value(thread, compare.right);
+                                                const name = "";
+                                                const comparison: LLVM.Value.Instruction.ICmp.Kind = switch (compare.id) {
+                                                    .equal => .eq,
+                                                    .not_equal => .ne,
+                                                    .not_zero => unreachable,
+                                                };
 
-                                            const cmp = builder.createICmp(comparison, left, right, name, name.len);
-                                            break :block cmp;
+                                                const cmp = builder.createICmp(comparison, left, right, name, name.len);
+                                                break :block cmp;
+                                            }
                                         },
                                         .branch => block: {
                                             const branch = instruction.get_payload(.branch);
@@ -2643,6 +2676,28 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const br = builder.createConditionalBranch(condition, taken, not_taken, branch_weights, unpredictable);
                                             break :block br.toValue();
                                         },
+                                        .jump => block: {
+                                            const jump = instruction.get_payload(.jump);
+                                            const target_block = jump.basic_block;
+                                            const llvm_target_block = if (target_block.value.llvm) |llvm| llvm.toBasicBlock() orelse unreachable else bb: {
+                                                const block = thread.llvm.context.createBasicBlock("", "".len, function, null);
+                                                target_block.value.llvm = block.toValue();
+                                                basic_block_command_buffer.insertAfter(last_block, &target_block.command_node);
+                                                last_block = &target_block.command_node;
+                                                break :bb block;
+                                            };
+                                            const br = builder.createBranch(llvm_target_block);
+                                            break :block br.toValue();
+                                        },
+                                        .phi => block: {
+                                            const phi = instruction.get_payload(.phi);
+                                            const phi_type = llvm_get_type(thread, phi.type);
+                                            const reserved_value_count = phi.nodes.length;
+                                            const phi_node = builder.createPhi(phi_type, reserved_value_count, "", "".len);
+                                            _ = phis.append(phi);
+                                            _ = llvm_phi_nodes.append(phi_node);
+                                            break :block phi_node.toValue();
+                                        },
                                         else => |t| @panic(@tagName(t)),
                                     };
 
@@ -2652,6 +2707,13 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 _ = basic_block_command_buffer.popFirst();
                             }
 
+                            for (phis.const_slice(), llvm_phi_nodes.const_slice()) |phi, llvm_phi| {
+                                for (phi.nodes.const_slice()) |phi_node| {
+                                    const llvm_value = llvm_get_value(thread, phi_node.value);
+                                    const llvm_basic_block = phi_node.basic_block.get_llvm();
+                                    llvm_phi.addIncoming(llvm_value, llvm_basic_block);
+                                }
+                            }
 
                             if (debug_info) {
                                 const file_index = nat_function.declaration.file;
@@ -2915,6 +2977,38 @@ fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, overr
     }
 }
 
+fn create_basic_block(thread: *Thread) *BasicBlock {
+    const block = thread.basic_blocks.append(.{
+        .value = .{
+            .sema = .{
+                .thread = thread.get_index(),
+                .resolved = true,
+                .id = .basic_block,
+            },
+        },
+    });
+    return block;
+}
+
+fn build_return(thread: *Thread, analyzer: *Analyzer, return_value: *Value) void {
+    const return_expression = thread.returns.append(.{
+        .instruction = .{
+            .value = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = return_value.sema.resolved,
+                    .id = .instruction,
+                },
+                },
+            .id = .ret,
+        },
+        .value = return_value,
+    });
+
+    _ = analyzer.current_basic_block.instructions.append(&return_expression.instruction);
+    analyzer.current_basic_block.is_terminated = true;
+}
+
 pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser, file: *File) void {
     const src = file.source_code;
     const function = analyzer.current_function;
@@ -2950,25 +3044,77 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     parser.skip_space(src);
 
                     if (function.declaration.return_type.sema.id != .unresolved) {
-                        const return_value = parser.parse_expression(analyzer, thread, file, function.declaration.return_type, .right);
+                        const return_type = function.declaration.return_type;
+                        const return_value = parser.parse_expression(analyzer, thread, file, return_type, .right);
                         parser.expect_character(src, ';');
 
-                        const return_expression = thread.returns.append(.{
-                            .instruction = .{
-                                .value = .{
-                                    .sema = .{
-                                        .thread = thread.get_index(),
-                                        .resolved = return_value.sema.resolved,
-                                        .id = .instruction,
-                                    },
-                                    },
-                                .id = .ret,
-                            },
-                            .value = return_value,
-                        });
+                        if (analyzer.return_block) |return_block| {
+                            const return_phi = analyzer.return_phi.?;
+                            _ = return_phi.nodes.append(.{
+                                .value = return_value,
+                                .basic_block = analyzer.current_basic_block,
+                            });
+                            assert(analyzer.current_basic_block != return_block);
 
-                        _ = analyzer.current_basic_block.instructions.append(&return_expression.instruction);
-                        analyzer.current_basic_block.is_terminated = true;
+                            const jump = thread.jumps.append(.{
+                                .instruction = .{
+                                    .id = .jump,
+                                    .value = .{
+                                        .sema = .{
+                                            .id = .instruction,
+                                            .resolved = true,
+                                            .thread = thread.get_index(),
+                                        },
+                                    },
+                                },
+                                .basic_block = return_block,
+                            });
+                            _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
+                            analyzer.current_basic_block.is_terminated = true;
+
+                            _ = return_block.predecessors.append(analyzer.current_basic_block);
+                        } else if (analyzer.exit_blocks.length > 0) {
+                            const return_phi = thread.phis.append(.{
+                                .instruction = .{
+                                    .id = .phi,
+                                    .value = .{
+                                        .sema = .{
+                                            .id = .instruction,
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                        },
+                                    },
+                                },
+                                .type = return_type,
+                            });
+                            analyzer.return_phi = return_phi;
+                            const return_block = create_basic_block(thread);
+                            analyzer.return_block = return_block;
+                            _ = return_phi.nodes.append(.{
+                                .value = return_value,
+                                .basic_block = analyzer.current_basic_block,
+                            });
+
+                            const jump = thread.jumps.append(.{
+                                .instruction = .{
+                                    .id = .jump,
+                                    .value = .{
+                                        .sema = .{
+                                            .id = .instruction,
+                                            .resolved = true,
+                                            .thread = thread.get_index(),
+                                        },
+                                    },
+                                },
+                                .basic_block = return_block,
+                            });
+                            _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
+                            analyzer.current_basic_block.is_terminated = true;
+
+                            _ = return_block.predecessors.append(analyzer.current_basic_block);
+                        } else {
+                            build_return(thread, analyzer, return_value);
+                        }
                     } else  {
                         exit(1);
                     }
@@ -3105,55 +3251,52 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     parser.skip_space(src);
 
                     const condition_type = condition.get_type();
+                    const compare = switch (condition_type.sema.id) {
+                        .integer => int: {
+                            const integer_ty = condition_type.get_payload(.integer);
+                            if (integer_ty.bit_count == 1) {
+                                break :int condition;
+                            } else {
+                                const zero = thread.constant_ints.append(.{
+                                    .value = .{
+                                        .sema = .{
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                            .id = .constant_int,
+                                        },
+                                        },
+                                    .n = 0,
+                                    .type = condition_type,
+                                });
 
-                    const zero = thread.constant_ints.append(.{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .constant_int,
-                            },
-                        },
-                        .n = 0,
-                        .type = condition_type,
-                    });
+                                const compare = thread.integer_compares.append(.{
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                            },
+                                        .id = .integer_compare,
+                                    },
+                                    .left = condition,
+                                    .right = &zero.value,
+                                    .id = .not_zero,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
 
-                    const compare = thread.integer_compares.append(.{
-                        .instruction = .{
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true,
-                                    .id = .instruction,
-                                },
-                            },
-                            .id = .integer_compare,
+                                break :int &compare.instruction.value;
+                            }
                         },
-                        .left = condition,
-                        .right = &zero.value,
-                        .id = .not_equal,
-                    });
-                    _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+                        else => |t| @panic(@tagName(t)),
+                    };
 
-                    const taken_block = thread.basic_blocks.append(.{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .basic_block,
-                            },
-                        },
-                    });
-                    const exit_block = thread.basic_blocks.append(.{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .basic_block,
-                            },
-                        },
-                    });
                     const original_block = analyzer.current_basic_block;
+
+                    const taken_block = create_basic_block(thread);
+                    const exit_block = create_basic_block(thread);
+                    _ = analyzer.exit_blocks.append(exit_block);
 
                     const branch = thread.branches.append(.{
                         .instruction = .{
@@ -3166,19 +3309,18 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             },
                             .id = .branch,
                         },
-                        .condition = &compare.instruction.value,
+                        .condition = compare,
                         .taken = taken_block,
                         .not_taken = exit_block,
                     });
                     _ = analyzer.current_basic_block.instructions.append(&branch.instruction);
-
                     analyzer.current_basic_block.is_terminated = true;
 
                     analyzer.current_basic_block = branch.taken;
                     _ = branch.taken.predecessors.append(original_block);
 
                     switch (src[parser.i]) {
-                        '{' =>{ 
+                        brace_open => { 
                             analyze_local_block(thread, analyzer, parser, file);
                         },
                         else => @panic((src.ptr + parser.i)[0..1]),
@@ -3195,7 +3337,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             parser.skip_space(src);
 
                             switch (src[parser.i]) {
-                                '{' =>{ 
+                                brace_open => { 
                                     analyze_local_block(thread, analyzer, parser, file);
                                 },
                                 else => @panic((src.ptr + parser.i)[0..1]),
@@ -3231,7 +3373,6 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
     file.functions.start = @intCast(thread.functions.length);
     
     var parser = Parser{};
-    var analyzer = Analyzer{};
 
     while (true) {
         parser.skip_space(src);
@@ -3261,19 +3402,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     parser.skip_space(src);
 
                     const function = thread.functions.add_one();
-                    const entry_block = thread.basic_blocks.append(.{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .basic_block,
-                            },
-                        },
-                    });
-
-                    analyzer.current_function = function;
-                    analyzer.current_basic_block = entry_block;
-
+                    const entry_block = create_basic_block(thread);
                     function.* = .{
                         .declaration = .{
                             .return_type = undefined,
@@ -3302,6 +3431,12 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             },
                         },
                         .entry_block = entry_block,
+                    };
+
+                    var analyzer = Analyzer{
+                        .current_function = function,
+                        .current_basic_block = entry_block,
+                        .current_scope = &function.scope.scope,
                     };
 
                     const has_function_attributes = src[parser.i] == '[';
@@ -3455,8 +3590,23 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     analyzer.current_scope = &analyzer.current_function.scope.scope;
                     
                     switch (src[parser.i]) {
-                        '{' => {
+                        brace_open => {
                             analyze_local_block(thread, &analyzer, &parser, file);
+
+                            const current_basic_block = analyzer.current_basic_block;
+                            if (analyzer.return_phi) |return_phi| {
+                                analyzer.current_basic_block = analyzer.return_block.?;
+                                _ = analyzer.current_basic_block.instructions.append(&return_phi.instruction);
+                                build_return(thread, &analyzer, &return_phi.instruction.value);
+                                analyzer.current_basic_block = current_basic_block;
+                            }
+                            
+                            const return_type = function.declaration.return_type;
+                            _ = return_type;
+
+                            if (!current_basic_block.is_terminated and (current_basic_block.instructions.length > 0 or current_basic_block.predecessors.length > 0)) {
+                                unreachable;
+                            }
                         },
                         ';' => {
                             unreachable;
@@ -3668,6 +3818,7 @@ pub const LLVM = struct {
         const createGEP = bindings.NativityLLVMBuilderCreateGEP;
         const createStructGEP = bindings.NativityLLVMBuilderCreateStructGEP;
         const createICmp = bindings.NativityLLVMBuilderCreateICmp;
+        const createIsNotNull = bindings.NativityLLVMBuilderCreateIsNotNull;
         const createLoad = bindings.NativityLLVMBuilderCreateLoad;
         const createMultiply = bindings.NativityLLVMBuilderCreateMultiply;
         const createRet = bindings.NativityLLVMBuilderCreateRet;
