@@ -65,6 +65,7 @@ pub extern fn NativityLLVMGetConstantArray(array_type: *LLVM.Type.Array, value_p
 pub extern fn NativityLLVMGetConstantStruct(struct_type: *LLVM.Type.Struct, constant_ptr: [*]const *LLVM.Value.Constant, constant_len: usize) *LLVM.Value.Constant;
 pub extern fn NativityLLVMConstantToInt(constant: *LLVM.Value.Constant) ?*LLVM.Value.Constant.Int;
 pub extern fn NativityLLVMBuilderCreateICmp(builder: *LLVM.Builder, integer_comparison: LLVM.Value.Instruction.ICmp.Kind, left: *LLVM.Value, right: *LLVM.Value, name_ptr: [*]const u8, name_len: usize) *LLVM.Value;
+pub extern fn NativityLLVMBuilderCreateIsNotNull(builder: *LLVM.Builder, value: *LLVM.Value, name_ptr: [*]const u8, name_len: usize) *LLVM.Value;
 pub extern fn NativityLLVMBuilderCreateLoad(builder: *LLVM.Builder, type: *LLVM.Type, value: *LLVM.Value, is_volatile: bool, name_ptr: [*]const u8, name_len: usize, alignment: u32) *LLVM.Value.Instruction.Load;
 pub extern fn NativityLLVMBuilderCreateRet(builder: *LLVM.Builder, value: ?*LLVM.Value) *LLVM.Value.Instruction.Ret;
 pub extern fn NativityLLVMBuilderCreateCast(builder: *LLVM.Builder, cast_type: LLVM.Value.Instruction.Cast.Type, value: *LLVM.Value, type: *LLVM.Type, name_ptr: [*]const u8, name_len: usize) *LLVM.Value;

@@ -445,6 +445,13 @@ extern "C" Value* NativityLLVMBuilderCreateICmp(IRBuilder<>& builder, CmpInst::P
     return icmp;
 }
 
+extern "C" Value* NativityLLVMBuilderCreateIsNotNull(IRBuilder<>& builder, Value* value, const char* name_ptr, size_t name_len)
+{
+    auto name = StringRef(name_ptr, name_len);
+    auto* not_null = builder.CreateIsNotNull(value, name);
+    return not_null;
+}
+
 extern "C" LoadInst* NativityLLVMBuilderCreateLoad(IRBuilder<>& builder, Type* type, Value* pointer, bool is_volatile, const char* name_ptr, size_t name_len, uint32_t alignment)
 {
     auto align = Align{alignment};

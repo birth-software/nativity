@@ -296,6 +296,10 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type, comptim
             if (@intFromPtr(item) >= top) return false;
             return true;
         }
+
+        pub fn clear(array: *@This()) void {
+            array.length = 0;
+        }
     };
 }
 
