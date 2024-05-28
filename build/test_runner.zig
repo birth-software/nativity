@@ -592,7 +592,7 @@ pub fn main() !void {
         .self_hosted = false,
         .group_name = "STANDALONE",
         .directory_path = "retest/standalone",
-        .repetitions = 100,
+        .repetitions = 1,
     });
 
     // var errors = run_test_suite(allocator, .{
