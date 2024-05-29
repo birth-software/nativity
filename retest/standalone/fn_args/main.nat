@@ -1,0 +1,3 @@
+fn [cc(.c)] main [export] (argc: s32) s32 {
+    return argc - argc;
+}
