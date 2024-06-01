@@ -1,4 +1,4 @@
-fn[extern] exit(exit_code: s32) noreturn;
-fn my_exit(exit_code: s32) noreturn {
-    exit(exit_code);
+fn align_forward(n: u64, alignment: u64) u64 {
+     const mask = alignment - 1;
+     return (value + mask) & ~mask;
 }

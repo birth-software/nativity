@@ -106,6 +106,21 @@ const Mutability = enum(u1){
     @"var" = 1,
 };
 
+const ArgumentSymbol = struct {
+    attributes: Attributes = .{},
+    argument_declaration: ArgumentDeclaration,
+    type: *Type,
+    value: Value,
+    instruction: Instruction,
+    alignment: u32,
+
+    const Attributes = struct{
+    };
+    const Attribute = enum{
+        const Mask = std.EnumSet(Attribute);
+    };
+};
+
 const LocalSymbol = struct {
     attributes: Attributes = .{},
     local_declaration: LocalDeclaration,
@@ -498,6 +513,7 @@ const Parser = struct{
                                     else => |t| @panic(@tagName(t)),
                                 }
                             },
+                            .argument => unreachable,
                         }
 
                     },
@@ -580,7 +596,7 @@ const Parser = struct{
                                                 .resolved = true,
                                                 .id = .instruction,
                                             },
-                                            },
+                                        },
                                         .id = .load,
                                     },
                                     .value = &local_symbol.instruction.value,
@@ -591,12 +607,41 @@ const Parser = struct{
                                 _ = analyzer.current_basic_block.instructions.append(&load.instruction);
                                 return &load.instruction.value;
                             },
+                            .argument => {
+                                const argument_declaration = lookup_result.declaration.*.get_payload(.argument);
+                                const argument_symbol = argument_declaration.to_symbol();
+                                if (maybe_type) |ty| {
+                                    switch (typecheck(ty, argument_symbol.type)) {
+                                        .success => {},
+                                    }
+                                }
+                                const load = thread.loads.append(.{
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                        },
+                                        .id = .load,
+                                    },
+                                    .value = &argument_symbol.instruction.value,
+                                    .type = argument_symbol.type,
+                                    .alignment = argument_symbol.type.alignment,
+                                    .is_volatile = false,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                return &load.instruction.value;
+                            },
                             else => |t| @panic(@tagName(t)),
                         }
                     },
                     else => exit(1),
                 }
-            } else exit(1);
+            } else {
+                exit_with_error("Unable to find declaration");
+            }
         } else {
             exit(1);
         }
@@ -638,6 +683,7 @@ const Parser = struct{
         var previous_value: *Value = undefined;
         var iterations: usize = 0;
         var it_ty: ?*Type = ty;
+
         while (true) {
             if (iterations == 1 and it_ty == null) {
                 it_ty = previous_value.get_type();
@@ -968,9 +1014,11 @@ const Value = struct {
         lazy_expression,
         instruction,
         function_declaration,
+        argument,
     };
 
     const id_to_value_map = std.EnumArray(Id, type).init(.{
+        .argument = ArgumentSymbol,
         .basic_block = BasicBlock,
         .constant_int = ConstantInt,
         .function_declaration = Function.Declaration,
@@ -1126,8 +1174,17 @@ const Range = struct{
     end: u32,
 };
 
+const ArgumentDeclaration = struct {
+    declaration: Declaration,
+
+    fn to_symbol(argument_declaration: *ArgumentDeclaration) *ArgumentSymbol {
+        return @alignCast(@fieldParentPtr("argument_declaration", argument_declaration));
+    }
+};
+
 const LocalDeclaration = struct {
     declaration: Declaration,
+
     fn to_symbol(local_declaration: *LocalDeclaration) *LocalSymbol {
         return @alignCast(@fieldParentPtr("local_declaration", local_declaration));
     }
@@ -1194,11 +1251,13 @@ const Declaration = struct {
     const Id = enum {
         local,
         global,
+        argument,
     };
 
     const id_to_declaration_map = std.EnumArray(Id, type).init(.{
         .global = GlobalDeclaration,
         .local = LocalDeclaration,
+        .argument = ArgumentDeclaration,
     });
 
     fn get_payload(declaration: *Declaration, comptime id: Id) *id_to_declaration_map.get(id) {
@@ -1212,6 +1271,7 @@ const Function = struct{
     entry_block: *BasicBlock,
     stack_slots: PinnedArray(*LocalSymbol) = .{},
     scope: Function.Scope,
+    arguments: PinnedArray(*ArgumentSymbol) = .{},
 
     const Attributes = struct{
         calling_convention: CallingConvention = .custom,
@@ -1228,7 +1288,7 @@ const Function = struct{
         value: Value,
         global_symbol: GlobalSymbol,
         return_type: *Type,
-        argument_types: []const Type = &.{},
+        argument_types: []const *Type = &.{},
         file: u32,
     };
 
@@ -1254,6 +1314,7 @@ const Instruction = struct{
     id: Id,
 
     const Id = enum{
+        argument_storage,
         branch,
         call,
         integer_binary_operation,
@@ -1268,6 +1329,7 @@ const Instruction = struct{
     };
 
     const id_to_instruction_map = std.EnumArray(Id, type).init(.{
+        .argument_storage = ArgumentSymbol,
         .branch = Branch,
         .call = Call,
         .integer_binary_operation = IntegerBinaryOperation,
@@ -1415,6 +1477,7 @@ const Thread = struct{
     imports: PinnedArray(Import) = .{},
     local_blocks: PinnedArray(LocalBlock) = .{},
     local_symbols: PinnedArray(LocalSymbol) = .{},
+    argument_symbols: PinnedArray(ArgumentSymbol) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -2574,10 +2637,18 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 var last_block = basic_block_node;
 
                                 if (emit_allocas) {
+                                    for (nat_function.arguments.slice(), 0..) |argument, argument_index| {
+                                        const alloca_type = llvm_get_type(thread, argument.type);
+                                        argument.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, argument.alignment).toValue();
+                                        const llvm_argument = function.getArgument(@intCast(argument_index));
+                                        argument.value.llvm = llvm_argument.toValue();
+                                    }
+
                                     for (nat_function.stack_slots.slice()) |local_slot| {
                                         const alloca_type = llvm_get_type(thread, local_slot.type);
                                         local_slot.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, local_slot.alignment).toValue();
                                     }
+
                                     emit_allocas = false;
                                 }
 
@@ -2828,6 +2899,12 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
                 const result = thread.llvm.context.getConstantInt(integer_type.bit_count, constant_int.n, @intFromEnum(integer_type.signedness) != 0);
                 break :b result.toValue();
             },
+            .instruction => {
+                const instruction = value.get_payload(.instruction);
+                switch (instruction.id) {
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
             else => |t| @panic(@tagName(t)),
         };
 
@@ -2895,8 +2972,8 @@ fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, overr
         var argument_types = PinnedArray(*LLVM.Type){};
         _ = &argument_types;
         for (nat_function.argument_types) |argument_type| {
-            _ = argument_type; // autofix
-            exit(1);
+            const llvm_arg_type = llvm_get_type(thread, argument_type);
+            _ = argument_types.append(llvm_arg_type);
         }
         const is_var_args = false;
         const function_type = LLVM.getFunctionType(return_type, argument_types.pointer, argument_types.length, is_var_args);
@@ -3195,7 +3272,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             .id = .local,
                             .name = local_name,
                         },
-                        },
+                    },
                     .type = result.type,
                     .instruction = .{
                         .value = .{
@@ -3562,6 +3639,8 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         parser.skip_space(src);
                     }
 
+                    file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
+
                     const split_modules = true;
                     if (split_modules) {
                         function.declaration.global_symbol.attributes.@"export" = true;
@@ -3569,13 +3648,44 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     parser.expect_character(src, '(');
 
+                    const ArgumentData = struct{
+                        type: *Type,
+                        name: u32,
+                    };
+                    var arguments = PinnedArray(ArgumentData){};
+                    var argument_types = PinnedArray(*Type){};
                     while (true) {
                         parser.skip_space(src);
 
                         if (src[parser.i] == ')') break;
 
-                        exit(1);
+                        parser.skip_space(src);
+
+                        const argument_name = parser.parse_identifier(thread, src);
+
+                        parser.skip_space(src);
+                        
+                        parser.expect_character(src, ':');
+
+                        parser.skip_space(src);
+                        
+                        const argument_type = parser.parse_type_expression(thread, src);
+                        _ = arguments.append(.{
+                            .type = argument_type,
+                            .name = argument_name,
+                        });
+                        _ = argument_types.append(argument_type);
+
+                        parser.skip_space(src);
+
+                        switch (src[parser.i]) {
+                            ',' => parser.i += 1,
+                            ')' => {},
+                            else => exit(1),
+                        }
                     }
+
+                    function.declaration.argument_types = argument_types.const_slice();
 
                     parser.expect_character(src, ')');
 
@@ -3585,12 +3695,65 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     parser.skip_space(src);
 
-                    file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
-
-                    analyzer.current_scope = &analyzer.current_function.scope.scope;
-                    
                     switch (src[parser.i]) {
                         brace_open => {
+                            analyzer.current_scope = &analyzer.current_function.scope.scope;
+
+                            for (arguments.const_slice()) |argument| {
+                                if (analyzer.current_scope.declarations.get(argument.name) != null)  {
+                                    exit_with_error("A declaration already exists with such name");
+                                }
+
+                                const argument_symbol = thread.argument_symbols.append(.{
+                                    .argument_declaration = .{
+                                        .declaration = .{
+                                            .id = .argument,
+                                            .name = argument.name,
+                                        },
+                                    },
+                                    .type = argument.type,
+                                    .alignment = argument.type.alignment,
+                                    .value = .{
+                                        .sema = .{
+                                            .id = .argument,
+                                            .resolved = true,
+                                            .thread = thread.get_index(),
+                                        },
+                                    },
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .id = .instruction,
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                            },
+                                        },
+                                        .id = .argument_storage,
+                                    },
+                                });
+                                _ = analyzer.current_function.arguments.append(argument_symbol);
+
+                                analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
+
+                                const store = thread.stores.append(.{
+                                    .instruction = .{
+                                        .id = .store,
+                                        .value = .{
+                                            .sema = .{
+                                                .id = .instruction,
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                            },
+                                        },
+                                    },
+                                    .destination = &argument_symbol.instruction.value,
+                                    .source = &argument_symbol.value,
+                                    .alignment = argument.type.alignment,
+                                    .is_volatile = false,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                            }
+
                             analyze_local_block(thread, &analyzer, &parser, file);
 
                             const current_basic_block = analyzer.current_basic_block;
