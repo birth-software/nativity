@@ -450,14 +450,29 @@ const Parser = struct{
     }
 
     fn parse_single_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, maybe_type: ?*Type, side: Side) *Value {
-        _ = side; // autofix
+
         const src = file.source_code;
+        const Unary = enum{
+            none,
+            one_complement,
+        };
+        const unary: Unary = switch (src[parser.i]) {
+            'A'...'Z', 'a'...'z', '_' => Unary.none,
+            '0'...'9' => Unary.none,
+            '~' => block: {
+                parser.i += 1;
+                break :block .one_complement;
+            },
+            else => unreachable,
+        };
+        _ = side; // autofix
         const starting_index = parser.i;
         const starting_ch = src[starting_index];
         const is_digit_start = is_decimal_digit(starting_ch);
         const is_alpha_start = is_alphabetic(starting_ch);
 
         if (is_digit_start) {
+            assert(unary == .none);
             const ty = maybe_type orelse exit(1);
             switch (ty.sema.id) {
                 .integer => {
@@ -484,15 +499,32 @@ const Parser = struct{
                                     .function_definition => {
                                         const function_definition = global.get_payload(.function_definition);
                                         const declaration_argument_count = function_definition.declaration.argument_types.len;
-                                        const argument_count: u32 = 0;
-                                        while (src[parser.i] != ')') {
-                                            unreachable;
-                                        }
-                                        parser.i += 1;
+                                        var argument_values = PinnedArray(*Value){};
+                                        while (true) {
+                                            parser.skip_space(src);
 
-                                        if (declaration_argument_count != argument_count) {
-                                            exit(1);
+                                            if (src[parser.i] == ')') {
+                                                break;
+                                            }
+
+                                            const argument_index = argument_values.length;
+                                            if (argument_index >= declaration_argument_count) {
+                                                exit(1);
+                                            }
+                                            const expected_argument_type = function_definition.declaration.argument_types[argument_index];
+                                            const passed_argument_value = parser.parse_expression(analyzer, thread, file, expected_argument_type, .right);
+                                            _ = argument_values.append(passed_argument_value);
+
+                                            parser.skip_space(src);
+
+                                            switch (src[parser.i]) {
+                                                ',' => parser.i += 1,
+                                                ')' => {},
+                                                else => unreachable,
+                                            }
                                         }
+
+                                        parser.i += 1;
 
                                         const call = thread.calls.append(.{
                                             .instruction = .{
@@ -506,6 +538,7 @@ const Parser = struct{
                                                 .id = .call,
                                             },
                                             .callable = &function_definition.declaration.value,
+                                            .arguments = argument_values.const_slice(),
                                         });
                                         _ = analyzer.current_basic_block.instructions.append(&call.instruction);
                                         return &call.instruction.value;
@@ -561,6 +594,7 @@ const Parser = struct{
                                                         .id = .call,
                                                     },
                                                     .callable = &lazy_expression.value,
+                                                    .arguments = &.{},
                                                 });
                                                 _ = analyzer.current_basic_block.instructions.append(&call.instruction);
 
@@ -576,9 +610,9 @@ const Parser = struct{
                             else => |t| @panic(@tagName(t)),
                         }
                     },
-                    ' ', ';', ')' => {
-                        switch (lookup_result.declaration.*.id) {
-                            .local => {
+                    ' ', ',', ';', ')' => {
+                        const local = switch (lookup_result.declaration.*.id) {
+                            .local => block: {
                                 const local_declaration = lookup_result.declaration.*.get_payload(.local);
                                 const local_symbol = local_declaration.to_symbol();
 
@@ -605,9 +639,9 @@ const Parser = struct{
                                     .is_volatile = false,
                                 });
                                 _ = analyzer.current_basic_block.instructions.append(&load.instruction);
-                                return &load.instruction.value;
+                                break :block &load.instruction.value;
                             },
-                            .argument => {
+                            .argument => block: {
                                 const argument_declaration = lookup_result.declaration.*.get_payload(.argument);
                                 const argument_symbol = argument_declaration.to_symbol();
                                 if (maybe_type) |ty| {
@@ -632,10 +666,47 @@ const Parser = struct{
                                     .is_volatile = false,
                                 });
                                 _ = analyzer.current_basic_block.instructions.append(&load.instruction);
-                                return &load.instruction.value;
+                                break :block &load.instruction.value;
                             },
                             else => |t| @panic(@tagName(t)),
-                        }
+                        };
+
+                        const local_type = local.get_type();
+
+                        return switch (unary) {
+                            .none => local,
+                            .one_complement => block: {
+                                const operand = thread.constant_ints.append(.{
+                                    .type = local_type,
+                                    .value = .{
+                                        .sema = .{
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                            .id = .constant_int,
+                                        },
+                                    },
+                                    .n = std.math.maxInt(u64),
+                                });
+                                const xor = thread.integer_binary_operations.append(.{
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                            },
+                                        .id = .integer_binary_operation,
+                                    },
+                                    .left = local,
+                                    .right = &operand.value,
+                                    .id = .xor,
+                                    .type = local_type,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&xor.instruction);
+                                break :block &xor.instruction.value;
+                            },
+                        };
                     },
                     else => exit(1),
                 }
@@ -756,7 +827,7 @@ const Parser = struct{
             }
 
             switch (src[parser.i]) {
-                ')', ';' => return previous_value,
+                ')', ';', ',' => return previous_value,
                 '=' => {
                     current_operation = .assign;
                     parser.i += 1;
@@ -1400,6 +1471,7 @@ const Jump = struct {
 const Call = struct{
     instruction: Instruction,
     callable: *Value,
+    arguments: []const *Value,
 };
 
 const Load = struct {
@@ -2704,8 +2776,15 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const callee_function = callee.toFunction() orelse unreachable;
                                             const function_type = callee_function.getType();
 
-                                            const arguments: []const *LLVM.Value = &.{};
-                                            const call_i = thread.llvm.builder.createCall(function_type, callee, arguments.ptr, arguments.len, "", "".len, null);
+                                            var arguments = std.BoundedArray(*LLVM.Value, 512){};
+                                            for (call.arguments) |argument| {
+                                                const llvm_argument = llvm_get_value(thread, argument); 
+                                                _ = arguments.appendAssumeCapacity(llvm_argument);
+                                            }
+
+                                            const args = arguments.constSlice();
+
+                                            const call_i = thread.llvm.builder.createCall(function_type, callee, args.ptr, args.len, "", "".len, null);
                                             break :block call_i.toValue();
                                         },
                                         .integer_compare => block: {
