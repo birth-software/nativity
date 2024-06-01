@@ -745,6 +745,10 @@ const Parser = struct{
         logical_shift_right_assign,
 
         compare_equal,
+        compare_unsigned_greater,
+        compare_unsigned_greater_equal,
+        compare_signed_greater,
+        compare_signed_greater_equal,
     };
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
@@ -774,10 +778,10 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .compare_equal => {
+                .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal => {
                     switch (current_operation) {
                         else => unreachable,
-                        inline .compare_equal => |co| {
+                        inline .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal => |co| {
                             const string = @tagName(co)["compare_".len..];
                             const comparison = @field(IntegerCompare.Id, string);
                             const compare = thread.integer_compares.append(.{
@@ -815,8 +819,20 @@ const Parser = struct{
                         .left = previous_value,
                         .right = current_value,
                         .id = switch (current_operation) {
-                            .none, .assign, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .arithmetic_shift_right_assign, .logical_shift_right_assign, .compare_equal => unreachable,
-                            inline else => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
+                            else => unreachable,
+                            inline
+                                .add,
+                            .sub,
+                            .mul,
+                            .udiv,
+                            .sdiv,
+                            .@"and",
+                            .@"or",
+                            .@"xor",
+                            .shift_left,
+                            .arithmetic_shift_right,
+                            .logical_shift_right,
+                            => |co| @field(IntegerBinaryOperation.Id, @tagName(co)),
                         },
                         .type = if (it_ty) |t| t else current_value.get_type(),
                     });
@@ -972,14 +988,16 @@ const Parser = struct{
                     parser.skip_space(src);
                 },
                 '>' => {
-                    // TODO
-                    current_operation = undefined;
+                    const int_ty = it_ty orelse previous_value.get_type();
+                    const integer_type = int_ty.get_payload(.integer);
+                    current_operation = switch (integer_type.signedness) {
+                        .unsigned => .compare_unsigned_greater,
+                        .signed => .compare_signed_greater,
+                    };
                     parser.i += 1;
 
                     switch (src[parser.i]) {
                         '>' => {
-                            const int_ty = it_ty orelse unreachable;
-                            const integer_type = int_ty.get_payload(.integer);
                             current_operation = switch (integer_type.signedness) {
                                 .unsigned => .logical_shift_right,
                                 .signed => .arithmetic_shift_right,
@@ -998,7 +1016,15 @@ const Parser = struct{
                                 else => {},
                             }
                         },
-                        else => unreachable,
+                        '=' => {
+                            current_operation = switch (integer_type.signedness) {
+                                .unsigned => .compare_unsigned_greater_equal,
+                                .signed => .compare_signed_greater_equal,
+                            };
+
+                            parser.i += 1;
+                        },
+                        else => {},
                     }
 
                     parser.skip_space(src);
@@ -1007,6 +1033,131 @@ const Parser = struct{
             }
 
             iterations += 1;
+        }
+    }
+
+    fn parse_if_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) void {
+        const src = file.source_code;
+        parser.i += 2;
+
+        parser.skip_space(src);
+
+        parser.expect_character(src, '(');
+
+        parser.skip_space(src);
+
+        const condition = parser.parse_expression(analyzer, thread, file, null, .right);
+
+        parser.skip_space(src);
+
+        parser.expect_character(src, ')');
+
+        parser.skip_space(src);
+
+        const condition_type = condition.get_type();
+        const compare = switch (condition_type.sema.id) {
+            .integer => int: {
+                const integer_ty = condition_type.get_payload(.integer);
+                if (integer_ty.bit_count == 1) {
+                    break :int condition;
+                } else {
+                    const zero = thread.constant_ints.append(.{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .constant_int,
+                            },
+                            },
+                        .n = 0,
+                        .type = condition_type,
+                    });
+
+                    const compare = thread.integer_compares.append(.{
+                        .instruction = .{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .instruction,
+                                },
+                                },
+                            .id = .integer_compare,
+                        },
+                        .left = condition,
+                        .right = &zero.value,
+                        .id = .not_zero,
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+
+                    break :int &compare.instruction.value;
+                }
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+
+        const original_block = analyzer.current_basic_block;
+
+        const taken_block = create_basic_block(thread);
+        const exit_block = create_basic_block(thread);
+        _ = analyzer.exit_blocks.append(exit_block);
+
+        const branch = thread.branches.append(.{
+            .instruction = .{
+                .value = .{
+                    .sema = .{
+                        .thread = thread.get_index(),
+                        .resolved = true,
+                        .id = .instruction,
+                    },
+                    },
+                .id = .branch,
+            },
+            .condition = compare,
+            .taken = taken_block,
+            .not_taken = exit_block,
+        });
+        _ = analyzer.current_basic_block.instructions.append(&branch.instruction);
+        analyzer.current_basic_block.is_terminated = true;
+
+        analyzer.current_basic_block = branch.taken;
+        _ = branch.taken.predecessors.append(original_block);
+
+        switch (src[parser.i]) {
+            brace_open => { 
+                analyze_local_block(thread, analyzer, parser, file);
+            },
+            else => @panic((src.ptr + parser.i)[0..1]),
+        }
+
+        parser.skip_space(src);
+
+        if (src[parser.i] == 'e') {
+            if (byte_equal(src[parser.i..][0.."else".len], "else")) {
+                parser.i += "else".len;
+                _ = branch.taken.predecessors.append(original_block);
+                analyzer.current_basic_block = branch.not_taken;
+
+                parser.skip_space(src);
+
+                switch (src[parser.i]) {
+                    brace_open => { 
+                        analyze_local_block(thread, analyzer, parser, file);
+                    },
+                    'i' => {
+                        if (src[parser.i + 1] == 'f') {
+                            parser.parse_if_expression(analyzer, thread, file);
+                        } else {
+                            unreachable;
+                        }
+                    },
+                    else => @panic((src.ptr + parser.i)[0..1]),
+                }
+            } else {
+                unreachable;
+            }
+        } else {
+            unreachable;
         }
     }
 };
@@ -1446,10 +1597,13 @@ const IntegerCompare = struct {
     instruction: Instruction,
     left: *Value,
     right: *Value,
-    // type: *Type,
     id: Id,
 
     const Id = enum{
+        unsigned_greater,
+        unsigned_greater_equal,
+        signed_greater,
+        signed_greater_equal,
         equal,
         not_equal,
         not_zero,
@@ -2803,6 +2957,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                     .equal => .eq,
                                                     .not_equal => .ne,
                                                     .not_zero => unreachable,
+                                                    .unsigned_greater_equal => .uge,
+                                                    .unsigned_greater => .ugt,
+                                                    .signed_greater_equal => .sge,
+                                                    .signed_greater => .sgt,
                                                 };
 
                                                 const cmp = builder.createICmp(comparison, left, right, name, name.len);
@@ -3390,121 +3548,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
             },
             'i' => {
                 if (src[parser.i + 1] == 'f') {
-                    parser.i += 2;
-
-                    parser.skip_space(src);
-
-                    parser.expect_character(src, '(');
-
-                    parser.skip_space(src);
-
-                    const condition = parser.parse_expression(analyzer, thread, file, null, .right);
-
-                    parser.skip_space(src);
-
-                    parser.expect_character(src, ')');
-
-                    parser.skip_space(src);
-
-                    const condition_type = condition.get_type();
-                    const compare = switch (condition_type.sema.id) {
-                        .integer => int: {
-                            const integer_ty = condition_type.get_payload(.integer);
-                            if (integer_ty.bit_count == 1) {
-                                break :int condition;
-                            } else {
-                                const zero = thread.constant_ints.append(.{
-                                    .value = .{
-                                        .sema = .{
-                                            .thread = thread.get_index(),
-                                            .resolved = true,
-                                            .id = .constant_int,
-                                        },
-                                        },
-                                    .n = 0,
-                                    .type = condition_type,
-                                });
-
-                                const compare = thread.integer_compares.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
-                                            },
-                                            },
-                                        .id = .integer_compare,
-                                    },
-                                    .left = condition,
-                                    .right = &zero.value,
-                                    .id = .not_zero,
-                                });
-                                _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
-
-                                break :int &compare.instruction.value;
-                            }
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    };
-
-                    const original_block = analyzer.current_basic_block;
-
-                    const taken_block = create_basic_block(thread);
-                    const exit_block = create_basic_block(thread);
-                    _ = analyzer.exit_blocks.append(exit_block);
-
-                    const branch = thread.branches.append(.{
-                        .instruction = .{
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true,
-                                    .id = .instruction,
-                                },
-                            },
-                            .id = .branch,
-                        },
-                        .condition = compare,
-                        .taken = taken_block,
-                        .not_taken = exit_block,
-                    });
-                    _ = analyzer.current_basic_block.instructions.append(&branch.instruction);
-                    analyzer.current_basic_block.is_terminated = true;
-
-                    analyzer.current_basic_block = branch.taken;
-                    _ = branch.taken.predecessors.append(original_block);
-
-                    switch (src[parser.i]) {
-                        brace_open => { 
-                            analyze_local_block(thread, analyzer, parser, file);
-                        },
-                        else => @panic((src.ptr + parser.i)[0..1]),
-                    }
-
-                    parser.skip_space(src);
-
-                    if (src[parser.i] == 'e') {
-                        if (byte_equal(src[parser.i..][0.."else".len], "else")) {
-                            parser.i += "else".len;
-                            _ = branch.taken.predecessors.append(original_block);
-                            analyzer.current_basic_block = branch.not_taken;
-
-                            parser.skip_space(src);
-
-                            switch (src[parser.i]) {
-                                brace_open => { 
-                                    analyze_local_block(thread, analyzer, parser, file);
-                                },
-                                else => @panic((src.ptr + parser.i)[0..1]),
-                            }
-                        } else {
-                            unreachable;
-                        }
-                    } else {
-                        unreachable;
-                    }
-
+                    parser.parse_if_expression(analyzer, thread, file);
                 } else {
                     unreachable;
                 }
@@ -3517,6 +3561,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
     parser.expect_character(src, brace_close);
 }
+
 
 pub fn analyze_file(thread: *Thread, file_index: u32) void {
     const file = instance.files.get(@enumFromInt(file_index));
