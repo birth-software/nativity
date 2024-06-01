@@ -1,0 +1,14 @@
+fn align_forward(value: s32, alignment: s32) s32 {
+    >mask = alignment - 1;
+    return (value + mask) & ~mask;
+}
+
+fn [cc(.c)] main [export] () s32 {
+    >a: s32 = 1;
+    >aligned_a = align_forward(a, 8);
+    >b: s32 = 9;
+    >aligned_b = align_forward(b, 8);
+    >c: s32 = 512;
+    >aligned_c = align_forward(c, 0x1000);
+    return (aligned_a - 8) + (aligned_b - 16) + (aligned_c - 0x1000);
+}
