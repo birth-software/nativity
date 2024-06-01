@@ -749,6 +749,10 @@ const Parser = struct{
         compare_unsigned_greater_equal,
         compare_signed_greater,
         compare_signed_greater_equal,
+        compare_unsigned_less,
+        compare_unsigned_less_equal,
+        compare_signed_less,
+        compare_signed_less_equal,
     };
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
@@ -778,10 +782,10 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal => {
+                .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => {
                     switch (current_operation) {
                         else => unreachable,
-                        inline .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal => |co| {
+                inline .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => |co| {
                             const string = @tagName(co)["compare_".len..];
                             const comparison = @field(IntegerCompare.Id, string);
                             const compare = thread.integer_compares.append(.{
@@ -965,8 +969,12 @@ const Parser = struct{
                     parser.skip_space(src);
                 },
                 '<' => {
-                    // TODO
-                    current_operation = undefined;
+                    const int_ty = it_ty orelse previous_value.get_type();
+                    const integer_type = int_ty.get_payload(.integer);
+                    current_operation = switch (integer_type.signedness) {
+                        .unsigned => .compare_unsigned_less,
+                        .signed => .compare_signed_less,
+                    };
                     parser.i += 1;
 
                     switch (src[parser.i]) {
@@ -982,7 +990,10 @@ const Parser = struct{
                                 else => {},
                             }
                         },
-                        else => unreachable,
+                        '=' => {
+                            unreachable;
+                        },
+                        else => {},
                     }
 
                     parser.skip_space(src);
@@ -1604,6 +1615,10 @@ const IntegerCompare = struct {
         unsigned_greater_equal,
         signed_greater,
         signed_greater_equal,
+        unsigned_less,
+        unsigned_less_equal,
+        signed_less,
+        signed_less_equal,
         equal,
         not_equal,
         not_zero,
@@ -2961,6 +2976,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                     .unsigned_greater => .ugt,
                                                     .signed_greater_equal => .sge,
                                                     .signed_greater => .sgt,
+                                                    .unsigned_less_equal => .uge,
+                                                    .unsigned_less => .ugt,
+                                                    .signed_less_equal => .sge,
+                                                    .signed_less => .sgt,
                                                 };
 
                                                 const cmp = builder.createICmp(comparison, left, right, name, name.len);
