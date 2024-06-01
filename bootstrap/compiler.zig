@@ -2887,9 +2887,9 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         }
 
                         if (debug_info) {
-                            const file_index = thread.functions.slice()[0].declaration.file;
-                            const llvm_file = thread.debug_info_file_map.get_pointer(file_index).?;
-                            llvm_file.builder.finalize();
+                            for (thread.debug_info_file_map.values()) |v| {
+                                v.builder.finalize();
+                            }
                         }
 
                         const verify_module = true;
