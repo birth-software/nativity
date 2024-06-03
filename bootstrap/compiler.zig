@@ -611,7 +611,7 @@ const Parser = struct{
                         }
                     },
                     ' ', ',', ';', ')' => {
-                        const local = switch (lookup_result.declaration.*.id) {
+                        const declaration_value = switch (lookup_result.declaration.*.id) {
                             .local => block: {
                                 const local_declaration = lookup_result.declaration.*.get_payload(.local);
                                 const local_symbol = local_declaration.to_symbol();
@@ -671,13 +671,13 @@ const Parser = struct{
                             else => |t| @panic(@tagName(t)),
                         };
 
-                        const local_type = local.get_type();
+                        const declaration_type = declaration_value.get_type();
 
                         return switch (unary) {
-                            .none => local,
+                            .none => declaration_value,
                             .one_complement => block: {
                                 const operand = thread.constant_ints.append(.{
-                                    .type = local_type,
+                                    .type = declaration_type,
                                     .value = .{
                                         .sema = .{
                                             .thread = thread.get_index(),
@@ -698,10 +698,10 @@ const Parser = struct{
                                             },
                                         .id = .integer_binary_operation,
                                     },
-                                    .left = local,
+                                    .left = declaration_value,
                                     .right = &operand.value,
                                     .id = .xor,
-                                    .type = local_type,
+                                    .type = declaration_type,
                                 });
                                 _ = analyzer.current_basic_block.instructions.append(&xor.instruction);
                                 break :block &xor.instruction.value;
@@ -1131,6 +1131,7 @@ const Parser = struct{
         const taken_block = create_basic_block(thread);
         const exit_block = create_basic_block(thread);
         _ = analyzer.exit_blocks.append(exit_block);
+        const exit_block_count = analyzer.exit_blocks.length;
 
         const branch = thread.branches.append(.{
             .instruction = .{
@@ -1155,10 +1156,32 @@ const Parser = struct{
 
         var if_terminated = false;
         var else_terminated = false;
+        var if_jump: *Jump = undefined;
+        var if_basic_block: *BasicBlock = undefined;
         switch (src[parser.i]) {
             brace_open => { 
                 const if_block = analyze_local_block(thread, analyzer, parser, file);
                 if_terminated = if_block.terminated;
+
+                if (!if_terminated) {
+                    const jump = thread.jumps.append(.{
+                        .instruction = .{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .instruction,
+                                },
+                            },
+                            .id = .jump,
+                        },
+                        .basic_block = exit_block,
+                    });
+                    if_jump = jump;
+                    if_basic_block = analyzer.current_basic_block;
+                    _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
+                    analyzer.current_basic_block.is_terminated = true;
+                }
             },
             else => @panic((src.ptr + parser.i)[0..1]),
         }
@@ -1188,9 +1211,43 @@ const Parser = struct{
                 },
                 else => @panic((src.ptr + parser.i)[0..1]),
             }
+
+            if (!if_terminated and !else_terminated) {
+                const new_exit_block = create_basic_block(thread);
+                assert(if_jump.basic_block == branch.not_taken);
+                if_jump.basic_block.predecessors.length = 0;
+                _ = if_jump.basic_block.predecessors.append(original_block);
+                if_jump.basic_block = new_exit_block;
+
+                const jump = thread.jumps.append(.{
+                    .instruction = .{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .instruction,
+                            },
+                            },
+                        .id = .jump,
+                    },
+                    .basic_block = new_exit_block,
+                });
+                _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
+                analyzer.current_basic_block.is_terminated = true;
+
+                _ = new_exit_block.predecessors.append(if_basic_block);
+                _ = new_exit_block.predecessors.append(analyzer.current_basic_block);
+
+                analyzer.current_basic_block = new_exit_block;
+            }
         } else {
             _ = branch.not_taken.predecessors.append(original_block);
             analyzer.current_basic_block = branch.not_taken;
+        }
+
+        if (!if_terminated and !else_terminated) {
+            assert(analyzer.exit_blocks.length == exit_block_count);
+            analyzer.exit_blocks.length -= 1;
         }
 
         return .{
@@ -3097,7 +3154,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                         const verify_module = true;
                         const print_module_at_failure = true;
-                        const print_module = false;
+                        const print_module = true;
 
                         if (verify_module) {
                             var verification_message: []const u8 = undefined;
@@ -3394,7 +3451,8 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
     while (true) {
         parser.skip_space(src);
 
-        const statement_start_ch = src[parser.i];
+        const statement_start_ch_index = parser.i;
+        const statement_start_ch = src[statement_start_ch_index];
 
         if (statement_start_ch == brace_close) {
             break;
@@ -3484,7 +3542,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                         exit(1);
                     }
                 } else {
-                    exit(1);
+                    parser.i = statement_start_ch_index;
                 }
             },
             // Local variable
@@ -3605,9 +3663,106 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     unreachable;
                 }
             },
-            else => {
+            else => {},
+        }
+
+        if (statement_start_ch_index == parser.i) {
+            if (is_identifier_char_start(statement_start_ch)) {
+                const identifier = parser.parse_identifier(thread, src);
+                parser.skip_space(src);
+
+                const declaration_lookup = analyzer.current_scope.get_declaration(identifier) orelse unreachable;
+
+                const operation_index = parser.i;
+                const operation_ch = src[operation_index];
+                var is_binary_operation = false;
+                switch (operation_ch) {
+                    '+', '-', '*', '/', '=' => {
+                        if (operation_ch != '=') {
+                            if (src[parser.i + 1] == '=') {
+                                parser.i += 2;
+
+                                is_binary_operation = true;
+                            } else {
+                                unreachable;
+                            }
+                        } else {
+                            parser.i += 1;
+                        }
+
+                        parser.skip_space(src);
+
+                        const declaration_value = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .right);
+                        const declaration_type = switch (declaration_lookup.declaration.*.id) {
+                            .argument => block: {
+                                const argument_declaration = declaration_lookup.declaration.*.get_payload(.argument);
+                                const argument_symbol = argument_declaration.to_symbol();
+                                break :block argument_symbol.type;
+                            },
+                            .local => block: {
+                                const local_declaration = declaration_lookup.declaration.*.get_payload(.local);
+                                const local_symbol = local_declaration.to_symbol();
+                                break :block local_symbol.type;
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        };
+                        const right = parser.parse_expression(analyzer, thread, file, declaration_type, .right);
+                        const source = switch (is_binary_operation) {
+                            false => right,
+                            true => block: {
+                                const binary_operation_id: IntegerBinaryOperation.Id = switch (operation_ch) {
+                                    '+' => .add,
+                                    else => unreachable,
+                                };
+                                const binary_operation = thread.integer_binary_operations.append(.{
+                                    .id = binary_operation_id,
+                                    .instruction = .{
+                                        .id = .integer_binary_operation,
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                            },
+                                        },
+                                        .left = declaration_value,
+                                        .right = right,
+                                        .type = declaration_type,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&binary_operation.instruction);
+                                break :block &binary_operation.instruction.value;
+                            },
+                        };
+
+                        parser.skip_space(src);
+
+                        parser.expect_character(src, ';');
+
+                        const declaration_pointer = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .left);
+                        const store = thread.stores.append(.{
+                            .instruction = .{
+                                .id = .store,
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = true,
+                                        .id = .instruction,
+                                    },
+                                    },
+                                },
+                                .destination = declaration_pointer,
+                                .source = source,
+                                .alignment = declaration_type.alignment,
+                                .is_volatile = false,
+                        });
+                        _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                    },
+                    else => @panic((src.ptr + parser.i)[0..1]),
+                }
+            } else {
                 exit_with_error("Unrecognized statement initial char");
-            },
+            }
         }
     }
 
@@ -3618,6 +3773,54 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
     };
 }
 
+fn get_declaration_value(analyzer: *Analyzer, thread: *Thread, declaration: *Declaration, maybe_type: ?*Type, side: Side) *Value {
+    var declaration_type: *Type = undefined;
+    const declaration_value = switch (declaration.id) {
+        .local => block: {
+            const local_declaration = declaration.get_payload(.local);
+            const local_symbol = local_declaration.to_symbol();
+            declaration_type = local_symbol.type;
+            break :block &local_symbol.instruction.value;
+        },
+        .argument => block: {
+            const argument_declaration = declaration.get_payload(.argument);
+            const argument_symbol = argument_declaration.to_symbol();
+            declaration_type = argument_symbol.type;
+            break :block &argument_symbol.instruction.value;
+        },
+        else => |t| @panic(@tagName(t)),
+    };
+    
+    if (maybe_type) |ty| {
+        switch (typecheck(ty, declaration_type)) {
+            .success => {},
+        }
+    }
+
+    return switch (side) {
+        .left => declaration_value,
+        .right => block: {
+            const load = thread.loads.append(.{
+                .instruction = .{
+                    .value = .{
+                        .sema = .{
+                            .thread = thread.get_index(),
+                            .resolved = true,
+                            .id = .instruction,
+                        },
+                        },
+                    .id = .load,
+                },
+                .value = declaration_value,
+                .type = declaration_type,
+                .alignment = declaration_type.alignment,
+                .is_volatile = false,
+            });
+            _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+            break :block &load.instruction.value;
+        },
+    };
+}
 
 pub fn analyze_file(thread: *Thread, file_index: u32) void {
     const file = instance.files.get(@enumFromInt(file_index));

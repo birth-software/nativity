@@ -1,0 +1,16 @@
+fn foo() s32 {
+    return 5;
+}
+
+fn[cc(.c)] main[export] () s32 {
+    >a = foo();
+
+    if (a > 4) {
+        a += 2;
+    } else {
+        a += 1;
+    }
+
+    a += 1;
+    return a - 8;
+}
