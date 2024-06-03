@@ -745,6 +745,7 @@ const Parser = struct{
         logical_shift_right_assign,
 
         compare_equal,
+        compare_not_equal,
         compare_unsigned_greater,
         compare_unsigned_greater_equal,
         compare_signed_greater,
@@ -782,10 +783,10 @@ const Parser = struct{
                 .none => {
                     previous_value = current_value;
                 },
-                .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => {
+                .compare_equal, .compare_not_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => {
                     switch (current_operation) {
                         else => unreachable,
-                inline .compare_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => |co| {
+                inline .compare_equal, .compare_not_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => |co| {
                             const string = @tagName(co)["compare_".len..];
                             const comparison = @field(IntegerCompare.Id, string);
                             const compare = thread.integer_compares.append(.{
@@ -858,6 +859,20 @@ const Parser = struct{
                             parser.i += 1;
                         },
                         else => {},
+                    }
+
+                    parser.skip_space(src);
+                },
+                '!' => {
+                    current_operation = undefined;
+                    parser.i += 1;
+
+                    switch (src[parser.i]) {
+                        '=' => {
+                            current_operation = .compare_not_equal;
+                            parser.i += 1;
+                        },
+                        else => unreachable,
                     }
 
                     parser.skip_space(src);
@@ -1047,7 +1062,11 @@ const Parser = struct{
         }
     }
 
-    fn parse_if_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) void {
+    const IfResult = struct {
+        terminated: bool,
+    };
+
+    fn parse_if_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) IfResult {
         const src = file.source_code;
         parser.i += 2;
 
@@ -1134,42 +1153,49 @@ const Parser = struct{
         analyzer.current_basic_block = branch.taken;
         _ = branch.taken.predecessors.append(original_block);
 
+        var if_terminated = false;
+        var else_terminated = false;
         switch (src[parser.i]) {
             brace_open => { 
-                analyze_local_block(thread, analyzer, parser, file);
+                const if_block = analyze_local_block(thread, analyzer, parser, file);
+                if_terminated = if_block.terminated;
             },
             else => @panic((src.ptr + parser.i)[0..1]),
         }
 
         parser.skip_space(src);
 
-        if (src[parser.i] == 'e') {
-            if (byte_equal(src[parser.i..][0.."else".len], "else")) {
-                parser.i += "else".len;
-                _ = branch.taken.predecessors.append(original_block);
-                analyzer.current_basic_block = branch.not_taken;
+        if (src[parser.i] == 'e' and byte_equal(src[parser.i..][0.."else".len], "else")) {
+            // TODO: create not taken block
+            parser.i += "else".len;
+            _ = branch.not_taken.predecessors.append(original_block);
+            analyzer.current_basic_block = branch.not_taken;
 
-                parser.skip_space(src);
+            parser.skip_space(src);
 
-                switch (src[parser.i]) {
-                    brace_open => { 
-                        analyze_local_block(thread, analyzer, parser, file);
-                    },
-                    'i' => {
-                        if (src[parser.i + 1] == 'f') {
-                            parser.parse_if_expression(analyzer, thread, file);
-                        } else {
-                            unreachable;
-                        }
-                    },
-                    else => @panic((src.ptr + parser.i)[0..1]),
-                }
-            } else {
-                unreachable;
+            switch (src[parser.i]) {
+                brace_open => { 
+                    const else_block = analyze_local_block(thread, analyzer, parser, file);
+                    else_terminated = else_block.terminated;
+                },
+                'i' => {
+                    if (src[parser.i + 1] == 'f') {
+                        const else_if = parser.parse_if_expression(analyzer, thread, file);
+                        else_terminated = else_if.terminated;
+                    } else {
+                        unreachable;
+                    }
+                },
+                else => @panic((src.ptr + parser.i)[0..1]),
             }
         } else {
-            unreachable;
+            _ = branch.not_taken.predecessors.append(original_block);
+            analyzer.current_basic_block = branch.not_taken;
         }
+
+        return .{
+            .terminated = if_terminated and else_terminated,
+        };
     }
 };
 
@@ -3342,7 +3368,11 @@ fn build_return(thread: *Thread, analyzer: *Analyzer, return_value: *Value) void
     analyzer.current_basic_block.is_terminated = true;
 }
 
-pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser, file: *File) void {
+const LocalBlockResult = struct{
+    terminated: bool,
+};
+
+pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser, file: *File) LocalBlockResult {
     const src = file.source_code;
     const function = analyzer.current_function;
     const block_start = parser.i;
@@ -3359,6 +3389,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
     });
     analyzer.current_scope = &local_block.scope;
     parser.skip_space(src);
+    var terminated = false;
 
     while (true) {
         parser.skip_space(src);
@@ -3448,6 +3479,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                         } else {
                             build_return(thread, analyzer, return_value);
                         }
+                        terminated = true;
                     } else  {
                         exit(1);
                     }
@@ -3567,7 +3599,8 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
             },
             'i' => {
                 if (src[parser.i + 1] == 'f') {
-                    parser.parse_if_expression(analyzer, thread, file);
+                    const if_block = parser.parse_if_expression(analyzer, thread, file);
+                    terminated = terminated or if_block.terminated;
                 } else {
                     unreachable;
                 }
@@ -3579,6 +3612,10 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
     }
 
     parser.expect_character(src, brace_close);
+
+    return LocalBlockResult{
+        .terminated = terminated,
+    };
 }
 
 
@@ -3897,7 +3934,8 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 _ = analyzer.current_basic_block.instructions.append(&store.instruction);
                             }
 
-                            analyze_local_block(thread, &analyzer, &parser, file);
+                            const result = analyze_local_block(thread, &analyzer, &parser, file);
+                            _ = result;
 
                             const current_basic_block = analyzer.current_basic_block;
                             if (analyzer.return_phi) |return_phi| {
