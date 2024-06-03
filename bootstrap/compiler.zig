@@ -3154,7 +3154,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                         const verify_module = true;
                         const print_module_at_failure = true;
-                        const print_module = true;
+                        const print_module = false;
 
                         if (verify_module) {
                             var verification_message: []const u8 = undefined;
@@ -5458,3 +5458,5 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
         },
     }
 }
+
+
