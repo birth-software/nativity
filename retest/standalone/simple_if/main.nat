@@ -1,0 +1,12 @@
+fn[cc(.c)] main[export]() s32 {
+    >constant: s32 = 4;
+    >result: s32 = 0;
+
+    if (result > 0) {
+        result = constant - 1;
+    } else {
+        result = constant;
+    }
+
+    return result - constant;
+}
