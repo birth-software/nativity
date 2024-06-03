@@ -1,0 +1,19 @@
+fn foo(arg: s32) s32 {
+    if (arg > 1) {
+        return 6;
+    } else {
+        return 0;
+    }
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >a = foo(5);
+    >b = foo(5);
+    if (a - 6 != 0) {
+        return 1;
+    }
+    if (b - 6 != 0) {
+        return 1;
+    }
+    return a - b;
+}
