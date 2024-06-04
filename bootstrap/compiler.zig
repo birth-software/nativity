@@ -1066,12 +1066,8 @@ const Parser = struct{
         terminated: bool,
     };
 
-    fn parse_if_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) IfResult {
+    fn parse_condition(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) *Value {
         const src = file.source_code;
-        parser.i += 2;
-
-        parser.skip_space(src);
-
         parser.expect_character(src, '(');
 
         parser.skip_space(src);
@@ -1125,6 +1121,16 @@ const Parser = struct{
             },
             else => |t| @panic(@tagName(t)),
         };
+        return compare;
+    }
+
+    fn parse_if_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) IfResult {
+        const src = file.source_code;
+        parser.i += 2;
+
+        parser.skip_space(src);
+
+        const compare = parser.parse_condition(analyzer, thread, file);
 
         const original_block = analyzer.current_basic_block;
 
@@ -1156,31 +1162,14 @@ const Parser = struct{
 
         var if_terminated = false;
         var else_terminated = false;
-        var if_jump: *Jump = undefined;
-        var if_basic_block: *BasicBlock = undefined;
+        var if_jump_emission: JumpEmission = undefined;
         switch (src[parser.i]) {
             brace_open => { 
                 const if_block = analyze_local_block(thread, analyzer, parser, file);
                 if_terminated = if_block.terminated;
 
                 if (!if_terminated) {
-                    const jump = thread.jumps.append(.{
-                        .instruction = .{
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true,
-                                    .id = .instruction,
-                                },
-                            },
-                            .id = .jump,
-                        },
-                        .basic_block = exit_block,
-                    });
-                    if_jump = jump;
-                    if_basic_block = analyzer.current_basic_block;
-                    _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
-                    analyzer.current_basic_block.is_terminated = true;
+                    if_jump_emission = emit_jump(analyzer, thread, exit_block);
                 }
             },
             else => @panic((src.ptr + parser.i)[0..1]),
@@ -1191,7 +1180,6 @@ const Parser = struct{
         if (src[parser.i] == 'e' and byte_equal(src[parser.i..][0.."else".len], "else")) {
             // TODO: create not taken block
             parser.i += "else".len;
-            _ = branch.not_taken.predecessors.append(original_block);
             analyzer.current_basic_block = branch.not_taken;
 
             parser.skip_space(src);
@@ -1214,29 +1202,16 @@ const Parser = struct{
 
             if (!if_terminated and !else_terminated) {
                 const new_exit_block = create_basic_block(thread);
-                assert(if_jump.basic_block == branch.not_taken);
-                if_jump.basic_block.predecessors.length = 0;
-                _ = if_jump.basic_block.predecessors.append(original_block);
-                if_jump.basic_block = new_exit_block;
+                // Fix jump
 
-                const jump = thread.jumps.append(.{
-                    .instruction = .{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .instruction,
-                            },
-                            },
-                        .id = .jump,
-                    },
-                    .basic_block = new_exit_block,
-                });
-                _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
-                analyzer.current_basic_block.is_terminated = true;
+                assert(if_jump_emission.jump.basic_block == branch.not_taken);
+                if_jump_emission.jump.basic_block.predecessors.length = 0;
+                _ = if_jump_emission.jump.basic_block.predecessors.append(original_block);
+                _ = new_exit_block.predecessors.append(if_jump_emission.jump.basic_block);
+                if_jump_emission.jump.basic_block = new_exit_block;
 
-                _ = new_exit_block.predecessors.append(if_basic_block);
-                _ = new_exit_block.predecessors.append(analyzer.current_basic_block);
+                // Emit jump to the new exit block
+                _ = emit_jump(analyzer, thread, new_exit_block);
 
                 analyzer.current_basic_block = new_exit_block;
             }
@@ -1316,7 +1291,7 @@ const LazyExpression = struct {
 
 const Value = struct {
     llvm: ?*LLVM.Value = null,
-    sema: packed struct(u32) {
+    sema: struct {
         thread: u16,
         resolved: bool,
         reserved: u7 = 0,
@@ -3059,10 +3034,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                     .unsigned_greater => .ugt,
                                                     .signed_greater_equal => .sge,
                                                     .signed_greater => .sgt,
-                                                    .unsigned_less_equal => .uge,
-                                                    .unsigned_less => .ugt,
-                                                    .signed_less_equal => .sge,
-                                                    .signed_less => .sgt,
+                                                    .unsigned_less_equal => .ule,
+                                                    .unsigned_less => .ult,
+                                                    .signed_less_equal => .sle,
+                                                    .signed_less => .slt,
                                                 };
 
                                                 const cmp = builder.createICmp(comparison, left, right, name, name.len);
@@ -3077,7 +3052,9 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                                             const taken = thread.llvm.context.createBasicBlock("", "".len, function, null);
                                             branch.taken.value.llvm = taken.toValue();
+                                            assert(taken.toValue().toBasicBlock() != null);
                                             const not_taken = thread.llvm.context.createBasicBlock("", "".len, function, null);
+                                            assert(not_taken.toValue().toBasicBlock() != null);
                                             branch.not_taken.value.llvm = not_taken.toValue();
 
                                             const condition = llvm_get_value(thread, branch.condition);
@@ -3089,8 +3066,11 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         .jump => block: {
                                             const jump = instruction.get_payload(.jump);
                                             const target_block = jump.basic_block;
+                                            if (thread.basic_blocks.get_unchecked(0) == target_block) @breakpoint();
+                                            assert(target_block.value.sema.thread == thread.get_index());
                                             const llvm_target_block = if (target_block.value.llvm) |llvm| llvm.toBasicBlock() orelse unreachable else bb: {
                                                 const block = thread.llvm.context.createBasicBlock("", "".len, function, null);
+                                                assert(block.toValue().toBasicBlock() != null);
                                                 target_block.value.llvm = block.toValue();
                                                 basic_block_command_buffer.insertAfter(last_block, &target_block.command_node);
                                                 last_block = &target_block.command_node;
@@ -3478,23 +3458,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             });
                             assert(analyzer.current_basic_block != return_block);
 
-                            const jump = thread.jumps.append(.{
-                                .instruction = .{
-                                    .id = .jump,
-                                    .value = .{
-                                        .sema = .{
-                                            .id = .instruction,
-                                            .resolved = true,
-                                            .thread = thread.get_index(),
-                                        },
-                                    },
-                                },
-                                .basic_block = return_block,
-                            });
-                            _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
-                            analyzer.current_basic_block.is_terminated = true;
-
-                            _ = return_block.predecessors.append(analyzer.current_basic_block);
+                            _ = emit_jump(analyzer, thread, return_block);
                         } else if (analyzer.exit_blocks.length > 0) {
                             const return_phi = thread.phis.append(.{
                                 .instruction = .{
@@ -3517,23 +3481,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                 .basic_block = analyzer.current_basic_block,
                             });
 
-                            const jump = thread.jumps.append(.{
-                                .instruction = .{
-                                    .id = .jump,
-                                    .value = .{
-                                        .sema = .{
-                                            .id = .instruction,
-                                            .resolved = true,
-                                            .thread = thread.get_index(),
-                                        },
-                                    },
-                                },
-                                .basic_block = return_block,
-                            });
-                            _ = analyzer.current_basic_block.instructions.append(&jump.instruction);
-                            analyzer.current_basic_block.is_terminated = true;
-
-                            _ = return_block.predecessors.append(analyzer.current_basic_block);
+                            _ = emit_jump(analyzer, thread, return_block);
                         } else {
                             build_return(thread, analyzer, return_value);
                         }
@@ -3659,8 +3607,44 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                 if (src[parser.i + 1] == 'f') {
                     const if_block = parser.parse_if_expression(analyzer, thread, file);
                     terminated = terminated or if_block.terminated;
+                }
+            },
+            'w' => {
+                const identifier = parser.parse_raw_identifier(src);
+
+                const while_text = "while";
+                if (byte_equal(identifier, while_text)) {
+                    parser.skip_space(src);
+
+                    const loop_header = create_basic_block(thread);
+                    _ = emit_jump(analyzer, thread, loop_header);
+                    analyzer.current_basic_block = loop_header;
+
+                    const condition = parser.parse_condition(analyzer, thread, file);
+
+                    parser.skip_space(src);
+
+                    const loop_body_block = create_basic_block(thread);
+                    const loop_exit_block = create_basic_block(thread);
+
+                    _ = emit_branch(analyzer, thread, condition, loop_body_block, loop_exit_block);
+                    analyzer.current_basic_block = loop_body_block;
+
+                    switch (src[parser.i]) {
+                        '{' => {
+                            const loop_block = analyze_local_block(thread, analyzer, parser, file);
+                            if (!loop_block.terminated) {
+                                _ = emit_jump(analyzer, thread, loop_header);
+                            } else {
+                                unreachable;
+                            }
+                        },
+                        else => unreachable,
+                    }
+
+                    analyzer.current_basic_block = loop_exit_block;
                 } else {
-                    unreachable;
+                    parser.i = statement_start_ch_index;
                 }
             },
             else => {},
@@ -4258,12 +4242,83 @@ fn try_resolve_file(thread: *Thread, file: *File) void {
 const TypecheckResult = enum{
     success,
 };
+
 fn typecheck(expected: *Type, have: *Type) TypecheckResult {
     if (expected == have) {
         return TypecheckResult.success;
     } else {
         exit(1);
     }
+}
+
+const JumpEmission = struct {
+    jump: *Jump,
+    basic_block: *BasicBlock,
+    index: u32,
+};
+
+fn emit_jump(analyzer: *Analyzer, thread: *Thread, basic_block: *BasicBlock) JumpEmission {
+    if (basic_block == thread.basic_blocks.get_unchecked(0)) @breakpoint();
+    assert(!analyzer.current_basic_block.is_terminated);
+    const jump = thread.jumps.append(.{
+        .instruction = .{
+            .value = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                    .id = .instruction,
+                },
+                },
+            .id = .jump,
+        },
+        .basic_block = basic_block,
+    });
+    const original_block = analyzer.current_basic_block;
+    const block_instruction_index = analyzer.current_basic_block.instructions.append_index(&jump.instruction);
+    analyzer.current_basic_block.is_terminated = true;
+    _ = basic_block.predecessors.append(analyzer.current_basic_block);
+
+    return .{
+        .jump = jump,
+        .index = block_instruction_index,
+        .basic_block = original_block,
+    };
+}
+
+const BranchEmission = struct {
+    branch: *Branch,
+    basic_block: *BasicBlock,
+    index: u32,
+};
+
+fn emit_branch(analyzer: *Analyzer, thread: *Thread, condition: *Value, taken: *BasicBlock, not_taken: *BasicBlock) BranchEmission {
+    assert(!analyzer.current_basic_block.is_terminated);
+    const branch = thread.branches.append(.{
+        .instruction = .{
+            .value = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                    .id = .instruction,
+                },
+                },
+            .id = .branch,
+        },
+        .condition = condition,
+        .taken = taken,
+        .not_taken = not_taken,
+    });
+    const original_block = analyzer.current_basic_block;
+    const block_instruction_index = analyzer.current_basic_block.instructions.append_index(&branch.instruction);
+    analyzer.current_basic_block.is_terminated = true;
+    _ = taken.predecessors.append(analyzer.current_basic_block);
+    _ = not_taken.predecessors.append(analyzer.current_basic_block);
+
+    return .{
+        .branch = branch,
+        .index = block_instruction_index,
+        .basic_block = original_block,
+    };
 }
 
 pub const LLVM = struct {
