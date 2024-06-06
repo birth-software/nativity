@@ -1403,6 +1403,7 @@ const Keyword = enum{
     @"else",
     @"for",
     @"if",
+    @"loop",
     @"break",
 };
 
@@ -3601,6 +3602,53 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     terminated = terminated or if_block.terminated;
                 }
             },
+            'l' => {
+                const identifier = parser.parse_raw_identifier(src);
+
+                const loop_text = "loop";
+                if (byte_equal(identifier, loop_text)) {
+                    parser.skip_space(src);
+
+                    const loop_header_block = create_basic_block(thread);
+                    const loop_body_block = create_basic_block(thread);
+                    const loop_exit_block = create_basic_block(thread);
+                    _ = emit_jump(analyzer, thread, loop_header_block);
+                    analyzer.current_basic_block = loop_header_block;
+
+                    if (src[parser.i] == '(') {
+                        const condition = parser.parse_condition(analyzer, thread, file);
+
+                        _ = emit_branch(analyzer, thread, condition, loop_body_block, loop_exit_block);
+                    } else {
+                        _ = emit_jump(analyzer, thread, loop_body_block);
+                    }
+
+                    parser.skip_space(src);
+
+                    analyzer.current_basic_block = loop_body_block;
+                    _ = analyzer.loops.append(.{
+                        .continue_block = loop_header_block,
+                        .break_block = loop_exit_block,
+                    });
+
+                    switch (src[parser.i]) {
+                        brace_open => {
+                            const loop_block = analyze_local_block(thread, analyzer, parser, file);
+                            if (!loop_block.terminated) {
+                                _ = emit_jump(analyzer, thread, loop_header_block);
+                            } else {
+                                unreachable;
+                            }
+                        },
+                        else => unreachable,
+                    }
+
+                    analyzer.current_basic_block = loop_exit_block;
+                    analyzer.loops.length -= 1;
+                } else {
+                    parser.i = statement_start_ch_index;
+                }
+            },
             'r' => {
                 const identifier = parser.parse_raw_identifier(src);
 
@@ -3651,49 +3699,6 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     } else  {
                         exit(1);
                     }
-                } else {
-                    parser.i = statement_start_ch_index;
-                }
-            },
-            'w' => {
-                const identifier = parser.parse_raw_identifier(src);
-
-                const while_text = "while";
-                if (byte_equal(identifier, while_text)) {
-                    parser.skip_space(src);
-
-                    const loop_header = create_basic_block(thread);
-                    _ = emit_jump(analyzer, thread, loop_header);
-                    analyzer.current_basic_block = loop_header;
-
-                    const condition = parser.parse_condition(analyzer, thread, file);
-
-                    parser.skip_space(src);
-
-                    const loop_body_block = create_basic_block(thread);
-                    const loop_exit_block = create_basic_block(thread);
-
-                    _ = emit_branch(analyzer, thread, condition, loop_body_block, loop_exit_block);
-                    analyzer.current_basic_block = loop_body_block;
-                    _ = analyzer.loops.append(.{
-                        .continue_block = loop_header,
-                        .break_block = loop_exit_block,
-                    });
-
-                    switch (src[parser.i]) {
-                        '{' => {
-                            const loop_block = analyze_local_block(thread, analyzer, parser, file);
-                            if (!loop_block.terminated) {
-                                _ = emit_jump(analyzer, thread, loop_header);
-                            } else {
-                                unreachable;
-                            }
-                        },
-                        else => unreachable,
-                    }
-
-                    analyzer.current_basic_block = loop_exit_block;
-                    analyzer.loops.length -= 1;
                 } else {
                     parser.i = statement_start_ch_index;
                 }

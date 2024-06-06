@@ -1,7 +1,7 @@
 fn[cc(.c)] main[export]() s32 {
     >i: s32 = 0;
     >top: s32 = 10;
-    while (i < top) {
+    loop (i < top) {
         i += 1;
     }
 

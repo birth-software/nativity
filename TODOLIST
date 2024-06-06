@@ -1,0 +1,14 @@
+globals
+arrays
+assert
+c abi
+orelse
+size
+trailing zeroes
+leading zeroes
+while true
+returns inside loops (if conditional)
+returns inside loops (else conditional)
+returns inside loops (non-conditional)
+function pointers
+for loops

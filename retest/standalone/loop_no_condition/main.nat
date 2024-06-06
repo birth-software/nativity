@@ -1,0 +1,18 @@
+
+fn foo() s32 {
+    >n: s32 = 6;
+    >a: s32 = 0;
+    loop {
+        if (a == n) {
+            return a;
+        }
+
+        a += 1;
+    }
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >n: s32 = 6;
+    >result = foo();
+    return result - n;
+}
