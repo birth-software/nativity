@@ -195,11 +195,9 @@ const Parser = struct{
 
     fn parse_identifier(parser: *Parser, thread: *Thread, file: []const u8) u32 {
         const identifier = parser.parse_raw_identifier(file);
-        if (identifier[0] != '"') {
-            const keyword = parse_keyword(identifier);
-            if (keyword != ~(@as(u32, 0))) {
-                exit(1);
-            }
+        const keyword = parse_keyword(identifier);
+        if (keyword != ~(@as(u32, 0))) {
+            exit(1);
         }
         const hash = intern_identifier(&thread.identifiers, identifier);
         return hash;
@@ -1405,16 +1403,20 @@ const Keyword = enum{
     @"else",
     @"for",
     @"if",
+    @"break",
 };
 
 fn parse_keyword(identifier: []const u8) u32 {
-    inline for (@typeInfo(Keyword).Enum.fields) |keyword| {
-        if (byte_equal(identifier, keyword.name)) {
-            return keyword.value;
+    assert(identifier.len > 0);
+    if (identifier[0] != '"') {
+        inline for (@typeInfo(Keyword).Enum.fields) |keyword| {
+            if (byte_equal(identifier, keyword.name)) {
+                return keyword.value;
+            }
         }
-    } else {
-        return ~@as(u32, 0);
     }
+
+    return ~@as(u32, 0);
 }
 
 const Scope = struct {
@@ -2656,8 +2658,14 @@ const Analyzer = struct{
     current_function: *Function,
     current_scope: *Scope,
     exit_blocks: PinnedArray(*BasicBlock) = .{},
+    loops: PinnedArray(LoopData) = .{},
     return_block: ?*BasicBlock = null,
     return_phi: ?*Phi = null,
+};
+
+const LoopData = struct {
+    break_block: *BasicBlock,
+    continue_block: *BasicBlock,
 };
 
 const brace_open = '{';
@@ -3439,60 +3447,6 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
         }
 
         switch (statement_start_ch) {
-            'r' => {
-                const identifier = parser.parse_raw_identifier(src);
-
-                if (byte_equal(identifier, "return")) {
-                    parser.skip_space(src);
-
-                    if (function.declaration.return_type.sema.id != .unresolved) {
-                        const return_type = function.declaration.return_type;
-                        const return_value = parser.parse_expression(analyzer, thread, file, return_type, .right);
-                        parser.expect_character(src, ';');
-
-                        if (analyzer.return_block) |return_block| {
-                            const return_phi = analyzer.return_phi.?;
-                            _ = return_phi.nodes.append(.{
-                                .value = return_value,
-                                .basic_block = analyzer.current_basic_block,
-                            });
-                            assert(analyzer.current_basic_block != return_block);
-
-                            _ = emit_jump(analyzer, thread, return_block);
-                        } else if (analyzer.exit_blocks.length > 0) {
-                            const return_phi = thread.phis.append(.{
-                                .instruction = .{
-                                    .id = .phi,
-                                    .value = .{
-                                        .sema = .{
-                                            .id = .instruction,
-                                            .thread = thread.get_index(),
-                                            .resolved = true,
-                                        },
-                                    },
-                                },
-                                .type = return_type,
-                            });
-                            analyzer.return_phi = return_phi;
-                            const return_block = create_basic_block(thread);
-                            analyzer.return_block = return_block;
-                            _ = return_phi.nodes.append(.{
-                                .value = return_value,
-                                .basic_block = analyzer.current_basic_block,
-                            });
-
-                            _ = emit_jump(analyzer, thread, return_block);
-                        } else {
-                            build_return(thread, analyzer, return_value);
-                        }
-                        terminated = true;
-                    } else  {
-                        exit(1);
-                    }
-                } else {
-                    parser.i = statement_start_ch_index;
-                }
-            },
             // Local variable
             '>' => {
                 parser.i += 1;
@@ -3603,10 +3557,102 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
                 local_block.scope.declarations.put_no_clobber(local_name, &local_symbol.local_declaration.declaration);
             },
+            'b' => {
+                const identifier = parser.parse_raw_identifier(src);
+                const break_kw = "break";
+                if (byte_equal(identifier, break_kw)) {
+                    parser.skip_space(src);
+
+                    parser.expect_character(src, ';');
+
+                    if (analyzer.loops.length == 0) {
+                        exit_with_error("break when no loop");
+                    }
+
+                    const inner_loop = analyzer.loops.const_slice()[analyzer.loops.length - 1];
+                    _ = emit_jump(analyzer, thread, inner_loop.break_block);
+                    terminated = true;
+                } else {
+                    parser.i = statement_start_ch_index;
+                }
+            },
+            'c' => {
+                const identifier = parser.parse_raw_identifier(src);
+                const continue_kw = "continue";
+                if (byte_equal(identifier, continue_kw)) {
+                    parser.skip_space(src);
+
+                    parser.expect_character(src, ';');
+
+                    if (analyzer.loops.length == 0) {
+                        exit_with_error("continue when no loop");
+                    }
+
+                    const inner_loop = analyzer.loops.const_slice()[analyzer.loops.length - 1];
+                    _ = emit_jump(analyzer, thread, inner_loop.continue_block);
+                    terminated = true;
+                } else {
+                    parser.i = statement_start_ch_index;
+                }
+            },
             'i' => {
                 if (src[parser.i + 1] == 'f') {
                     const if_block = parser.parse_if_expression(analyzer, thread, file);
                     terminated = terminated or if_block.terminated;
+                }
+            },
+            'r' => {
+                const identifier = parser.parse_raw_identifier(src);
+
+                if (byte_equal(identifier, "return")) {
+                    parser.skip_space(src);
+
+                    if (function.declaration.return_type.sema.id != .unresolved) {
+                        const return_type = function.declaration.return_type;
+                        const return_value = parser.parse_expression(analyzer, thread, file, return_type, .right);
+                        parser.expect_character(src, ';');
+
+                        if (analyzer.return_block) |return_block| {
+                            const return_phi = analyzer.return_phi.?;
+                            _ = return_phi.nodes.append(.{
+                                .value = return_value,
+                                .basic_block = analyzer.current_basic_block,
+                            });
+                            assert(analyzer.current_basic_block != return_block);
+
+                            _ = emit_jump(analyzer, thread, return_block);
+                        } else if (analyzer.exit_blocks.length > 0) {
+                            const return_phi = thread.phis.append(.{
+                                .instruction = .{
+                                    .id = .phi,
+                                    .value = .{
+                                        .sema = .{
+                                            .id = .instruction,
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                        },
+                                    },
+                                },
+                                .type = return_type,
+                            });
+                            analyzer.return_phi = return_phi;
+                            const return_block = create_basic_block(thread);
+                            analyzer.return_block = return_block;
+                            _ = return_phi.nodes.append(.{
+                                .value = return_value,
+                                .basic_block = analyzer.current_basic_block,
+                            });
+
+                            _ = emit_jump(analyzer, thread, return_block);
+                        } else {
+                            build_return(thread, analyzer, return_value);
+                        }
+                        terminated = true;
+                    } else  {
+                        exit(1);
+                    }
+                } else {
+                    parser.i = statement_start_ch_index;
                 }
             },
             'w' => {
@@ -3629,6 +3675,10 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
                     _ = emit_branch(analyzer, thread, condition, loop_body_block, loop_exit_block);
                     analyzer.current_basic_block = loop_body_block;
+                    _ = analyzer.loops.append(.{
+                        .continue_block = loop_header,
+                        .break_block = loop_exit_block,
+                    });
 
                     switch (src[parser.i]) {
                         '{' => {
@@ -3643,6 +3693,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     }
 
                     analyzer.current_basic_block = loop_exit_block;
+                    analyzer.loops.length -= 1;
                 } else {
                     parser.i = statement_start_ch_index;
                 }
@@ -3652,97 +3703,107 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
         if (statement_start_ch_index == parser.i) {
             if (is_identifier_char_start(statement_start_ch)) {
-                const identifier = parser.parse_identifier(thread, src);
-                parser.skip_space(src);
+                const raw_identifier = parser.parse_raw_identifier(src);
+                const keyword_index = parse_keyword(raw_identifier);
+                const is_keyword = keyword_index != ~@as(u32, 0);
+                if (is_keyword) {
+                    const keyword: Keyword = @enumFromInt(keyword_index);
+                    switch (keyword) {
+                        else => |t| @panic(@tagName(t)),
+                    }
+                } else {
+                    const identifier = intern_identifier(&thread.identifiers, raw_identifier);
+                    parser.skip_space(src);
 
-                const declaration_lookup = analyzer.current_scope.get_declaration(identifier) orelse unreachable;
+                    const declaration_lookup = analyzer.current_scope.get_declaration(identifier) orelse unreachable;
 
-                const operation_index = parser.i;
-                const operation_ch = src[operation_index];
-                var is_binary_operation = false;
-                switch (operation_ch) {
-                    '+', '-', '*', '/', '=' => {
-                        if (operation_ch != '=') {
-                            if (src[parser.i + 1] == '=') {
-                                parser.i += 2;
+                    const operation_index = parser.i;
+                    const operation_ch = src[operation_index];
+                    var is_binary_operation = false;
+                    switch (operation_ch) {
+                        '+', '-', '*', '/', '=' => {
+                            if (operation_ch != '=') {
+                                if (src[parser.i + 1] == '=') {
+                                    parser.i += 2;
 
-                                is_binary_operation = true;
+                                    is_binary_operation = true;
+                                } else {
+                                    unreachable;
+                                }
                             } else {
-                                unreachable;
+                                parser.i += 1;
                             }
-                        } else {
-                            parser.i += 1;
-                        }
 
-                        parser.skip_space(src);
+                            parser.skip_space(src);
 
-                        const declaration_value = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .right);
-                        const declaration_type = switch (declaration_lookup.declaration.*.id) {
-                            .argument => block: {
-                                const argument_declaration = declaration_lookup.declaration.*.get_payload(.argument);
-                                const argument_symbol = argument_declaration.to_symbol();
-                                break :block argument_symbol.type;
-                            },
-                            .local => block: {
-                                const local_declaration = declaration_lookup.declaration.*.get_payload(.local);
-                                const local_symbol = local_declaration.to_symbol();
-                                break :block local_symbol.type;
-                            },
-                            else => |t| @panic(@tagName(t)),
-                        };
-                        const right = parser.parse_expression(analyzer, thread, file, declaration_type, .right);
-                        const source = switch (is_binary_operation) {
-                            false => right,
-                            true => block: {
-                                const binary_operation_id: IntegerBinaryOperation.Id = switch (operation_ch) {
-                                    '+' => .add,
-                                    else => unreachable,
-                                };
-                                const binary_operation = thread.integer_binary_operations.append(.{
-                                    .id = binary_operation_id,
-                                    .instruction = .{
-                                        .id = .integer_binary_operation,
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
-                                            },
-                                            },
-                                        },
-                                        .left = declaration_value,
-                                        .right = right,
-                                        .type = declaration_type,
-                                });
-                                _ = analyzer.current_basic_block.instructions.append(&binary_operation.instruction);
-                                break :block &binary_operation.instruction.value;
-                            },
-                        };
-
-                        parser.skip_space(src);
-
-                        parser.expect_character(src, ';');
-
-                        const declaration_pointer = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .left);
-                        const store = thread.stores.append(.{
-                            .instruction = .{
-                                .id = .store,
-                                .value = .{
-                                    .sema = .{
-                                        .thread = thread.get_index(),
-                                        .resolved = true,
-                                        .id = .instruction,
-                                    },
-                                    },
+                            const declaration_value = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .right);
+                            const declaration_type = switch (declaration_lookup.declaration.*.id) {
+                                .argument => block: {
+                                    const argument_declaration = declaration_lookup.declaration.*.get_payload(.argument);
+                                    const argument_symbol = argument_declaration.to_symbol();
+                                    break :block argument_symbol.type;
                                 },
-                                .destination = declaration_pointer,
-                                .source = source,
-                                .alignment = declaration_type.alignment,
-                                .is_volatile = false,
-                        });
-                        _ = analyzer.current_basic_block.instructions.append(&store.instruction);
-                    },
-                    else => @panic((src.ptr + parser.i)[0..1]),
+                                .local => block: {
+                                    const local_declaration = declaration_lookup.declaration.*.get_payload(.local);
+                                    const local_symbol = local_declaration.to_symbol();
+                                    break :block local_symbol.type;
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            };
+                            const right = parser.parse_expression(analyzer, thread, file, declaration_type, .right);
+                            const source = switch (is_binary_operation) {
+                                false => right,
+                                true => block: {
+                                    const binary_operation_id: IntegerBinaryOperation.Id = switch (operation_ch) {
+                                        '+' => .add,
+                                        else => unreachable,
+                                    };
+                                    const binary_operation = thread.integer_binary_operations.append(.{
+                                        .id = binary_operation_id,
+                                        .instruction = .{
+                                            .id = .integer_binary_operation,
+                                            .value = .{
+                                                .sema = .{
+                                                    .thread = thread.get_index(),
+                                                    .resolved = true,
+                                                    .id = .instruction,
+                                                },
+                                                },
+                                            },
+                                            .left = declaration_value,
+                                            .right = right,
+                                            .type = declaration_type,
+                                    });
+                                    _ = analyzer.current_basic_block.instructions.append(&binary_operation.instruction);
+                                    break :block &binary_operation.instruction.value;
+                                },
+                            };
+
+                            parser.skip_space(src);
+
+                            parser.expect_character(src, ';');
+
+                            const declaration_pointer = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .left);
+                            const store = thread.stores.append(.{
+                                .instruction = .{
+                                    .id = .store,
+                                    .value = .{
+                                        .sema = .{
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                            .id = .instruction,
+                                        },
+                                        },
+                                    },
+                                    .destination = declaration_pointer,
+                                    .source = source,
+                                    .alignment = declaration_type.alignment,
+                                    .is_volatile = false,
+                            });
+                            _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                        },
+                        else => @panic((src.ptr + parser.i)[0..1]),
+                    }
                 }
             } else {
                 exit_with_error("Unrecognized statement initial char");
@@ -5513,5 +5574,3 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
         },
     }
 }
-
-
