@@ -1,0 +1,12 @@
+fn[cc(.c)] main[export]() s32 {
+    >i: s32 = 0;
+    >n: s32 = 5;
+    while (i < 10) {
+        i += 1;
+        if (i == n) {
+            break;
+        }
+    }
+
+    return i - n;
+}
