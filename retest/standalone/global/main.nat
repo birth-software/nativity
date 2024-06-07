@@ -1,0 +1,5 @@
+>n: s32 = 1;
+fn[cc(.c)] main[export]() s32 {
+    n = 0;
+    return n;
+}

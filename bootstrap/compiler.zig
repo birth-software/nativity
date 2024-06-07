@@ -88,10 +88,20 @@ const Side = enum {
 const GlobalSymbol = struct{
     attributes: Attributes = .{},
     global_declaration: GlobalDeclaration,
+    alignment: u32,
+    value: Value,
+    id: GlobalSymbol.Id,
+
+    const Id = enum{
+        function_declaration,
+        function_definition,
+        global_variable,
+    };
 
     const Attributes = struct{
         @"export": bool = false,
         @"extern": bool = false,
+        mutability: Mutability = .@"var",
     };
     const Attribute = enum{
         @"export",
@@ -99,6 +109,28 @@ const GlobalSymbol = struct{
 
         const Mask = std.EnumSet(Attribute);
     };
+
+    const id_to_global_symbol_map = std.EnumArray(Id, type).init(.{
+        .function_declaration = Function.Declaration,
+        .function_definition = Function,
+        .global_variable = GlobalVariable,
+    });
+
+    fn get_payload(global_symbol: *GlobalSymbol, comptime id: Id) *id_to_global_symbol_map.get(id) {
+        if (id == .function_definition) {
+            const function_declaration: *Function.Declaration = @alignCast(@fieldParentPtr("global_symbol", global_symbol));
+            const function_definition: *Function = @alignCast(@fieldParentPtr("declaration", function_declaration));
+            return function_definition;
+        }
+
+        return @fieldParentPtr("global_symbol", global_symbol);
+    }
+};
+
+const GlobalVariable = struct {
+    global_symbol: GlobalSymbol,
+    type: *Type,
+    initial_value: *Value,
 };
 
 const Mutability = enum(u1){
@@ -492,54 +524,61 @@ const Parser = struct{
                         switch (lookup_result.declaration.*.id) {
                             .local => unreachable,
                             .global => {
-                                const global = lookup_result.declaration.*.get_payload(.global);
-                                switch (global.id) {
-                                    .function_definition => {
-                                        const function_definition = global.get_payload(.function_definition);
-                                        const declaration_argument_count = function_definition.declaration.argument_types.len;
-                                        var argument_values = PinnedArray(*Value){};
-                                        while (true) {
-                                            parser.skip_space(src);
+                                const global_declaration = lookup_result.declaration.*.get_payload(.global);
+                                switch (global_declaration.id) {
+                                    .global_symbol => {
+                                        const global_symbol = global_declaration.to_symbol();
+                                        switch (global_symbol.id) {
+                                            .function_definition => {
+                                                const function_definition = global_symbol.get_payload(.function_definition);
+                                                const declaration_argument_count = function_definition.declaration.argument_types.len;
+                                                var argument_values = PinnedArray(*Value){};
+                                                while (true) {
+                                                    parser.skip_space(src);
 
-                                            if (src[parser.i] == ')') {
-                                                break;
-                                            }
+                                                    if (src[parser.i] == ')') {
+                                                        break;
+                                                    }
 
-                                            const argument_index = argument_values.length;
-                                            if (argument_index >= declaration_argument_count) {
-                                                exit(1);
-                                            }
-                                            const expected_argument_type = function_definition.declaration.argument_types[argument_index];
-                                            const passed_argument_value = parser.parse_expression(analyzer, thread, file, expected_argument_type, .right);
-                                            _ = argument_values.append(passed_argument_value);
+                                                    const argument_index = argument_values.length;
+                                                    if (argument_index >= declaration_argument_count) {
+                                                        exit(1);
+                                                    }
+                                                    const expected_argument_type = function_definition.declaration.argument_types[argument_index];
+                                                    const passed_argument_value = parser.parse_expression(analyzer, thread, file, expected_argument_type, .right);
+                                                    _ = argument_values.append(passed_argument_value);
 
-                                            parser.skip_space(src);
+                                                    parser.skip_space(src);
 
-                                            switch (src[parser.i]) {
-                                                ',' => parser.i += 1,
-                                                ')' => {},
-                                                else => unreachable,
-                                            }
-                                        }
+                                                    switch (src[parser.i]) {
+                                                        ',' => parser.i += 1,
+                                                        ')' => {},
+                                                        else => unreachable,
+                                                    }
+                                                }
 
-                                        parser.i += 1;
+                                                parser.i += 1;
 
-                                        const call = thread.calls.append(.{
-                                            .instruction = .{
-                                                .value = .{
-                                                    .sema = .{
-                                                        .thread = thread.get_index(),
-                                                        .resolved = true,
-                                                        .id = .instruction,
+                                                const call = thread.calls.append(.{
+                                                    .instruction = .{
+                                                        .value = .{
+                                                            .sema = .{
+                                                                .thread = thread.get_index(),
+                                                                .resolved = true,
+                                                                .id = .instruction,
+                                                            },
+                                                            },
+                                                        .id = .call,
                                                     },
-                                                },
-                                                .id = .call,
+                                                    .callable = &function_definition.declaration.global_symbol.value,
+                                                    .arguments = argument_values.const_slice(),
+                                                });
+                                                _ = analyzer.current_basic_block.instructions.append(&call.instruction);
+                                                return &call.instruction.value;
                                             },
-                                            .callable = &function_definition.declaration.value,
-                                            .arguments = argument_values.const_slice(),
-                                        });
-                                        _ = analyzer.current_basic_block.instructions.append(&call.instruction);
-                                        return &call.instruction.value;
+                                            else => |t| @panic(@tagName(t)),
+                                        }
+                                        unreachable;
                                     },
                                     else => |t| @panic(@tagName(t)),
                                 }
@@ -666,7 +705,43 @@ const Parser = struct{
                                 _ = analyzer.current_basic_block.instructions.append(&load.instruction);
                                 break :block &load.instruction.value;
                             },
-                            else => |t| @panic(@tagName(t)),
+                            .global => block: {
+                                const global_declaration = lookup_result.declaration.*.get_payload(.global);
+                                const global_symbol = global_declaration.to_symbol();
+
+                                const global_type = switch (global_symbol.id) {
+                                    .global_variable => b: {
+                                        const global_variable = global_symbol.get_payload(.global_variable);
+                                        break :b global_variable.type;
+                                    },
+                                    else =>|t| @panic(@tagName(t)),
+                                };
+
+                                if (maybe_type) |ty| {
+                                    switch (typecheck(ty, global_type)) {
+                                        .success => {},
+                                    }
+                                }
+
+                                const load = thread.loads.append(.{
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                        },
+                                        .id = .load,
+                                    },
+                                    .value = &global_symbol.value,
+                                    .type = global_type,
+                                    .alignment = global_type.alignment,
+                                    .is_volatile = false,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                break :block &load.instruction.value;
+                            },
                         };
 
                         const declaration_type = declaration_value.get_type();
@@ -753,6 +828,27 @@ const Parser = struct{
         compare_signed_less,
         compare_signed_less_equal,
     };
+
+    fn parse_constant_expression(parser: *Parser, thread: *Thread, file: *File, maybe_type: ?*Type) *Value {
+        const src = file.source_code;
+        const starting_index = parser.i;
+        const starting_ch = src[starting_index];
+        const is_digit_start = is_decimal_digit(starting_ch);
+        const is_alpha_start = is_alphabetic(starting_ch);
+        _ = is_alpha_start; // autofix
+        if (is_digit_start) {
+            const ty = maybe_type orelse exit(1);
+            switch (ty.sema.id) {
+                .integer => {
+                    const constant_int = parser.parse_constant_integer(thread, file, ty);
+                    return &constant_int.value;
+                },
+                else => unreachable,
+            }
+        } else {
+            unreachable;
+        }
+    }
 
     fn parse_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type, side: Side) *Value {
         const src = file.source_code;
@@ -1298,19 +1394,19 @@ const Value = struct {
     reserved: u32 = 0,
 
     const Id = enum(u8){
+        argument,
         basic_block,
         constant_int,
-        lazy_expression,
         instruction,
-        function_declaration,
-        argument,
+        global_symbol,
+        lazy_expression,
     };
 
     const id_to_value_map = std.EnumArray(Id, type).init(.{
         .argument = ArgumentSymbol,
         .basic_block = BasicBlock,
         .constant_int = ConstantInt,
-        .function_declaration = Function.Declaration,
+        .global_symbol = GlobalSymbol,
         .instruction = Instruction,
         .lazy_expression = LazyExpression,
     });
@@ -1336,9 +1432,15 @@ const Value = struct {
                     .call => {
                         const call = instruction.get_payload(.call);
                         switch (call.callable.sema.id) {
-                            .function_declaration => {
-                                const function_declaration = call.callable.get_payload(.function_declaration);
-                                return function_declaration.return_type;
+                            .global_symbol => {
+                                const global_symbol = call.callable.get_payload(.global_symbol);
+                                switch (global_symbol.id) {
+                                    .function_definition => {
+                                        const function_declaration = global_symbol.get_payload(.function_declaration);
+                                        return function_declaration.return_type;
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -1489,29 +1591,38 @@ const GlobalDeclaration = struct {
     id: Id,
 
     const Id = enum(u8) {
-        function_definition,
-        function_declaration,
+        // function_definition,
+        // function_declaration,
         file,
         unresolved_import,
+        global_symbol,
+        // global_variable,
     };
 
     const id_to_global_declaration_map = std.EnumArray(Id, type).init(.{
-        .function_definition = Function,
-        .function_declaration = Function.Declaration,
+        // .function_definition = Function,
+        // .function_declaration = Function.Declaration,
         .file = File,
+        .global_symbol = GlobalSymbol,
+        // .global_variable = GlobalVariable,
         .unresolved_import = Import,
     });
 
     fn get_payload(global_declaration: *GlobalDeclaration, comptime id: Id) *id_to_global_declaration_map.get(id) {
         assert(global_declaration.id == id);
         // Function definition has to be upcast twice
-        if (id == .function_definition) {
-            const global_symbol: *GlobalSymbol = @alignCast(@fieldParentPtr("global_declaration", global_declaration));
-            const function_declaration: *Function.Declaration = @alignCast(@fieldParentPtr("global_symbol", global_symbol));
-            const function_definition: *Function = @alignCast(@fieldParentPtr("declaration", function_declaration));
-            return function_definition;
-        }
+        // if (id == .function_definition) {
+        //     const global_symbol: *GlobalSymbol = @alignCast(@fieldParentPtr("global_declaration", global_declaration));
+        //     const function_declaration: *Function.Declaration = @alignCast(@fieldParentPtr("global_symbol", global_symbol));
+        //     const function_definition: *Function = @alignCast(@fieldParentPtr("declaration", function_declaration));
+        //     return function_definition;
+        // }
 
+        return @alignCast(@fieldParentPtr("global_declaration", global_declaration));
+    }
+
+    fn to_symbol(global_declaration: *GlobalDeclaration) *GlobalSymbol {
+        assert(global_declaration.id == .global_symbol);
         return @alignCast(@fieldParentPtr("global_declaration", global_declaration));
     }
 
@@ -1579,7 +1690,6 @@ const Function = struct{
 
     const Declaration = struct {
         attributes: Attributes = .{},
-        value: Value,
         global_symbol: GlobalSymbol,
         return_type: *Type,
         argument_types: []const *Type = &.{},
@@ -1780,12 +1890,12 @@ const Thread = struct{
     local_blocks: PinnedArray(LocalBlock) = .{},
     local_symbols: PinnedArray(LocalSymbol) = .{},
     argument_symbols: PinnedArray(ArgumentSymbol) = .{},
+    global_variables: PinnedArray(GlobalVariable) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
         context: *LLVM.Context,
         module: *LLVM.Module,
-        builder: *LLVM.Builder,
         attributes: LLVM.Attributes,
         target_machine: *LLVM.Target.Machine,
         object: ?[]const u8 = null,
@@ -2764,20 +2874,26 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                                                 if (file.scope.scope.declarations.get(names[0])) |callable_declaration| {
                                                                                     const global_declaration = callable_declaration.get_payload(.global);
                                                                                     switch (global_declaration.id) {
-                                                                                        .function_definition => {
-                                                                                            const function_definition = global_declaration.get_payload(.function_definition);
-                                                                                            assert(function_definition.declaration.value.sema.resolved);
-                                                                                            assert(function_definition.declaration.value.sema.resolved);
-                                                                                            assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
-                                                                                            // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
-                                                                                            const external_fn = thread.external_functions.append(function_definition.declaration);
-                                                                                            external_fn.global_symbol.attributes.@"export" = false;
-                                                                                            external_fn.global_symbol.attributes.@"extern" = true;
-                                                                                            external_fn.value.sema.thread = thread.get_index();
-                                                                                            external_fn.value.llvm = null;
+                                                                                        .global_symbol => {
+                                                                                            const global_symbol = global_declaration.to_symbol();
+                                                                                            switch (global_symbol.id) {
+                                                                                                .function_definition => {
+                                                                                                    const function_definition = global_symbol.get_payload(.function_definition);
+                                                                                                    assert(function_definition.declaration.global_symbol.value.sema.resolved);
+                                                                                                    assert(function_definition.declaration.global_symbol.value.sema.resolved);
+                                                                                                    assert(function_definition.declaration.return_type.sema.thread == thread.get_index());
+                                                                                                    // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
+                                                                                                    const external_fn = thread.external_functions.append(function_definition.declaration);
+                                                                                                    external_fn.global_symbol.attributes.@"export" = false;
+                                                                                                    external_fn.global_symbol.attributes.@"extern" = true;
+                                                                                                    external_fn.global_symbol.value.sema.thread = thread.get_index();
+                                                                                                    external_fn.global_symbol.value.llvm = null;
 
-                                                                                            call.callable = &external_fn.value;
-                                                                                            value.sema.resolved = true;
+                                                                                                    call.callable = &external_fn.global_symbol.value;
+                                                                                                    value.sema.resolved = true;
+                                                                                                },
+                                                                                                else => |t| @panic(@tagName(t)),
+                                                                                            }
                                                                                         },
                                                                                         else => |t| @panic(@tagName(t)),
                                                                                     }
@@ -2905,11 +3021,11 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         thread.llvm = .{
                             .context = context,
                             .module = module,
-                            .builder = builder,
                             .attributes = attributes,
                             .target_machine = target_machine,
                         };
                         const debug_info = false;
+
 
                         for (thread.external_functions.slice()) |*nat_function| {
                             _ = llvm_get_function(thread, nat_function, true);
@@ -2919,8 +3035,26 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             _ = llvm_get_function(thread, &nat_function.declaration, false);
                         }
 
+                        for (thread.global_variables.slice()) |*nat_global| {
+                            const global_type = llvm_get_type(thread, nat_global.type);
+                            const linkage: LLVM.Linkage = switch (nat_global.global_symbol.attributes.@"export") {
+                                true => .@"extern",
+                                false => .internal,
+                            };
+                            const constant = switch (nat_global.global_symbol.attributes.mutability) {
+                                .@"var" => false,
+                                .@"const" => true,
+                            };
+                            const initializer = llvm_get_value(thread, nat_global.initial_value).toConstant() orelse unreachable;
+                            const thread_local_mode = LLVM.ThreadLocalMode.not_thread_local;
+                            const externally_initialized = false;
+                            const name = thread.identifiers.get(nat_global.global_symbol.global_declaration.declaration.name).?;
+                            const global_variable = module.addGlobalVariable(global_type, constant, linkage, initializer, name.ptr, name.len, null, thread_local_mode, address_space, externally_initialized);
+                            nat_global.global_symbol.value.llvm = global_variable.toValue();
+                        }
+
                         for (thread.functions.slice()) |*nat_function| {
-                            const function = nat_function.declaration.value.llvm.?.toFunction() orelse unreachable;
+                            const function = nat_function.declaration.global_symbol.value.llvm.?.toFunction() orelse unreachable;
                             var basic_block_command_buffer = BasicBlock.CommandList{};
                             var emit_allocas = true;
                             {
@@ -2940,21 +3074,21 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 const basic_block_node = basic_block_command_buffer.first orelse unreachable;
                                 const basic_block: *BasicBlock = @fieldParentPtr("command_node", basic_block_node);
                                 const llvm_basic_block = basic_block.get_llvm();
-                                thread.llvm.builder.setInsertPoint(llvm_basic_block);
+                                builder.setInsertPoint(llvm_basic_block);
 
                                 var last_block = basic_block_node;
 
                                 if (emit_allocas) {
                                     for (nat_function.arguments.slice(), 0..) |argument, argument_index| {
                                         const alloca_type = llvm_get_type(thread, argument.type);
-                                        argument.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, argument.alignment).toValue();
+                                        argument.instruction.value.llvm = builder.createAlloca(alloca_type, address_space, null, "", "".len, argument.alignment).toValue();
                                         const llvm_argument = function.getArgument(@intCast(argument_index));
                                         argument.value.llvm = llvm_argument.toValue();
                                     }
 
                                     for (nat_function.stack_slots.slice()) |local_slot| {
                                         const alloca_type = llvm_get_type(thread, local_slot.type);
-                                        local_slot.instruction.value.llvm = thread.llvm.builder.createAlloca(alloca_type, address_space, null, "", "".len, local_slot.alignment).toValue();
+                                        local_slot.instruction.value.llvm = builder.createAlloca(alloca_type, address_space, null, "", "".len, local_slot.alignment).toValue();
                                     }
 
                                     emit_allocas = false;
@@ -2980,7 +3114,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         .ret => block: {
                                             const return_instruction = instruction.get_payload(.ret);
                                             const return_value = llvm_get_value(thread, return_instruction.value);
-                                            const ret = thread.llvm.builder.createRet(return_value);
+                                            const ret = builder.createRet(return_value);
                                             break :block ret.toValue();
                                         },
                                         .integer_binary_operation => block: {
@@ -3020,7 +3154,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                                             const args = arguments.constSlice();
 
-                                            const call_i = thread.llvm.builder.createCall(function_type, callee, args.ptr, args.len, "", "".len, null);
+                                            const call_i = builder.createCall(function_type, callee, args.ptr, args.len, "", "".len, null);
                                             break :block call_i.toValue();
                                         },
                                         .integer_compare => block: {
@@ -3293,7 +3427,7 @@ fn llvm_get_file(thread: *Thread, file_index: u32) *LLVMFile {
 }
 
 fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, override_extern: bool) *LLVM.Value.Constant.Function {
-    if (nat_function.value.llvm) |llvm| return llvm.toFunction() orelse unreachable else {
+    if (nat_function.global_symbol.value.llvm) |llvm| return llvm.toFunction() orelse unreachable else {
         _ = override_extern; // autofix
         const function_name = thread.identifiers.get(nat_function.global_symbol.global_declaration.declaration.name) orelse unreachable;
         const return_type = llvm_get_type(thread, nat_function.return_type);
@@ -3377,7 +3511,7 @@ fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, overr
             function.setSubprogram(subprogram);
         }
 
-        nat_function.value.llvm = function.toValue();
+        nat_function.global_symbol.value.llvm = function.toValue();
         return function;
     }
 }
@@ -3753,7 +3887,17 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                     const local_symbol = local_declaration.to_symbol();
                                     break :block local_symbol.type;
                                 },
-                                else => |t| @panic(@tagName(t)),
+                                .global => block: {
+                                    const global_declaration = declaration_lookup.declaration.*.get_payload(.global);
+                                    const global_symbol = global_declaration.to_symbol();
+                                    switch (global_symbol.id) {
+                                        .global_variable => {
+                                            const global_variable = global_symbol.get_payload(.global_variable);
+                                            break :block global_variable.type;
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+                                },
                             };
                             const right = parser.parse_expression(analyzer, thread, file, declaration_type, .right);
                             const source = switch (is_binary_operation) {
@@ -3838,7 +3982,18 @@ fn get_declaration_value(analyzer: *Analyzer, thread: *Thread, declaration: *Dec
             declaration_type = argument_symbol.type;
             break :block &argument_symbol.instruction.value;
         },
-        else => |t| @panic(@tagName(t)),
+        .global => block: {
+            const global_declaration = declaration.get_payload(.global);
+            const global_symbol = global_declaration.to_symbol();
+            switch (global_symbol.id) {
+                .global_variable => {
+                    const global_variable = global_symbol.get_payload(.global_variable);
+                    declaration_type = global_variable.type;
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+            break :block &global_symbol.value;
+        },
     };
     
     if (maybe_type) |ty| {
@@ -3900,11 +4055,55 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                 parser.skip_space(src);
                 const symbol_identifier_start = parser.i;
                 _ = symbol_identifier_start; // autofix
-                const identifier = parser.parse_identifier(thread, src);
-                _ = identifier; // autofix
+                const global_name = parser.parse_identifier(thread, src);
 
+                if (file.scope.scope.get_global_declaration(global_name)) |existing_global| {
+                    _ = existing_global; // autofix
+                    exit(1);
+                }
 
-                exit(1);
+                parser.skip_space(src);
+
+                parser.expect_character(src, ':');
+
+                parser.skip_space(src);
+
+                const global_type = parser.parse_type_expression(thread, src);
+
+                parser.skip_space(src);
+
+                parser.expect_character(src, '=');
+
+                parser.skip_space(src);
+
+                const global_initial_value = parser.parse_constant_expression(thread, file, global_type);
+
+                parser.expect_character(src, ';');
+
+                const global_variable = thread.global_variables.append(.{
+                    .global_symbol = .{
+                        .global_declaration = .{
+                            .declaration = .{
+                                .id = .global,
+                                .name = global_name,
+                            },
+                            .id = .global_symbol,
+                        },
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = global_type.sema.resolved and global_initial_value.sema.resolved,
+                                .id = .global_symbol,
+                            },
+                        },
+                        .alignment = global_type.alignment,
+                        .id = .global_variable,
+                    },
+                    .type = global_type,
+                    .initial_value = global_initial_value,
+                });
+
+                file.scope.scope.declarations.put_no_clobber(global_name, &global_variable.global_symbol.global_declaration.declaration);
             },
             'f' => {
                 if (src[parser.i + 1] == 'n') {
@@ -3922,17 +4121,19 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                         .name = std.math.maxInt(u32),
                                         .id = .global,
                                     },
-                                    .id = .function_definition,
+                                    .id = .global_symbol,
                                 },
+                                .alignment = 1,
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = true, // TODO: is this correct?
+                                        .id = .global_symbol,
+                                    },
+                                },
+                                .id = .function_definition,
                             },
                             .file = file_index,
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true, // TODO: is this correct?
-                                    .id = .function_declaration,
-                                },
-                            },
                         },
                         .scope = .{
                             .scope = .{
