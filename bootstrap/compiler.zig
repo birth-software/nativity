@@ -193,7 +193,7 @@ const Parser = struct{
         }
     }
 
-    fn parse_intrinsic(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) void {
+    fn parse_intrinsic(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type) ?*Value {
         const src = file.source_code;
         parser.expect_character(src, '#');
 
@@ -219,6 +219,28 @@ const Parser = struct{
                     analyzer.current_basic_block = assert_false_block;
                     emit_unreachable(analyzer, thread);
                     analyzer.current_basic_block = assert_true_block;
+
+                    return null;
+                },
+                .size => {
+                    parser.skip_space(src);
+                    parser.expect_character(src, '(');
+                    parser.skip_space(src);
+                    const size_type = parser.parse_type_expression(thread, src);
+                    parser.skip_space(src);
+                    parser.expect_character(src, ')');
+                    const constant_int = thread.constant_ints.append(.{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = size_type.sema.resolved,
+                                .id = .constant_int,
+                            },
+                        },
+                        .n = size_type.size,
+                        .type = ty orelse unreachable,
+                    });
+                    return &constant_int.value;
                 },
                 else => |t| @panic(@tagName(t)),
             }
@@ -512,7 +534,6 @@ const Parser = struct{
     }
 
     fn parse_single_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, maybe_type: ?*Type, side: Side) *Value {
-
         const src = file.source_code;
         const Unary = enum{
             none,
@@ -524,6 +545,11 @@ const Parser = struct{
             '~' => block: {
                 parser.i += 1;
                 break :block .one_complement;
+            },
+            '#' => {
+                // parse intrinsic
+                const value = parser.parse_intrinsic(analyzer, thread, file, maybe_type) orelse unreachable;
+                return value;
             },
             else => unreachable,
         };
@@ -1556,6 +1582,7 @@ const Keyword = enum{
 
 const Intrinsic = enum{
     assert,
+    size,
     trap,
     @"unreachable",
 };
@@ -1981,6 +2008,15 @@ const Thread = struct{
             }
         }
         break :blk integers;
+    },
+    void: Type = .{
+        .sema = .{
+            .thread = undefined,
+            .id = .void,
+            .resolved = true,
+        },
+        .size = 0,
+        .alignment = 0,
     },
     handle: std.Thread = undefined,
 
@@ -3900,7 +3936,8 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                 }
             },
             '#' => {
-                parser.parse_intrinsic(analyzer, thread, file);
+                const intrinsic = parser.parse_intrinsic(analyzer, thread, file, &thread.void);
+                assert(intrinsic == null);
                 parser.skip_space(src);
                 parser.expect_character(src, ';');
             },
