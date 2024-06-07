@@ -157,6 +157,7 @@ const LocalSymbol = struct {
     attributes: Attributes = .{},
     local_declaration: LocalDeclaration,
     type: *Type,
+    appointee_type: ?*Type = null,
     instruction: Instruction,
     alignment: u32,
 
@@ -622,6 +623,7 @@ const Parser = struct{
                 return value;
             },
             '[' => {
+                // This is an array expression
                 parser.i += 1;
 
                 const ty = maybe_type orelse exit(1);
@@ -905,6 +907,70 @@ const Parser = struct{
                             },
                         };
                     },
+                    '&' => {
+                        parser.i += 1;
+
+                        const local_declaration = lookup_result.declaration.*.get_payload(.local);
+                        const local_symbol = local_declaration.to_symbol();
+                        return &local_symbol.instruction.value;
+                    },
+                    '@' => {
+                        parser.i += 1;
+
+                        const local_declaration = lookup_result.declaration.*.get_payload(.local);
+                        const local_symbol = local_declaration.to_symbol();
+                        assert(local_symbol.type.sema.id == .pointer);
+                        assert(local_symbol.appointee_type != null);
+
+                        const load = thread.loads.append(.{
+                            .instruction = .{
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = true,
+                                        .id = .instruction,
+                                    },
+                                    },
+                                .id = .load,
+                            },
+                            .value = &local_symbol.instruction.value,
+                            .type = local_symbol.type,
+                            .alignment = local_symbol.type.alignment,
+                            .is_volatile = false,
+                        });
+                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+
+                        return switch (side) {
+                            .left => &load.instruction.value,
+                            .right => block: {
+                                const pointer_load_type = local_symbol.appointee_type.?;
+                                if (maybe_type) |ty| {
+                                    switch (typecheck(ty, pointer_load_type)) {
+                                        .success => {},
+                                    }
+                                }
+
+                                const pointer_load = thread.loads.append(.{
+                                    .instruction = .{
+                                        .value = .{
+                                            .sema = .{
+                                                .thread = thread.get_index(),
+                                                .resolved = true,
+                                                .id = .instruction,
+                                            },
+                                        },
+                                        .id = .load,
+                                    },
+                                    .value = &load.instruction.value,
+                                    .type = pointer_load_type,
+                                    .alignment = pointer_load_type.alignment,
+                                    .is_volatile = false,
+                                });
+                                _ = analyzer.current_basic_block.instructions.append(&pointer_load.instruction);
+                                break :block &pointer_load.instruction.value;
+                            },
+                        };
+                    },
                     ' ', ',', ';', ')' => {
                         const declaration_value = switch (lookup_result.declaration.*.id) {
                             .local => block: {
@@ -917,24 +983,29 @@ const Parser = struct{
                                     }
                                 }
 
-                                const load = thread.loads.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
+                                break :block switch (side) {
+                                    .right => b: {
+                                        const load = thread.loads.append(.{
+                                            .instruction = .{
+                                                .value = .{
+                                                    .sema = .{
+                                                        .thread = thread.get_index(),
+                                                        .resolved = true,
+                                                        .id = .instruction,
+                                                    },
+                                                    },
+                                                .id = .load,
                                             },
-                                        },
-                                        .id = .load,
+                                            .value = &local_symbol.instruction.value,
+                                            .type = local_symbol.type,
+                                            .alignment = local_symbol.type.alignment,
+                                            .is_volatile = false,
+                                        });
+                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        break :b &load.instruction.value;
                                     },
-                                    .value = &local_symbol.instruction.value,
-                                    .type = local_symbol.type,
-                                    .alignment = local_symbol.type.alignment,
-                                    .is_volatile = false,
-                                });
-                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
-                                break :block &load.instruction.value;
+                                    .left => &local_symbol.instruction.value,
+                                };
                             },
                             .argument => block: {
                                 const argument_declaration = lookup_result.declaration.*.get_payload(.argument);
@@ -944,24 +1015,29 @@ const Parser = struct{
                                         .success => {},
                                     }
                                 }
-                                const load = thread.loads.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
+                                break :block switch (side) {
+                                    .right => b: {
+                                        const load = thread.loads.append(.{
+                                            .instruction = .{
+                                                .value = .{
+                                                    .sema = .{
+                                                        .thread = thread.get_index(),
+                                                        .resolved = true,
+                                                        .id = .instruction,
+                                                    },
+                                                    },
+                                                .id = .load,
                                             },
-                                        },
-                                        .id = .load,
+                                            .value = &argument_symbol.instruction.value,
+                                            .type = argument_symbol.type,
+                                            .alignment = argument_symbol.type.alignment,
+                                            .is_volatile = false,
+                                        });
+                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        break :b &load.instruction.value;
                                     },
-                                    .value = &argument_symbol.instruction.value,
-                                    .type = argument_symbol.type,
-                                    .alignment = argument_symbol.type.alignment,
-                                    .is_volatile = false,
-                                });
-                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
-                                break :block &load.instruction.value;
+                                    .left => &argument_symbol.instruction.value,
+                                };
                             },
                             .global => block: {
                                 const global_declaration = lookup_result.declaration.*.get_payload(.global);
@@ -981,28 +1057,36 @@ const Parser = struct{
                                     }
                                 }
 
-                                const load = thread.loads.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
+                                break :block switch (side) {
+                                    .right => b: {
+                                        const load = thread.loads.append(.{
+                                            .instruction = .{
+                                                .value = .{
+                                                    .sema = .{
+                                                        .thread = thread.get_index(),
+                                                        .resolved = true,
+                                                        .id = .instruction,
+                                                    },
+                                                },
+                                                .id = .load,
                                             },
-                                        },
-                                        .id = .load,
+                                            .value = &global_symbol.value,
+                                            .type = global_type,
+                                            .alignment = global_type.alignment,
+                                            .is_volatile = false,
+                                        });
+                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        break :b &load.instruction.value;
                                     },
-                                    .value = &global_symbol.value,
-                                    .type = global_type,
-                                    .alignment = global_type.alignment,
-                                    .is_volatile = false,
-                                });
-                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
-                                break :block &load.instruction.value;
+                                    .left => &global_symbol.value,
+                                };
                             },
                         };
 
                         const declaration_type = declaration_value.get_type();
+
+                        if (unary != .none) assert(side == .right);
+                        if (side == .left) assert(side == .left);
 
                         return switch (unary) {
                             .none => declaration_value,
@@ -1119,6 +1203,10 @@ const Parser = struct{
         var it_ty: ?*Type = ty;
 
         while (true) {
+            // if (src[parser.i] == ';') {
+            //     break;
+            // }
+
             if (iterations == 1 and it_ty == null) {
                 it_ty = previous_value.get_type();
             }
@@ -1724,12 +1812,25 @@ const Value = struct {
                         const lz = instruction.get_payload(.leading_zeroes);
                         return lz.value.get_type();
                     },
+                    .local_symbol => {
+                        return &instance.threads[value.sema.thread].pointer;
+                    },
                     else => |t| @panic(@tagName(t)),
                 };
             },
             .constant_int => {
                 const constant_int = value.get_payload(.constant_int);
                 return constant_int.type;
+            },
+            .global_symbol => {
+                const global_symbol = value.get_payload(.global_symbol);
+                return switch (global_symbol.id) {
+                    .global_variable => b: {
+                        const global_variable = global_symbol.get_payload(.global_variable);
+                        break :b global_variable.type;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                };
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -1753,6 +1854,7 @@ const Type = struct {
         void,
         integer,
         array,
+        pointer,
     };
 
     const Integer = struct {
@@ -1781,6 +1883,7 @@ const Type = struct {
         .void = void,
         .integer = Integer,
         .array = Array,
+        .pointer = void,
     });
 
     fn get_payload(ty: *Type, comptime id: Id) *id_to_type_map.get(id) {
@@ -2276,6 +2379,15 @@ const Thread = struct{
         },
         .size = 0,
         .alignment = 0,
+    },
+    pointer: Type = .{
+        .sema = .{
+            .thread = undefined,
+            .id = .pointer,
+            .resolved = true,
+        },
+        .size = 8,
+        .alignment = 8,
     },
     handle: std.Thread = undefined,
 
@@ -3833,8 +3945,13 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
                 const array_type = LLVM.Type.Array.get(element_type, array_ty.descriptor.element_count);
                 break :b array_type.toType();
             },
+            .pointer => b: {
+                const pointer_type = thread.llvm.context.getPointerType(0);
+                break :b pointer_type.toType();
+            },
             else => |t| @panic(@tagName(t)),
         };
+
         return llvm_type;
     }
 }
@@ -4053,6 +4170,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     initial_value: *Value,
                     type: *Type,
                 };
+
                 const result: LocalResult = switch (src[parser.i]) {
                     ':' => block: {
                         parser.i += 1;
@@ -4114,6 +4232,22 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     },
                     .alignment = result.type.alignment,
                 });
+
+                if (local_symbol.type.sema.id == .pointer) {
+                    switch (result.initial_value.sema.id) {
+                        .instruction => {
+                            const instruction = result.initial_value.get_payload(.instruction);
+                            switch (instruction.id) {
+                                .local_symbol => {
+                                    const right_local_symbol = instruction.get_payload(.local_symbol);
+                                    local_symbol.appointee_type = right_local_symbol.type;
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                }
 
                 _ = analyzer.current_function.stack_slots.append(local_symbol);
 
@@ -4290,121 +4424,142 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
         }
 
         if (statement_start_ch_index == parser.i) {
-            if (is_identifier_char_start(statement_start_ch)) {
-                const raw_identifier = parser.parse_raw_identifier(src);
-                const keyword_index = parse_keyword(raw_identifier);
-                const is_keyword = keyword_index != ~@as(u32, 0);
-                if (is_keyword) {
-                    const keyword: Keyword = @enumFromInt(keyword_index);
-                    switch (keyword) {
-                        else => |t| @panic(@tagName(t)),
+            const left = parser.parse_single_expression(analyzer, thread, file, null, .left);
+            parser.skip_space(src);
+
+            const operation_index = parser.i;
+            const operation_ch = src[operation_index];
+            var is_binary_operation = false;
+            switch (operation_ch) {
+                '+', '-', '*', '/', '=' => {
+                    if (operation_ch != '=') {
+                        if (src[parser.i + 1] == '=') {
+                            parser.i += 2;
+
+                            is_binary_operation = true;
+                        } else {
+                            unreachable;
+                        }
+                    } else {
+                        parser.i += 1;
                     }
-                } else {
-                    const identifier = intern_identifier(&thread.identifiers, raw_identifier);
+
                     parser.skip_space(src);
 
-                    const declaration_lookup = analyzer.current_scope.get_declaration(identifier) orelse unreachable;
-
-                    const operation_index = parser.i;
-                    const operation_ch = src[operation_index];
-                    var is_binary_operation = false;
-                    switch (operation_ch) {
-                        '+', '-', '*', '/', '=' => {
-                            if (operation_ch != '=') {
-                                if (src[parser.i + 1] == '=') {
-                                    parser.i += 2;
-
-                                    is_binary_operation = true;
-                                } else {
-                                    unreachable;
-                                }
-                            } else {
-                                parser.i += 1;
-                            }
-
-                            parser.skip_space(src);
-
-                            const declaration_value = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .right);
-                            const declaration_type = switch (declaration_lookup.declaration.*.id) {
-                                .argument => block: {
-                                    const argument_declaration = declaration_lookup.declaration.*.get_payload(.argument);
-                                    const argument_symbol = argument_declaration.to_symbol();
-                                    break :block argument_symbol.type;
-                                },
-                                .local => block: {
-                                    const local_declaration = declaration_lookup.declaration.*.get_payload(.local);
-                                    const local_symbol = local_declaration.to_symbol();
-                                    break :block local_symbol.type;
-                                },
-                                .global => block: {
-                                    const global_declaration = declaration_lookup.declaration.*.get_payload(.global);
-                                    const global_symbol = global_declaration.to_symbol();
-                                    switch (global_symbol.id) {
-                                        .global_variable => {
-                                            const global_variable = global_symbol.get_payload(.global_variable);
-                                            break :block global_variable.type;
+                    const expected_right_type = switch (left.sema.id) {
+                        .instruction => b: {
+                            const instruction = left.get_payload(.instruction);
+                            switch (instruction.id) {
+                                .load => {
+                                    const load = instruction.get_payload(.load);
+                                    switch (load.value.sema.id) {
+                                        .instruction => {
+                                            const load_instruction = load.value.get_payload(.instruction);
+                                            switch (load_instruction.id) {
+                                                .local_symbol => {
+                                                    const local_symbol = load_instruction.get_payload(.local_symbol);
+                                                    if (local_symbol.type.sema.id == .pointer) {
+                                                        break :b local_symbol.appointee_type.?;
+                                                    } else {
+                                                        break :b local_symbol.type;
+                                                    }
+                                                },
+                                                else => |t| @panic(@tagName(t)),
+                                            }
                                         },
                                         else => |t| @panic(@tagName(t)),
                                     }
                                 },
-                            };
-                            const right = parser.parse_expression(analyzer, thread, file, declaration_type, .right);
-                            const source = switch (is_binary_operation) {
-                                false => right,
-                                true => block: {
-                                    const binary_operation_id: IntegerBinaryOperation.Id = switch (operation_ch) {
-                                        '+' => .add,
-                                        else => unreachable,
-                                    };
-                                    const binary_operation = thread.integer_binary_operations.append(.{
-                                        .id = binary_operation_id,
-                                        .instruction = .{
-                                            .id = .integer_binary_operation,
-                                            .value = .{
-                                                .sema = .{
-                                                    .thread = thread.get_index(),
-                                                    .resolved = true,
-                                                    .id = .instruction,
-                                                },
-                                                },
-                                            },
-                                            .left = declaration_value,
-                                            .right = right,
-                                            .type = declaration_type,
-                                    });
-                                    _ = analyzer.current_basic_block.instructions.append(&binary_operation.instruction);
-                                    break :block &binary_operation.instruction.value;
+                                .local_symbol => {
+                                    const local_symbol = instruction.get_payload(.local_symbol);
+                                    assert(local_symbol.appointee_type == null);
+                                    break :b local_symbol.type;
                                 },
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        .global_symbol => b: {
+                            const global_symbol = left.get_payload(.global_symbol);
+                            break :b switch (global_symbol.id) {
+                                .global_variable => gv: {
+                                    const global_variable = global_symbol.get_payload(.global_variable);
+                                    break :gv global_variable.type;
+                                },
+                                else => |t| @panic(@tagName(t)),
                             };
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    };
 
-                            parser.skip_space(src);
-
-                            parser.expect_character(src, ';');
-
-                            const declaration_pointer = get_declaration_value(analyzer, thread, declaration_lookup.declaration.*, null, .left);
-                            const store = thread.stores.append(.{
+                    const source = switch (is_binary_operation) {
+                        false => parser.parse_expression(analyzer, thread, file, expected_right_type, .right),
+                        true => block: {
+                            const left_load = thread.loads.append(.{
                                 .instruction = .{
-                                    .id = .store,
+                                    .id = .load,
                                     .value = .{
                                         .sema = .{
                                             .thread = thread.get_index(),
                                             .resolved = true,
                                             .id = .instruction,
                                         },
+                                    },
+                                },
+                                .value = left,
+                                .type = expected_right_type,
+                                .alignment = expected_right_type.alignment,
+                                .is_volatile = false,
+                            });
+                            _ = analyzer.current_basic_block.instructions.append(&left_load.instruction);
+
+                            const right = parser.parse_expression(analyzer, thread, file, expected_right_type, .right);
+
+                            const binary_operation_id: IntegerBinaryOperation.Id = switch (operation_ch) {
+                                '+' => .add,
+                                else => unreachable,
+                            };
+                            const binary_operation = thread.integer_binary_operations.append(.{
+                                .id = binary_operation_id,
+                                .instruction = .{
+                                    .id = .integer_binary_operation,
+                                    .value = .{
+                                        .sema = .{
+                                            .thread = thread.get_index(),
+                                            .resolved = true,
+                                            .id = .instruction,
                                         },
                                     },
-                                    .destination = declaration_pointer,
-                                    .source = source,
-                                    .alignment = declaration_type.alignment,
-                                    .is_volatile = false,
+                                },
+                                .left = &left_load.instruction.value,
+                                .right = right,
+                                .type = expected_right_type,
                             });
-                            _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                            _ = analyzer.current_basic_block.instructions.append(&binary_operation.instruction);
+                            break :block &binary_operation.instruction.value;
                         },
-                        else => @panic((src.ptr + parser.i)[0..1]),
-                    }
-                }
-            } else {
-                exit_with_error("Unrecognized statement initial char");
+                    };
+                    parser.skip_space(src);
+
+                    parser.expect_character(src, ';');
+                    const store = thread.stores.append(.{
+                        .instruction = .{
+                            .id = .store,
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .instruction,
+                                },
+                                },
+                            },
+                            .destination = left,
+                            .source = source,
+                            .alignment = expected_right_type.alignment,
+                            .is_volatile = false,
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                },
+                else => @panic((src.ptr + parser.i)[0..1]),
             }
         }
     }
