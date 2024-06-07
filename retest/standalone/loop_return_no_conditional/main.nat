@@ -1,0 +1,7 @@
+fn[cc(.c)] main[export]() s32 {
+    >i: s32 = 0;
+    loop (i < 1) {
+        return 0;
+    }
+    return 1;
+}
