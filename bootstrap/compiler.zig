@@ -3991,8 +3991,6 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             const loop_block = analyze_local_block(thread, analyzer, parser, file);
                             if (!loop_block.terminated) {
                                 _ = emit_jump(analyzer, thread, loop_header_block);
-                            } else {
-                                unreachable;
                             }
                         },
                         else => unreachable,
