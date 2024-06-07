@@ -1,0 +1,6 @@
+fn[cc(.c)] main[export]() s32 {
+    >a: s32 = 0;
+    >pointer = a&;
+    pointer@ = 4;
+    return pointer@ - a;
+}
