@@ -268,7 +268,7 @@ const Parser = struct{
                             },
                         },
                     });
-                    _ = analyzer.current_basic_block.instructions.append(&tz.instruction);
+                    analyzer.append_instruction(&tz.instruction);
                     return &tz.instruction.value;
                 },
                 .leading_zeroes => {
@@ -291,7 +291,7 @@ const Parser = struct{
                             },
                         },
                     });
-                    _ = analyzer.current_basic_block.instructions.append(&lz.instruction);
+                    analyzer.append_instruction(&lz.instruction);
                     return &lz.instruction.value;
                 },
                 else => |t| @panic(@tagName(t)),
@@ -741,7 +741,7 @@ const Parser = struct{
                                                     .alignment = 8,
                                                     .is_volatile = false,
                                                 });
-                                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                                analyzer.append_instruction(&load.instruction);
                                                 break :f .{
                                                     .type = function_type,
                                                     .value = &load.instruction.value,
@@ -820,7 +820,7 @@ const Parser = struct{
                             .callable = function_value,
                             .arguments = argument_values.const_slice(),
                         });
-                        _ = analyzer.current_basic_block.instructions.append(&call.instruction);
+                        analyzer.append_instruction(&call.instruction);
                         return &call.instruction.value;
                     },
                     '.' => {
@@ -869,7 +869,7 @@ const Parser = struct{
                                                     .callable = &lazy_expression.value,
                                                     .arguments = &.{},
                                                 });
-                                                _ = analyzer.current_basic_block.instructions.append(&call.instruction);
+                                                analyzer.append_instruction(&call.instruction);
 
                                                 _ = file.values_per_import.get(@enumFromInt(import_index)).append(&call.instruction.value);
                                                 return &call.instruction.value;
@@ -933,7 +933,8 @@ const Parser = struct{
                             .type = declaration_element_type,
                             .is_struct = false,
                         });
-                        _ = analyzer.current_basic_block.instructions.append(&gep.instruction);
+                        analyzer.append_instruction(&gep.instruction);
+
                         return switch (side) {
                             .left => &gep.instruction.value,
                             .right => block: {
@@ -953,7 +954,7 @@ const Parser = struct{
                                     .alignment = declaration_type.alignment,
                                     .is_volatile = false,
                                 });
-                                _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                analyzer.append_instruction(&load.instruction);
                                 break :block &load.instruction.value;
                             },
                         };
@@ -999,7 +1000,7 @@ const Parser = struct{
                             .alignment = local_symbol.type.alignment,
                             .is_volatile = false,
                         });
-                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                        analyzer.append_instruction(&load.instruction);
 
                         return switch (side) {
                             .left => &load.instruction.value,
@@ -1027,7 +1028,7 @@ const Parser = struct{
                                     .alignment = pointer_load_type.alignment,
                                     .is_volatile = false,
                                 });
-                                _ = analyzer.current_basic_block.instructions.append(&pointer_load.instruction);
+                                analyzer.append_instruction(&pointer_load.instruction);
                                 break :block &pointer_load.instruction.value;
                             },
                         };
@@ -1062,7 +1063,7 @@ const Parser = struct{
                                             .alignment = local_symbol.type.alignment,
                                             .is_volatile = false,
                                         });
-                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        analyzer.append_instruction(&load.instruction);
                                         break :b &load.instruction.value;
                                     },
                                     .left => &local_symbol.instruction.value,
@@ -1094,7 +1095,7 @@ const Parser = struct{
                                             .alignment = argument_symbol.type.alignment,
                                             .is_volatile = false,
                                         });
-                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        analyzer.append_instruction(&load.instruction);
                                         break :b &load.instruction.value;
                                     },
                                     .left => &argument_symbol.instruction.value,
@@ -1130,7 +1131,7 @@ const Parser = struct{
                                             .alignment = global_type.alignment,
                                             .is_volatile = false,
                                         });
-                                        _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+                                        analyzer.append_instruction(&load.instruction);
                                         break :b &load.instruction.value;
                                     },
                                     .left => &global_symbol.value,
@@ -1173,7 +1174,7 @@ const Parser = struct{
                                     .id = .xor,
                                     .type = declaration_type,
                                 });
-                                _ = analyzer.current_basic_block.instructions.append(&xor.instruction);
+                                analyzer.append_instruction(&xor.instruction);
                                 break :block &xor.instruction.value;
                             },
                         };
@@ -1301,7 +1302,7 @@ const Parser = struct{
                                 .right = current_value,
                                 .id = comparison,
                             });
-                            _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+                            analyzer.append_instruction(&compare.instruction);
                             previous_value = &compare.instruction.value;
                         }
                     }
@@ -1338,7 +1339,7 @@ const Parser = struct{
                         },
                         .type = if (it_ty) |t| t else current_value.get_type(),
                     });
-                    _ = analyzer.current_basic_block.instructions.append(&i.instruction);
+                    analyzer.append_instruction(&i.instruction);
                     previous_value = &i.instruction.value;
                 },
                 .assign, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
@@ -1376,7 +1377,7 @@ const Parser = struct{
                     _ = emit_jump(analyzer, thread, phi_block);
 
                     analyzer.current_basic_block = phi_block;
-                    _ = analyzer.current_basic_block.instructions.append(&phi.instruction);
+                    analyzer.append_instruction(&phi.instruction);
 
                     previous_value = &phi.instruction.value;
                 },
@@ -2171,6 +2172,7 @@ const ConstantArray = struct{
 
 const Instruction = struct{
     value: Value,
+    basic_block: ?*BasicBlock = null,
     id: Id,
 
     const Id = enum{
@@ -3344,6 +3346,13 @@ const Analyzer = struct{
     loops: PinnedArray(LoopData) = .{},
     return_block: ?*BasicBlock = null,
     return_phi: ?*Phi = null,
+
+    fn append_instruction(analyzer: *Analyzer, instruction: *Instruction) void {
+        assert(!analyzer.current_basic_block.is_terminated);
+        assert(instruction.basic_block == null);
+        instruction.basic_block = analyzer.current_basic_block;
+        _ = analyzer.current_basic_block.instructions.append(instruction);
+    }
 };
 
 const LoopData = struct {
@@ -4209,7 +4218,7 @@ fn build_return(thread: *Thread, analyzer: *Analyzer, return_value: *Value) void
         .value = return_value,
     });
 
-    _ = analyzer.current_basic_block.instructions.append(&return_expression.instruction);
+    analyzer.append_instruction(&return_expression.instruction);
     analyzer.current_basic_block.is_terminated = true;
 }
 
@@ -4374,7 +4383,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     .alignment = local_symbol.alignment,
                     .is_volatile = false,
                 });
-                _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                analyzer.append_instruction(&store.instruction);
 
                 local_block.scope.declarations.put_no_clobber(local_name, &local_symbol.local_declaration.declaration);
             },
@@ -4613,7 +4622,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                 .alignment = expected_right_type.alignment,
                                 .is_volatile = false,
                             });
-                            _ = analyzer.current_basic_block.instructions.append(&left_load.instruction);
+                            analyzer.append_instruction(&left_load.instruction);
 
                             const right = parser.parse_expression(analyzer, thread, file, expected_right_type, .right);
 
@@ -4637,7 +4646,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                 .right = right,
                                 .type = expected_right_type,
                             });
-                            _ = analyzer.current_basic_block.instructions.append(&binary_operation.instruction);
+                            analyzer.append_instruction(&binary_operation.instruction);
                             break :block &binary_operation.instruction.value;
                         },
                     };
@@ -4660,7 +4669,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             .alignment = expected_right_type.alignment,
                             .is_volatile = false,
                     });
-                    _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                    analyzer.append_instruction(&store.instruction);
                 },
                 else => @panic((src.ptr + parser.i)[0..1]),
             }
@@ -4723,7 +4732,7 @@ fn get_declaration_value(analyzer: *Analyzer, thread: *Thread, declaration: *Dec
                 .alignment = declaration_type.alignment,
                 .is_volatile = false,
             });
-            _ = analyzer.current_basic_block.instructions.append(&load.instruction);
+            analyzer.append_instruction(&load.instruction);
             break :block &load.instruction.value;
         },
     };
@@ -5101,7 +5110,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                     .alignment = argument.type.alignment,
                                     .is_volatile = false,
                                 });
-                                _ = analyzer.current_basic_block.instructions.append(&store.instruction);
+                                analyzer.append_instruction(&store.instruction);
                             }
 
                             const result = analyze_local_block(thread, &analyzer, &parser, file);
@@ -5110,7 +5119,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             const current_basic_block = analyzer.current_basic_block;
                             if (analyzer.return_phi) |return_phi| {
                                 analyzer.current_basic_block = analyzer.return_block.?;
-                                _ = analyzer.current_basic_block.instructions.append(&return_phi.instruction);
+                                analyzer.append_instruction(&return_phi.instruction);
                                 build_return(thread, &analyzer, &return_phi.instruction.value);
                                 analyzer.current_basic_block = current_basic_block;
                             }
@@ -5245,14 +5254,13 @@ fn emit_unreachable(analyzer: *Analyzer, thread: *Thread) void {
             .id = .@"unreachable",
         },
     });
-    _ = analyzer.current_basic_block.instructions.append(&ur.instruction);
+    analyzer.append_instruction(&ur.instruction);
     analyzer.current_basic_block.is_terminated = true;
 }
 
 const JumpEmission = struct {
     jump: *Jump,
     basic_block: *BasicBlock,
-    index: u32,
 };
 
 fn emit_jump(analyzer: *Analyzer, thread: *Thread, basic_block: *BasicBlock) JumpEmission {
@@ -5272,13 +5280,12 @@ fn emit_jump(analyzer: *Analyzer, thread: *Thread, basic_block: *BasicBlock) Jum
         .basic_block = basic_block,
     });
     const original_block = analyzer.current_basic_block;
-    const block_instruction_index = analyzer.current_basic_block.instructions.append_index(&jump.instruction);
+    analyzer.append_instruction(&jump.instruction);
     analyzer.current_basic_block.is_terminated = true;
     _ = basic_block.predecessors.append(analyzer.current_basic_block);
 
     return .{
         .jump = jump,
-        .index = block_instruction_index,
         .basic_block = original_block,
     };
 }
@@ -5286,7 +5293,7 @@ fn emit_jump(analyzer: *Analyzer, thread: *Thread, basic_block: *BasicBlock) Jum
 const BranchEmission = struct {
     branch: *Branch,
     basic_block: *BasicBlock,
-    index: u32,
+    // index: u32,
 };
 
 fn emit_branch(analyzer: *Analyzer, thread: *Thread, condition: *Value, taken: *BasicBlock, not_taken: *BasicBlock) BranchEmission {
@@ -5307,14 +5314,14 @@ fn emit_branch(analyzer: *Analyzer, thread: *Thread, condition: *Value, taken: *
         .not_taken = not_taken,
     });
     const original_block = analyzer.current_basic_block;
-    const block_instruction_index = analyzer.current_basic_block.instructions.append_index(&branch.instruction);
+    analyzer.append_instruction(&branch.instruction);
     analyzer.current_basic_block.is_terminated = true;
     _ = taken.predecessors.append(analyzer.current_basic_block);
     _ = not_taken.predecessors.append(analyzer.current_basic_block);
 
     return .{
         .branch = branch,
-        .index = block_instruction_index,
+        // .index = block_instruction_index,
         .basic_block = original_block,
     };
 }
@@ -5354,7 +5361,7 @@ fn emit_condition(analyzer: *Analyzer, thread: *Thread, condition: *Value) *Valu
                     .right = &zero.value,
                     .id = .not_zero,
                 });
-                _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+                analyzer.append_instruction(&compare.instruction);
 
                 break :int &compare.instruction.value;
             }
