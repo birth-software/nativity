@@ -92,6 +92,16 @@ const GlobalSymbol = struct{
     value: Value,
     id: GlobalSymbol.Id,
 
+    pub fn get_type(global_symbol: *GlobalSymbol) *Type {
+        return switch (global_symbol.id) {
+            .global_variable => block: {
+                const global_variable = global_symbol.get_payload(.global_variable);
+                break :block global_variable.type;
+            },
+            else => |t| @panic(@tagName(t)),
+        };
+    }
+
     const Id = enum{
         function_declaration,
         function_definition,
@@ -1043,13 +1053,7 @@ const Parser = struct{
                                 const global_declaration = lookup_result.declaration.*.get_payload(.global);
                                 const global_symbol = global_declaration.to_symbol();
 
-                                const global_type = switch (global_symbol.id) {
-                                    .global_variable => b: {
-                                        const global_variable = global_symbol.get_payload(.global_variable);
-                                        break :b global_variable.type;
-                                    },
-                                    else =>|t| @panic(@tagName(t)),
-                                };
+                                const global_type = global_symbol.get_type();
 
                                 if (maybe_type) |ty| {
                                     switch (typecheck(ty, global_type)) {
@@ -1824,13 +1828,8 @@ const Value = struct {
             },
             .global_symbol => {
                 const global_symbol = value.get_payload(.global_symbol);
-                return switch (global_symbol.id) {
-                    .global_variable => b: {
-                        const global_variable = global_symbol.get_payload(.global_variable);
-                        break :b global_variable.type;
-                    },
-                    else => |t| @panic(@tagName(t)),
-                };
+                const global_type = global_symbol.get_type();
+                return global_type;
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -4480,13 +4479,8 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                         },
                         .global_symbol => b: {
                             const global_symbol = left.get_payload(.global_symbol);
-                            break :b switch (global_symbol.id) {
-                                .global_variable => gv: {
-                                    const global_variable = global_symbol.get_payload(.global_variable);
-                                    break :gv global_variable.type;
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            };
+                            const global_type = global_symbol.get_type();
+                            break :b global_type;
                         },
                         else => |t| @panic(@tagName(t)),
                     };
@@ -4589,13 +4583,8 @@ fn get_declaration_value(analyzer: *Analyzer, thread: *Thread, declaration: *Dec
         .global => block: {
             const global_declaration = declaration.get_payload(.global);
             const global_symbol = global_declaration.to_symbol();
-            switch (global_symbol.id) {
-                .global_variable => {
-                    const global_variable = global_symbol.get_payload(.global_variable);
-                    declaration_type = global_variable.type;
-                },
-                else => |t| @panic(@tagName(t)),
-            }
+            const global_type = global_symbol.get_type();
+            declaration_type = global_type;
             break :block &global_symbol.value;
         },
     };
