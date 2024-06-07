@@ -1,0 +1,6 @@
+fn[cc(.c)] main[export]() s32 {
+    >sizeofu32: s32 = #size(u32);
+    >sizeofu16: s32 = #size(u16);
+
+    return sizeofu32 - (2 * sizeofu16);
+}
