@@ -1,0 +1,21 @@
+>n: s32 = 10;
+>m: s32 = 3;
+
+fn foo(arg: s32) s32 {
+    >i: s32 = 0;
+    loop (i < arg) {
+        if (i < m) {
+            i += 1;
+        } else {
+            return i - 100;
+        }
+    }
+
+    return 321;
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >a = foo(n);
+    >b = foo(n);
+    return (a - b) + (a + 97) + (b + 97);
+}

@@ -1,4 +1,3 @@
-returns inside loops (if conditional)
 returns inside loops (else conditional)
 returns inside loops (non-conditional)
 function pointers
