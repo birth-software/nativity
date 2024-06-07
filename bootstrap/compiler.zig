@@ -1349,26 +1349,10 @@ const Parser = struct{
         _ = analyzer.exit_blocks.append(exit_block);
         const exit_block_count = analyzer.exit_blocks.length;
 
-        const branch = thread.branches.append(.{
-            .instruction = .{
-                .value = .{
-                    .sema = .{
-                        .thread = thread.get_index(),
-                        .resolved = true,
-                        .id = .instruction,
-                    },
-                    },
-                .id = .branch,
-            },
-            .condition = compare,
-            .taken = taken_block,
-            .not_taken = exit_block,
-        });
-        _ = analyzer.current_basic_block.instructions.append(&branch.instruction);
-        analyzer.current_basic_block.is_terminated = true;
+        const branch_emission = emit_branch(analyzer, thread, compare, taken_block, exit_block);
+        _ = branch_emission; // autofix
 
-        analyzer.current_basic_block = branch.taken;
-        _ = branch.taken.predecessors.append(original_block);
+        analyzer.current_basic_block = taken_block;
 
         var if_terminated = false;
         var else_terminated = false;
@@ -1390,7 +1374,7 @@ const Parser = struct{
         if (src[parser.i] == 'e' and byte_equal(src[parser.i..][0.."else".len], "else")) {
             // TODO: create not taken block
             parser.i += "else".len;
-            analyzer.current_basic_block = branch.not_taken;
+            analyzer.current_basic_block = exit_block;
 
             parser.skip_space(src);
 
@@ -1410,24 +1394,29 @@ const Parser = struct{
                 else => @panic((src.ptr + parser.i)[0..1]),
             }
 
-            if (!if_terminated and !else_terminated) {
+            if (!if_terminated or !else_terminated) {
                 const new_exit_block = create_basic_block(thread);
+                const not_taken_block = exit_block;
                 // Fix jump
 
-                assert(if_jump_emission.jump.basic_block == branch.not_taken);
-                if_jump_emission.jump.basic_block.predecessors.length = 0;
-                _ = if_jump_emission.jump.basic_block.predecessors.append(original_block);
-                _ = new_exit_block.predecessors.append(if_jump_emission.jump.basic_block);
-                if_jump_emission.jump.basic_block = new_exit_block;
+                if (!if_terminated) {
+                    assert(if_jump_emission.jump.basic_block == not_taken_block);
+                    if_jump_emission.jump.basic_block.predecessors.length = 0;
+                    _ = if_jump_emission.jump.basic_block.predecessors.append(original_block);
+                    _ = new_exit_block.predecessors.append(if_jump_emission.jump.basic_block);
+                    if_jump_emission.jump.basic_block = new_exit_block;
+                }
 
-                // Emit jump to the new exit block
-                _ = emit_jump(analyzer, thread, new_exit_block);
+                if (!else_terminated) {
+                    // Emit jump to the new exit block
+                    _ = emit_jump(analyzer, thread, new_exit_block);
+                }
 
                 analyzer.current_basic_block = new_exit_block;
             }
         } else {
-            _ = branch.not_taken.predecessors.append(original_block);
-            analyzer.current_basic_block = branch.not_taken;
+            _ = exit_block.predecessors.append(original_block);
+            analyzer.current_basic_block = exit_block;
         }
 
         if (!if_terminated and !else_terminated) {
@@ -6082,5 +6071,7 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
         },
     }
 }
+
+
 
 
