@@ -141,7 +141,6 @@ pub const LLVM = struct {
         const createConditionalBranch = bindings.NativityLLVMBuilderCreateConditionalBranch;
         const createSwitch = bindings.NativityLLVMBuilderCreateSwitch;
         const createGEP = bindings.NativityLLVMBuilderCreateGEP;
-        const createStructGEP = bindings.NativityLLVMBuilderCreateStructGEP;
         const createICmp = bindings.NativityLLVMBuilderCreateICmp;
         const createLoad = bindings.NativityLLVMBuilderCreateLoad;
         const createMultiply = bindings.NativityLLVMBuilderCreateMultiply;
