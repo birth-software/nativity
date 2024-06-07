@@ -1,0 +1,4 @@
+fn[cc(.c)] main[export]() s32 {
+    >array: [1]s32 = [0];
+    return array[0];
+}

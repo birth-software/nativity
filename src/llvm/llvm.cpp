@@ -603,13 +603,6 @@ extern "C" Value* NativityLLVMBuilderCreateGEP(IRBuilder<>& builder, Type* type,
     return GEP;
 }
 
-extern "C" Value* NativityLLVMBuilderCreateStructGEP(IRBuilder<>& builder, Type* type, Value* pointer, unsigned index, const char* name_ptr, size_t name_len)
-{
-    auto name = StringRef(name_ptr, name_len);
-    auto* gep = builder.CreateStructGEP(type, pointer, index, name);
-    return gep;
-}
-
 extern "C" BranchInst* NativityLLVMBuilderCreateBranch(IRBuilder<>& builder, BasicBlock* basic_block)
 {
     auto* conditional_branch = builder.CreateBr(basic_block);
