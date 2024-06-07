@@ -3120,7 +3120,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                     }
                 },
                 .llvm_generate_ir => {
-                    if (thread.functions.length > 0) {
+                    if (thread.functions.length > 0 or thread.global_variables.length > 0) {
                         const context = LLVM.Context.create();
                         const module_name: []const u8 = "thread";
                         const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
