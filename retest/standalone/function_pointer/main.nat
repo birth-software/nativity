@@ -1,0 +1,10 @@
+>n: s32 = 5;
+fn foo() s32 {
+    return n;
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >fn_pointer = foo&;
+    >a = fn_pointer();
+    return a - n;
+}
