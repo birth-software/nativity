@@ -1,6 +1,4 @@
-arrays
 assert
-c abi
 orelse
 size
 trailing zeroes
@@ -10,3 +8,5 @@ returns inside loops (else conditional)
 returns inside loops (non-conditional)
 function pointers
 for loops
+arrays
+c abi

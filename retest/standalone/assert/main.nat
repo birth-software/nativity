@@ -1,0 +1,5 @@
+fn[cc(.c)] main[export]() s32 {
+    >n: s32 = 1;
+    #assert(n);
+    return n - n;
+}

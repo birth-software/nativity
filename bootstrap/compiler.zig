@@ -193,6 +193,38 @@ const Parser = struct{
         }
     }
 
+    fn parse_intrinsic(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) void {
+        const src = file.source_code;
+        parser.expect_character(src, '#');
+
+        // TODO: make it more efficient
+        const identifier = parser.parse_raw_identifier(src);
+        if (identifier[0] == '"') {
+            unreachable;
+        } else {
+            const intrinsic_id = inline for (@typeInfo(Intrinsic).Enum.fields) |i_field| {
+                if (byte_equal(i_field.name, identifier)) {
+                    break @field(Intrinsic, i_field.name);
+                }
+            } else {
+                exit_with_error("Unknown intrinsic");
+            };
+
+            switch (intrinsic_id) {
+                .assert => {
+                    const condition = parser.parse_condition(analyzer, thread, file);
+                    const assert_true_block = create_basic_block(thread);
+                    const assert_false_block = create_basic_block(thread);
+                    _ = emit_branch(analyzer, thread, condition, assert_true_block, assert_false_block);
+                    analyzer.current_basic_block = assert_false_block;
+                    emit_unreachable(analyzer, thread);
+                    analyzer.current_basic_block = assert_true_block;
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+        }
+    }
+
     fn parse_raw_identifier(parser: *Parser, file: []const u8) []const u8 {
         const identifier_start = parser.i;
         const is_string_literal_identifier = file[identifier_start] == '"';
@@ -1215,6 +1247,7 @@ const Parser = struct{
             },
             else => |t| @panic(@tagName(t)),
         };
+
         return compare;
     }
 
@@ -1509,6 +1542,12 @@ const Keyword = enum{
     @"break",
 };
 
+const Intrinsic = enum{
+    assert,
+    trap,
+    @"unreachable",
+};
+
 fn parse_keyword(identifier: []const u8) u32 {
     assert(identifier.len > 0);
     if (identifier[0] != '"') {
@@ -1730,6 +1769,7 @@ const Instruction = struct{
         ret,
         ret_void,
         store,
+        @"unreachable",
     };
 
     const id_to_instruction_map = std.EnumArray(Id, type).init(.{
@@ -1745,6 +1785,7 @@ const Instruction = struct{
         .ret = Return,
         .ret_void = void,
         .store = Store,
+        .@"unreachable" = Unreachable,
     });
 
     fn get_payload(instruction: *Instruction, comptime id: Id) *id_to_instruction_map.get(id) {
@@ -1846,6 +1887,10 @@ const Return = struct{
     value: *Value,
 };
 
+const Unreachable = struct{
+    instruction: Instruction,
+};
+
 const Import = struct {
     global_declaration: GlobalDeclaration,
     hash: u32,
@@ -1891,6 +1936,7 @@ const Thread = struct{
     local_symbols: PinnedArray(LocalSymbol) = .{},
     argument_symbols: PinnedArray(ArgumentSymbol) = .{},
     global_variables: PinnedArray(GlobalVariable) = .{},
+    unreachables: PinnedArray(Unreachable) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -3231,6 +3277,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             _ = llvm_phi_nodes.append(phi_node);
                                             break :block phi_node.toValue();
                                         },
+                                        .@"unreachable" => block: {
+                                            const ur = builder.createUnreachable();
+                                            break :block ur.toValue();
+                                        },
                                         else => |t| @panic(@tagName(t)),
                                     };
 
@@ -3836,6 +3886,11 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                 } else {
                     parser.i = statement_start_ch_index;
                 }
+            },
+            '#' => {
+                parser.parse_intrinsic(analyzer, thread, file);
+                parser.skip_space(src);
+                parser.expect_character(src, ';');
             },
             else => {},
         }
@@ -4516,6 +4571,24 @@ fn typecheck(expected: *Type, have: *Type) TypecheckResult {
     } else {
         exit(1);
     }
+}
+
+fn emit_unreachable(analyzer: *Analyzer, thread: *Thread) void {
+    assert(!analyzer.current_basic_block.is_terminated);
+    const ur = thread.unreachables.append(.{
+        .instruction = .{
+            .value = .{
+                .sema = .{
+                    .id = .instruction,
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                },
+                },
+            .id = .@"unreachable",
+        },
+    });
+    _ = analyzer.current_basic_block.instructions.append(&ur.instruction);
+    analyzer.current_basic_block.is_terminated = true;
 }
 
 const JumpEmission = struct {
