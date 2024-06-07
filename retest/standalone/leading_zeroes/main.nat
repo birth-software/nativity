@@ -1,0 +1,7 @@
+fn[cc(.c)] main[export]() s32 {
+    >a: s32 = 0xffffffff;
+    #assert(#leading_zeroes(a) == 0);
+    >b: s32 = 0x1fffffff;
+    #assert(#leading_zeroes(b) == 3);
+    return 0;
+}
