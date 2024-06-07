@@ -1,0 +1,9 @@
+fn[cc(.c)] main[export]() s32 {
+    >a: s32 = 5;
+    >b: s32 = a orelse 4;
+    #assert(b == a);
+    >c: s32 = 0;
+    >d: s32 = c orelse a;
+    #assert(d == a);
+    return 0;
+}
