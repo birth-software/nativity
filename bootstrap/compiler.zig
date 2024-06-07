@@ -176,7 +176,7 @@ const Parser = struct{
     fn skip_space(parser: *Parser, file: []const u8) void {
         const original_i = parser.i;
 
-        if (!is_space(file[original_i])) return;
+        if (original_i == file.len or !is_space(file[original_i])) return;
 
         while (parser.i < file.len) : (parser.i += 1) {
             const ch = file[parser.i];
@@ -859,6 +859,8 @@ const Parser = struct{
         compare_unsigned_less_equal,
         compare_signed_less,
         compare_signed_less_equal,
+
+        @"orelse",
     };
 
     fn parse_constant_expression(parser: *Parser, thread: *Thread, file: *File, maybe_type: ?*Type) *Value {
@@ -912,7 +914,7 @@ const Parser = struct{
                 .compare_equal, .compare_not_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => {
                     switch (current_operation) {
                         else => unreachable,
-                inline .compare_equal, .compare_not_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => |co| {
+                        inline .compare_equal, .compare_not_equal, .compare_unsigned_greater, .compare_unsigned_greater_equal, .compare_signed_greater, .compare_signed_greater_equal, .compare_unsigned_less, .compare_unsigned_less_equal, .compare_signed_less, .compare_signed_less_equal => |co| {
                             const string = @tagName(co)["compare_".len..];
                             const comparison = @field(IntegerCompare.Id, string);
                             const compare = thread.integer_compares.append(.{
@@ -971,10 +973,61 @@ const Parser = struct{
                     previous_value = &i.instruction.value;
                 },
                 .assign, .add_assign, .sub_assign, .mul_assign, .udiv_assign, .sdiv_assign, .and_assign, .or_assign, .xor_assign, .shift_left_assign, .logical_shift_right_assign, .arithmetic_shift_right_assign => unreachable,
+                .@"orelse" => {
+                    const orelse_type = ty orelse unreachable;
+                    const condition = emit_condition(analyzer, thread, previous_value);
+                    const true_block = create_basic_block(thread);
+                    const false_block = create_basic_block(thread);
+                    const phi_block = create_basic_block(thread);
+                    _ = emit_branch(analyzer, thread, condition, true_block, false_block);
+                    const phi = thread.phis.append(.{
+                        .instruction = .{
+                            .id = .phi,
+                            .value = .{
+                                .sema = .{
+                                    .id = .instruction,
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                },
+                            },
+                        },
+                        .type = orelse_type,
+                    });
+                    _ = phi.nodes.append(.{
+                        .value = previous_value,
+                        .basic_block = true_block,
+                    });
+                    _ = phi.nodes.append(.{
+                        .value = current_value,
+                        .basic_block = false_block,
+                    });
+                    analyzer.current_basic_block = true_block;
+                    _ = emit_jump(analyzer, thread, phi_block);
+                    analyzer.current_basic_block = false_block;
+                    _ = emit_jump(analyzer, thread, phi_block);
+
+                    analyzer.current_basic_block = phi_block;
+                    _ = analyzer.current_basic_block.instructions.append(&phi.instruction);
+
+                    previous_value = &phi.instruction.value;
+                },
             }
 
-            switch (src[parser.i]) {
+            const original_index = parser.i;
+            const original = src[original_index];
+            switch (original) {
                 ')', ';', ',' => return previous_value,
+                'o' => {
+                    const identifier = parser.parse_raw_identifier(src);
+                    if (byte_equal(identifier, "orelse")) {
+                        current_operation = .@"orelse";
+                    } else {
+                        parser.i = original;
+                        exit(1);
+                    }
+
+                    parser.skip_space(src);
+                },
                 '=' => {
                     current_operation = .assign;
                     parser.i += 1;
@@ -1206,49 +1259,7 @@ const Parser = struct{
 
         parser.skip_space(src);
 
-        const condition_type = condition.get_type();
-        const compare = switch (condition_type.sema.id) {
-            .integer => int: {
-                const integer_ty = condition_type.get_payload(.integer);
-                if (integer_ty.bit_count == 1) {
-                    break :int condition;
-                } else {
-                    const zero = thread.constant_ints.append(.{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .constant_int,
-                            },
-                            },
-                        .n = 0,
-                        .type = condition_type,
-                    });
-
-                    const compare = thread.integer_compares.append(.{
-                        .instruction = .{
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true,
-                                    .id = .instruction,
-                                },
-                                },
-                            .id = .integer_compare,
-                        },
-                        .left = condition,
-                        .right = &zero.value,
-                        .id = .not_zero,
-                    });
-                    _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
-
-                    break :int &compare.instruction.value;
-                }
-            },
-            else => |t| @panic(@tagName(t)),
-        };
-
-        return compare;
+        return emit_condition(analyzer, thread, condition);
     }
 
     fn parse_if_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File) IfResult {
@@ -1535,11 +1546,12 @@ const Type = struct {
 };
 
 const Keyword = enum{
+    @"break",
     @"else",
     @"for",
     @"if",
     @"loop",
-    @"break",
+    @"orelse",
 };
 
 const Intrinsic = enum{
@@ -4661,6 +4673,52 @@ fn emit_branch(analyzer: *Analyzer, thread: *Thread, condition: *Value, taken: *
     };
 }
 
+fn emit_condition(analyzer: *Analyzer, thread: *Thread, condition: *Value) *Value {
+    const condition_type = condition.get_type();
+    const compare = switch (condition_type.sema.id) {
+        .integer => int: {
+            const integer_ty = condition_type.get_payload(.integer);
+            if (integer_ty.bit_count == 1) {
+                break :int condition;
+            } else {
+                const zero = thread.constant_ints.append(.{
+                    .value = .{
+                        .sema = .{
+                            .thread = thread.get_index(),
+                            .resolved = true,
+                            .id = .constant_int,
+                        },
+                        },
+                    .n = 0,
+                    .type = condition_type,
+                });
+
+                const compare = thread.integer_compares.append(.{
+                    .instruction = .{
+                        .value = .{
+                            .sema = .{
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                                .id = .instruction,
+                            },
+                            },
+                        .id = .integer_compare,
+                    },
+                    .left = condition,
+                    .right = &zero.value,
+                    .id = .not_zero,
+                });
+                _ = analyzer.current_basic_block.instructions.append(&compare.instruction);
+
+                break :int &compare.instruction.value;
+            }
+        },
+        else => |t| @panic(@tagName(t)),
+    };
+
+    return compare;
+}
+
 pub const LLVM = struct {
     const bindings = @import("backend/llvm_bindings.zig");
     pub const x86_64 = struct {
@@ -5853,3 +5911,5 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
         },
     }
 }
+
+
