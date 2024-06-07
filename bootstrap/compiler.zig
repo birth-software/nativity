@@ -242,6 +242,52 @@ const Parser = struct{
                     });
                     return &constant_int.value;
                 },
+                .trailing_zeroes => {
+                    parser.skip_space(src);
+                    parser.expect_character(src, '(');
+                    parser.skip_space(src);
+                    const value = parser.parse_expression(analyzer, thread, file, ty, .right);
+                    parser.skip_space(src);
+                    parser.expect_character(src, ')');
+                    const tz = thread.trailing_zeroes.append(.{
+                        .value = value,
+                        .instruction = .{
+                            .id = .trailing_zeroes,
+                            .value = .{
+                                .sema = .{
+                                    .id = .instruction,
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                },
+                            },
+                        },
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&tz.instruction);
+                    return &tz.instruction.value;
+                },
+                .leading_zeroes => {
+                    parser.skip_space(src);
+                    parser.expect_character(src, '(');
+                    parser.skip_space(src);
+                    const value = parser.parse_expression(analyzer, thread, file, ty, .right);
+                    parser.skip_space(src);
+                    parser.expect_character(src, ')');
+                    const lz = thread.leading_zeroes.append(.{
+                        .value = value,
+                        .instruction = .{
+                            .id = .leading_zeroes,
+                            .value = .{
+                                .sema = .{
+                                    .id = .instruction,
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                },
+                            },
+                        },
+                    });
+                    _ = analyzer.current_basic_block.instructions.append(&lz.instruction);
+                    return &lz.instruction.value;
+                },
                 else => |t| @panic(@tagName(t)),
             }
         }
@@ -1518,6 +1564,14 @@ const Value = struct {
                     .integer_compare => {
                         return &instance.threads[value.sema.thread].integers[0].type;
                     },
+                    .trailing_zeroes => {
+                        const tz = instruction.get_payload(.trailing_zeroes);
+                        return tz.value.get_type();
+                    },
+                    .leading_zeroes => {
+                        const lz = instruction.get_payload(.leading_zeroes);
+                        return lz.value.get_type();
+                    },
                     else => |t| @panic(@tagName(t)),
                 };
             },
@@ -1582,7 +1636,9 @@ const Keyword = enum{
 
 const Intrinsic = enum{
     assert,
+    leading_zeroes,
     size,
+    trailing_zeroes,
     trap,
     @"unreachable",
 };
@@ -1802,12 +1858,14 @@ const Instruction = struct{
         integer_binary_operation,
         integer_compare,
         jump,
+        leading_zeroes,
         load,
         local_symbol,
         phi,
         ret,
         ret_void,
         store,
+        trailing_zeroes,
         @"unreachable",
     };
 
@@ -1818,12 +1876,14 @@ const Instruction = struct{
         .integer_binary_operation = IntegerBinaryOperation,
         .integer_compare = IntegerCompare,
         .jump = Jump,
+        .leading_zeroes = LeadingZeroes,
         .local_symbol = LocalSymbol,
         .load = Load,
         .phi = Phi,
         .ret = Return,
         .ret_void = void,
         .store = Store,
+        .trailing_zeroes = TrailingZeroes,
         .@"unreachable" = Unreachable,
     });
 
@@ -1950,6 +2010,16 @@ fn get_power_of_two_byte_count_from_bit_count(bit_count: u32) u32 {
     unreachable;
 }
 
+const LeadingZeroes = struct{
+    instruction: Instruction,
+    value: *Value,
+};
+
+const TrailingZeroes = struct{
+    instruction: Instruction,
+    value: *Value,
+};
+
 const Thread = struct{
     arena: *Arena = undefined,
     functions: PinnedArray(Function) = .{},
@@ -1976,6 +2046,8 @@ const Thread = struct{
     argument_symbols: PinnedArray(ArgumentSymbol) = .{},
     global_variables: PinnedArray(GlobalVariable) = .{},
     unreachables: PinnedArray(Unreachable) = .{},
+    leading_zeroes: PinnedArray(LeadingZeroes) = .{},
+    trailing_zeroes: PinnedArray(TrailingZeroes) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -1984,6 +2056,9 @@ const Thread = struct{
         attributes: LLVM.Attributes,
         target_machine: *LLVM.Target.Machine,
         object: ?[]const u8 = null,
+        intrinsic_ids: std.EnumArray(LLVMIntrinsic, LLVM.Value.IntrinsicID),
+        intrinsic_id_map: PinnedHashMap([]const u8, LLVM.Value.IntrinsicID) = .{},
+        intrinsic_function_map: PinnedHashMap(LLVMIntrinsic.Parameters, *LLVM.Value.Constant.Function) = .{},
     } = undefined,
     integers: [128]Type.Integer = blk: {
         var integers: [128]Type.Integer = undefined;
@@ -2052,6 +2127,16 @@ const Thread = struct{
         const index = @divExact(@intFromPtr(thread) - @intFromPtr(instance.threads.ptr), @sizeOf(Thread));
         return @intCast(index);
     }
+};
+
+const LLVMIntrinsic = enum{
+    leading_zeroes,
+    trailing_zeroes,
+
+    const Parameters = struct{
+        id: LLVM.Value.IntrinsicID,
+        types: []const *LLVM.Type,
+    };
 };
 
 const LLVMFile = struct {
@@ -3117,9 +3202,12 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             .module = module,
                             .attributes = attributes,
                             .target_machine = target_machine,
+                            .intrinsic_ids = @TypeOf(thread.llvm.intrinsic_ids).init(.{
+                                .leading_zeroes = llvm_get_intrinsic_id("llvm.ctlz"),
+                                .trailing_zeroes = llvm_get_intrinsic_id("llvm.cttz"),
+                            }),
                         };
                         const debug_info = false;
-
 
                         for (thread.external_functions.slice()) |*nat_function| {
                             _ = llvm_get_function(thread, nat_function, true);
@@ -3329,6 +3417,38 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const ur = builder.createUnreachable();
                                             break :block ur.toValue();
                                         },
+                                        .leading_zeroes => block: {
+                                            const leading_zeroes = instruction.get_payload(.leading_zeroes);
+                                            const v = llvm_get_value(thread, leading_zeroes.value);
+                                            const v_type = v.getType();
+                                            const lz_id = thread.llvm.intrinsic_ids.get(.leading_zeroes);
+                                            const parameters = LLVMIntrinsic.Parameters{
+                                                .id = lz_id,
+                                                .types = &.{v_type},
+                                            };
+                                            const intrinsic_function = llvm_get_intrinsic_function(thread, parameters);
+                                            const intrinsic_function_type = intrinsic_function.getType();
+                                            const is_poison = context.getConstantInt(1, 0, false);
+                                            const args: []const *LLVM.Value = &.{v, is_poison.toValue()};
+                                            const call_i = builder.createCall(intrinsic_function_type, intrinsic_function.toValue(), args.ptr, args.len, "", "".len, null);
+                                            break :block call_i.toValue();
+                                        },
+                                        .trailing_zeroes => block: {
+                                            const trailing_zeroes = instruction.get_payload(.trailing_zeroes);
+                                            const v = llvm_get_value(thread, trailing_zeroes.value);
+                                            const v_type = v.getType();
+                                            const tz_id = thread.llvm.intrinsic_ids.get(.trailing_zeroes);
+                                            const parameters = LLVMIntrinsic.Parameters{
+                                                .id = tz_id,
+                                                .types = &.{v_type},
+                                            };
+                                            const intrinsic_function = llvm_get_intrinsic_function(thread, parameters);
+                                            const intrinsic_function_type = intrinsic_function.getType();
+                                            const is_poison = context.getConstantInt(1, 0, false);
+                                            const args: []const *LLVM.Value = &.{v, is_poison.toValue()};
+                                            const call_i = builder.createCall(intrinsic_function_type, intrinsic_function.toValue(), args.ptr, args.len, "", "".len, null);
+                                            break :block call_i.toValue();
+                                        },
                                         else => |t| @panic(@tagName(t)),
                                     };
 
@@ -3431,6 +3551,20 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
         } else {
             std.atomic.spinLoopHint();
         }
+    }
+}
+
+fn llvm_get_intrinsic_id(intrinsic: []const u8) LLVM.Value.IntrinsicID{
+    const intrinsic_id = LLVM.lookupIntrinsic(intrinsic.ptr, intrinsic.len);
+    assert(intrinsic_id != .none);
+    return intrinsic_id;
+}
+
+fn llvm_get_intrinsic_function(thread: *Thread, parameters: LLVMIntrinsic.Parameters) *LLVM.Value.Constant.Function{
+    if (thread.llvm.intrinsic_function_map.get(parameters)) |llvm| return llvm else {
+        const intrinsic_function = thread.llvm.module.getIntrinsicDeclaration(parameters.id, parameters.types.ptr, parameters.types.len);
+        thread.llvm.intrinsic_function_map.put_no_clobber(parameters, intrinsic_function);
+        return intrinsic_function;
     }
 }
 
