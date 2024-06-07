@@ -599,10 +599,22 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(test_runner);
     test_command.step.dependOn(b.getInstallStep());
 
+    const new_test = b.addExecutable(.{
+        .name = "new_test",
+        .target = native_target,
+        .root_source_file = b.path("build/new_test.zig"),
+        .optimize = .ReleaseSmall,
+    });
+    b.default_step.dependOn(&new_test.step);
+
+    const new_test_command = b.addRunArtifact(new_test);
+    new_test_command.step.dependOn(b.getInstallStep());
+
     if (b.args) |args| {
         run_command.addArgs(args);
         debug_command.addArgs(args);
         test_command.addArgs(args);
+        new_test_command.addArgs(args);
     }
 
     const run_step = b.step("run", "Test the Nativity compiler");
@@ -611,6 +623,8 @@ pub fn build(b: *std.Build) !void {
     debug_step.dependOn(&debug_command.step);
     const test_step = b.step("test", "Test the Nativity compiler");
     test_step.dependOn(&test_command.step);
+    const new_test_step = b.step("new_test", "Script to make a new test");
+    new_test_step.dependOn(&new_test_command.step);
 
     const test_all = b.step("test_all", "Test all");
     test_all.dependOn(&test_command.step);
