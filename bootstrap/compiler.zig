@@ -3523,11 +3523,11 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         const debug_info = false;
 
                         for (thread.external_functions.slice()) |*nat_function| {
-                            _ = llvm_get_function(thread, nat_function, true);
+                            llvm_emit_function_declaration(thread, nat_function);
                         }
 
                         for (thread.functions.slice()) |*nat_function| {
-                            _ = llvm_get_function(thread, &nat_function.declaration, false);
+                            llvm_emit_function_declaration(thread, &nat_function.declaration);
                         }
 
                         for (thread.global_variables.slice()) |*nat_global| {
@@ -4017,87 +4017,84 @@ fn llvm_get_file(thread: *Thread, file_index: u32) *LLVMFile {
     }
 }
 
-fn llvm_get_function(thread: *Thread, nat_function: *Function.Declaration, override_extern: bool) *LLVM.Value.Constant.Function {
-    if (nat_function.global_symbol.value.llvm) |llvm| return llvm.toFunction() orelse unreachable else {
-        _ = override_extern; // autofix
-        const function_name = thread.identifiers.get(nat_function.global_symbol.global_declaration.declaration.name) orelse unreachable;
-        const nat_function_type = nat_function.get_type();
-        const function_type = llvm_get_type(thread, &nat_function_type.type);
-        const is_extern_function = nat_function.global_symbol.attributes.@"extern";
-        const export_or_extern = nat_function.global_symbol.attributes.@"export" or is_extern_function; 
-        const linkage: LLVM.Linkage = switch (export_or_extern) {
-            true => .@"extern",
-            false => .internal,
-        };
-        const function = thread.llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, function_name.ptr, function_name.len);
+fn llvm_emit_function_declaration(thread: *Thread, nat_function: *Function.Declaration) void {
+    assert(nat_function.global_symbol.value.llvm == null);
+    const function_name = thread.identifiers.get(nat_function.global_symbol.global_declaration.declaration.name) orelse unreachable;
+    const nat_function_type = nat_function.get_type();
+    const function_type = llvm_get_type(thread, &nat_function_type.type);
+    const is_extern_function = nat_function.global_symbol.attributes.@"extern";
+    const export_or_extern = nat_function.global_symbol.attributes.@"export" or is_extern_function; 
+    const linkage: LLVM.Linkage = switch (export_or_extern) {
+        true => .@"extern",
+        false => .internal,
+    };
+    const function = thread.llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, function_name.ptr, function_name.len);
 
-        const debug_info = false;
-        if (debug_info) {
-            const file_index = nat_function.file;
-            const llvm_file = llvm_get_file(thread, file_index);
-            var debug_argument_types = PinnedArray(*LLVM.DebugInfo.Type){};
-            _ = &debug_argument_types;
-            for (nat_function.argument_types) |argument_type| {
-                _ = argument_type; // autofix
-                exit(1);
-            }
-
-            const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
-                .visibility = .none,
-                .forward_declaration = is_extern_function,
-                .apple_block = false,
-                .block_by_ref_struct = false,
-                .virtual = false,
-                .artificial = false,
-                .explicit = false,
-                .prototyped = false,
-                .objective_c_class_complete = false,
-                .object_pointer = false,
-                .vector = false,
-                .static_member = false,
-                .lvalue_reference = false,
-                .rvalue_reference = false,
-                .reserved = false,
-                .inheritance = .none,
-                .introduced_virtual = false,
-                .bit_field = false,
-                .no_return = false,
-                .type_pass_by_value = false,
-                .type_pass_by_reference = false,
-                .enum_class = false,
-                .thunk = false,
-                .non_trivial = false,
-                .big_endian = false,
-                .little_endian = false,
-                .all_calls_described = false,
-            };
-            const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
-            const subroutine_type = llvm_file.builder.createSubroutineType(debug_argument_types.pointer, debug_argument_types.length, subroutine_type_flags, subroutine_type_calling_convention);
-            const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
-                .virtuality = .none,
-                .local_to_unit = !export_or_extern,
-                .definition = !is_extern_function,
-                .optimized = false,
-                .pure = false,
-                .elemental = false,
-                .recursive = false,
-                .main_subprogram = false,
-                .deleted = false,
-                .object_c_direct = false,
-            };
-            const subprogram_declaration = null;
-            const file = llvm_file.file;
-            const scope = file.toScope();
-            const line = 0;
-            const scope_line = 0;
-
-            const subprogram = llvm_file.builder.createFunction(scope, function_name.ptr, function_name.len, function_name.ptr, function_name.len, file, line, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration);
-            function.setSubprogram(subprogram);
+    const debug_info = false;
+    if (debug_info) {
+        const file_index = nat_function.file;
+        const llvm_file = llvm_get_file(thread, file_index);
+        var debug_argument_types = PinnedArray(*LLVM.DebugInfo.Type){};
+        _ = &debug_argument_types;
+        for (nat_function.argument_types) |argument_type| {
+            _ = argument_type; // autofix
+            exit(1);
         }
 
-        nat_function.global_symbol.value.llvm = function.toValue();
-        return function;
+        const subroutine_type_flags = LLVM.DebugInfo.Node.Flags{
+            .visibility = .none,
+            .forward_declaration = is_extern_function,
+            .apple_block = false,
+            .block_by_ref_struct = false,
+            .virtual = false,
+            .artificial = false,
+            .explicit = false,
+            .prototyped = false,
+            .objective_c_class_complete = false,
+            .object_pointer = false,
+            .vector = false,
+            .static_member = false,
+            .lvalue_reference = false,
+            .rvalue_reference = false,
+            .reserved = false,
+            .inheritance = .none,
+            .introduced_virtual = false,
+            .bit_field = false,
+            .no_return = false,
+            .type_pass_by_value = false,
+            .type_pass_by_reference = false,
+            .enum_class = false,
+            .thunk = false,
+            .non_trivial = false,
+            .big_endian = false,
+            .little_endian = false,
+            .all_calls_described = false,
+        };
+        const subroutine_type_calling_convention = LLVM.DebugInfo.CallingConvention.none;
+        const subroutine_type = llvm_file.builder.createSubroutineType(debug_argument_types.pointer, debug_argument_types.length, subroutine_type_flags, subroutine_type_calling_convention);
+        const subprogram_flags = LLVM.DebugInfo.Subprogram.Flags{
+            .virtuality = .none,
+            .local_to_unit = !export_or_extern,
+            .definition = !is_extern_function,
+            .optimized = false,
+            .pure = false,
+            .elemental = false,
+            .recursive = false,
+            .main_subprogram = false,
+            .deleted = false,
+            .object_c_direct = false,
+        };
+        const subprogram_declaration = null;
+        const file = llvm_file.file;
+        const scope = file.toScope();
+        const line = 0;
+        const scope_line = 0;
+
+        const subprogram = llvm_file.builder.createFunction(scope, function_name.ptr, function_name.len, function_name.ptr, function_name.len, file, line, subroutine_type, scope_line, subroutine_type_flags, subprogram_flags, subprogram_declaration);
+        function.setSubprogram(subprogram);
     }
+
+    nat_function.global_symbol.value.llvm = function.toValue();
 }
 
 fn create_basic_block(thread: *Thread) *BasicBlock {
