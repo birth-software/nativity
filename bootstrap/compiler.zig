@@ -725,23 +725,10 @@ const Parser = struct{
                                         break :p switch (appointee_type.sema.id) {
                                             .function => f: {
                                                 const function_type = appointee_type.get_payload(.function);
-                                                const load = thread.loads.append(.{
-                                                    .instruction = .{
-                                                        .id = .load,
-                                                        .value = .{
-                                                            .sema = .{
-                                                                .thread = thread.get_index(),
-                                                                .resolved = true,
-                                                                .id = .instruction,
-                                                            },
-                                                        },
-                                                    },
+                                                const load = emit_load(analyzer, thread, .{
                                                     .value = &local_symbol.instruction.value,
                                                     .type = local_symbol.type,
-                                                    .alignment = 8,
-                                                    .is_volatile = false,
                                                 });
-                                                analyzer.append_instruction(&load.instruction);
                                                 break :f .{
                                                     .type = function_type,
                                                     .value = &load.instruction.value,
@@ -938,23 +925,10 @@ const Parser = struct{
                         return switch (side) {
                             .left => &gep.instruction.value,
                             .right => block: {
-                                const load = thread.loads.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
-                                            },
-                                        },
-                                        .id = .load,
-                                    },
+                                const load = emit_load(analyzer, thread, .{
                                     .value = &gep.instruction.value,
                                     .type = declaration_element_type,
-                                    .alignment = declaration_type.alignment,
-                                    .is_volatile = false,
                                 });
-                                analyzer.append_instruction(&load.instruction);
                                 break :block &load.instruction.value;
                             },
                         };
@@ -984,23 +958,10 @@ const Parser = struct{
                         assert(local_symbol.type.sema.id == .pointer);
                         assert(local_symbol.appointee_type != null);
 
-                        const load = thread.loads.append(.{
-                            .instruction = .{
-                                .value = .{
-                                    .sema = .{
-                                        .thread = thread.get_index(),
-                                        .resolved = true,
-                                        .id = .instruction,
-                                    },
-                                    },
-                                .id = .load,
-                            },
+                        const load = emit_load(analyzer, thread, .{
                             .value = &local_symbol.instruction.value,
                             .type = local_symbol.type,
-                            .alignment = local_symbol.type.alignment,
-                            .is_volatile = false,
                         });
-                        analyzer.append_instruction(&load.instruction);
 
                         return switch (side) {
                             .left => &load.instruction.value,
@@ -1012,23 +973,11 @@ const Parser = struct{
                                     }
                                 }
 
-                                const pointer_load = thread.loads.append(.{
-                                    .instruction = .{
-                                        .value = .{
-                                            .sema = .{
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                                .id = .instruction,
-                                            },
-                                        },
-                                        .id = .load,
-                                    },
+                                const pointer_load = emit_load(analyzer, thread, .{
                                     .value = &load.instruction.value,
                                     .type = pointer_load_type,
-                                    .alignment = pointer_load_type.alignment,
-                                    .is_volatile = false,
                                 });
-                                analyzer.append_instruction(&pointer_load.instruction);
+
                                 break :block &pointer_load.instruction.value;
                             },
                         };
@@ -1047,23 +996,10 @@ const Parser = struct{
 
                                 break :block switch (side) {
                                     .right => b: {
-                                        const load = thread.loads.append(.{
-                                            .instruction = .{
-                                                .value = .{
-                                                    .sema = .{
-                                                        .thread = thread.get_index(),
-                                                        .resolved = true,
-                                                        .id = .instruction,
-                                                    },
-                                                    },
-                                                .id = .load,
-                                            },
+                                        const load = emit_load(analyzer, thread, .{
                                             .value = &local_symbol.instruction.value,
                                             .type = local_symbol.type,
-                                            .alignment = local_symbol.type.alignment,
-                                            .is_volatile = false,
                                         });
-                                        analyzer.append_instruction(&load.instruction);
                                         break :b &load.instruction.value;
                                     },
                                     .left => &local_symbol.instruction.value,
@@ -1079,23 +1015,10 @@ const Parser = struct{
                                 }
                                 break :block switch (side) {
                                     .right => b: {
-                                        const load = thread.loads.append(.{
-                                            .instruction = .{
-                                                .value = .{
-                                                    .sema = .{
-                                                        .thread = thread.get_index(),
-                                                        .resolved = true,
-                                                        .id = .instruction,
-                                                    },
-                                                    },
-                                                .id = .load,
-                                            },
+                                        const load = emit_load(analyzer, thread, .{
                                             .value = &argument_symbol.instruction.value,
                                             .type = argument_symbol.type,
-                                            .alignment = argument_symbol.type.alignment,
-                                            .is_volatile = false,
                                         });
-                                        analyzer.append_instruction(&load.instruction);
                                         break :b &load.instruction.value;
                                     },
                                     .left => &argument_symbol.instruction.value,
@@ -1115,23 +1038,10 @@ const Parser = struct{
 
                                 break :block switch (side) {
                                     .right => b: {
-                                        const load = thread.loads.append(.{
-                                            .instruction = .{
-                                                .value = .{
-                                                    .sema = .{
-                                                        .thread = thread.get_index(),
-                                                        .resolved = true,
-                                                        .id = .instruction,
-                                                    },
-                                                },
-                                                .id = .load,
-                                            },
+                                        const load = emit_load(analyzer, thread, .{
                                             .value = &global_symbol.value,
-                                            .type = global_type,
-                                            .alignment = global_type.alignment,
-                                            .is_volatile = false,
+                                            .type = global_symbol.type,
                                         });
-                                        analyzer.append_instruction(&load.instruction);
                                         break :b &load.instruction.value;
                                     },
                                     .left => &global_symbol.value,
@@ -4367,23 +4277,11 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
                 _ = analyzer.current_function.stack_slots.append(local_symbol);
 
-                const store = thread.stores.append(.{
-                    .instruction = .{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                                .id = .instruction,
-                            },
-                            },
-                        .id = .store,
-                    },
+                emit_store(analyzer, thread, .{
                     .destination = &local_symbol.instruction.value,
                     .source = result.initial_value,
                     .alignment = local_symbol.alignment,
-                    .is_volatile = false,
                 });
-                analyzer.append_instruction(&store.instruction);
 
                 local_block.scope.declarations.put_no_clobber(local_name, &local_symbol.local_declaration.declaration);
             },
@@ -4606,23 +4504,10 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     const source = switch (is_binary_operation) {
                         false => parser.parse_expression(analyzer, thread, file, expected_right_type, .right),
                         true => block: {
-                            const left_load = thread.loads.append(.{
-                                .instruction = .{
-                                    .id = .load,
-                                    .value = .{
-                                        .sema = .{
-                                            .thread = thread.get_index(),
-                                            .resolved = true,
-                                            .id = .instruction,
-                                        },
-                                    },
-                                },
+                            const left_load = emit_load(analyzer, thread, .{
                                 .value = left,
                                 .type = expected_right_type,
-                                .alignment = expected_right_type.alignment,
-                                .is_volatile = false,
                             });
-                            analyzer.append_instruction(&left_load.instruction);
 
                             const right = parser.parse_expression(analyzer, thread, file, expected_right_type, .right);
 
@@ -4653,23 +4538,11 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     parser.skip_space(src);
 
                     parser.expect_character(src, ';');
-                    const store = thread.stores.append(.{
-                        .instruction = .{
-                            .id = .store,
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true,
-                                    .id = .instruction,
-                                },
-                                },
-                            },
-                            .destination = left,
-                            .source = source,
-                            .alignment = expected_right_type.alignment,
-                            .is_volatile = false,
+                    emit_store(analyzer, thread, .{
+                        .destination = left,
+                        .source = source,
+                        .alignment = expected_right_type.alignment,
                     });
-                    analyzer.append_instruction(&store.instruction);
                 },
                 else => @panic((src.ptr + parser.i)[0..1]),
             }
@@ -4716,23 +4589,10 @@ fn get_declaration_value(analyzer: *Analyzer, thread: *Thread, declaration: *Dec
     return switch (side) {
         .left => declaration_value,
         .right => block: {
-            const load = thread.loads.append(.{
-                .instruction = .{
-                    .value = .{
-                        .sema = .{
-                            .thread = thread.get_index(),
-                            .resolved = true,
-                            .id = .instruction,
-                        },
-                        },
-                    .id = .load,
-                },
+            const load = emit_load(analyzer, thread, .{
                 .value = declaration_value,
                 .type = declaration_type,
-                .alignment = declaration_type.alignment,
-                .is_volatile = false,
             });
-            analyzer.append_instruction(&load.instruction);
             break :block &load.instruction.value;
         },
     };
@@ -5094,23 +4954,11 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                                 analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
 
-                                const store = thread.stores.append(.{
-                                    .instruction = .{
-                                        .id = .store,
-                                        .value = .{
-                                            .sema = .{
-                                                .id = .instruction,
-                                                .thread = thread.get_index(),
-                                                .resolved = true,
-                                            },
-                                        },
-                                    },
+                                emit_store(&analyzer, thread, .{
                                     .destination = &argument_symbol.instruction.value,
                                     .source = &argument_symbol.value,
                                     .alignment = argument.type.alignment,
-                                    .is_volatile = false,
                                 });
-                                analyzer.append_instruction(&store.instruction);
                             }
 
                             const result = analyze_local_block(thread, &analyzer, &parser, file);
@@ -5238,6 +5086,59 @@ fn typecheck(expected: *Type, have: *Type) TypecheckResult {
     } else {
         exit(1);
     }
+}
+
+fn emit_load(analyzer: *Analyzer, thread: *Thread, args: struct {
+    value: *Value,
+    type: *Type,
+    is_volatile: bool = false,
+}) *Load {
+    const load = thread.loads.append(.{
+        .instruction = .{
+            .id = .load,
+            .value = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                    .id = .instruction,
+                },
+            },
+        },
+        .value = args.value,
+        .type = args.type,
+        .alignment = args.type.alignment,
+        .is_volatile = args.is_volatile,
+    });
+
+    analyzer.append_instruction(&load.instruction);
+
+    return load;
+}
+
+fn emit_store(analyzer: *Analyzer, thread: *Thread, args: struct {
+    destination: *Value,
+    source: *Value,
+    alignment: u32,
+    is_volatile: bool = false,
+}) void {
+    const store = thread.stores.append(.{
+        .instruction = .{
+            .id = .store,
+            .value = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                    .id = .instruction,
+                },
+            },
+        },
+        .destination = args.destination,
+        .source = args.source,
+        .alignment = args.alignment,
+        .is_volatile = args.is_volatile,
+    });
+
+    analyzer.append_instruction(&store.instruction);
 }
 
 fn emit_unreachable(analyzer: *Analyzer, thread: *Thread) void {
