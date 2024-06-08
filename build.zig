@@ -471,7 +471,11 @@ pub fn build(b: *std.Build) !void {
                     const cxx_version = while (tokenizer.next()) |chunk| {
                         if (std.ascii.isDigit(chunk[0])) {
                             if (std.SemanticVersion.parse(chunk)) |sema_version| {
-                                break try std.fmt.allocPrint(b.allocator, "{}.{}.{}", .{sema_version.major, sema_version.minor, sema_version.patch});
+                                break switch (builtin.cpu.arch) {
+                                    .x86_64 => try std.fmt.allocPrint(b.allocator, "{}.{}.{}", .{sema_version.major, sema_version.minor, sema_version.patch}),
+                                    .aarch64 => try std.fmt.allocPrint(b.allocator, "{}", .{sema_version.major}),
+                                    else => @compileError("Architecture not supported"),
+                                };
                             } else |err| err catch {};
                         }
                     } else {
@@ -479,7 +483,12 @@ pub fn build(b: *std.Build) !void {
                     };
 
                     const cxx_include_base = try std.mem.concat(b.allocator, u8, &.{ "/usr/include/c++/", cxx_version });
-                    const cxx_include_arch = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(@import("builtin").cpu.arch) ++ "-pc-linux-gnu" });
+                    const cxx_include_arch = try std.mem.concat(b.allocator, u8, &.{ cxx_include_base, "/" ++ @tagName(builtin.cpu.arch) ++ switch (builtin.cpu.arch) {
+                        .x86_64 => "-pc-linux-gnu",
+                        .aarch64 => "-redhat-linux",
+                        else => @compileError("Architecture not supported"),
+                    }
+                    });
                     compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
                     compiler.addIncludePath(.{ .cwd_relative = if (use_debug) "../../local/llvm18-debug/include" else "../../local/llvm18-release/include" });
                     compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
