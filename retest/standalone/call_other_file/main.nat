@@ -2,5 +2,6 @@ import "file.nat";
 
 fn [cc(.c)] main [export]() s32
 {
-    return file.foo();
+    >result: s32 = file.foo();
+    return result;
 }
