@@ -35,6 +35,10 @@ extern "C" Module* NativityLLVMCreateModule(const char* name_ptr, size_t name_le
 {
     auto name = StringRef(name_ptr, name_len);
     auto* module = new Module(name, context);
+    // module->addModuleFlag(Module::Max, "Dwarf Version", 5);
+    // module->addModuleFlag(Module::Warning, "Debug Info Version", 3);
+    // module->addModuleFlag(Module::Max, "frame-pointer", 2);
+
     return module;
 }
 
@@ -103,6 +107,16 @@ extern "C" void NativityLLVMBuilderSetCurrentDebugLocation(IRBuilder<>& builder,
     builder.SetCurrentDebugLocation(debug_location);
 }
 
+extern "C" void NativityLLVMBuilderClearCurrentDebugLocation(IRBuilder<>&builder)
+{
+    builder.SetCurrentDebugLocation(DebugLoc());
+}
+
+extern "C" void NativityLLVMBuilderSetInstructionDebugLocation(IRBuilder<>& builder, Instruction* instruction)
+{
+    builder.SetInstDebugLocation(instruction);
+}
+
 extern "C" DIExpression* NativityLLVMDebugInfoBuilderCreateExpression(DIBuilder& builder, uint64_t* address, size_t length)
 {
     auto expr = ArrayRef<uint64_t>(address, length);
@@ -117,6 +131,11 @@ extern "C" DIGlobalVariableExpression* NativityLLVMDebugInfoBuilderCreateGlobalV
     auto annotations = nullptr;
     auto* global_variable = builder.createGlobalVariableExpression(scope, name, linkage_name, file, line_number, type, is_local_to_unit, is_defined, expression, declaration, template_parameters, alignment, annotations);
     return global_variable;
+}
+
+extern "C" void NativityLLVMDebugInfoGlobalVariableAddDebugInfo(GlobalVariable& global_variable, DIGlobalVariableExpression* global_variable_expression)
+{
+    global_variable.addDebugInfo(global_variable_expression);
 }
 
 extern "C" DILocalVariable* NativityLLVMDebugInfoBuilderCreateParameterVariable(DIBuilder& builder, DIScope* scope, const char* name_ptr, size_t name_len, unsigned argument_index, DIFile* file, unsigned line_number, DIType* type, bool always_preserve, DINode::DIFlags flags)
@@ -1077,6 +1096,11 @@ extern "C" void NativityLLVMCallSetAttributes(CallInst& call, LLVMContext& conte
     auto parameter_attribute_sets = ArrayRef<AttributeSet>(parameter_attribute_set_ptr, parameter_attribute_set_count);
     auto attribute_list = AttributeList::get(context, function_attributes, return_attributes, parameter_attribute_sets);
     call.setAttributes(attribute_list);
+}
+extern "C" void NativityLLVMGlobalObjectSetAlignment(GlobalObject& global_object, uint32_t alignment)
+{
+    Align align(alignment);
+    global_object.setAlignment(align);
 }
 
 extern "C" CallInst* NativityLLVMBuilderCreateMemcpy(IRBuilder<>& builder, Value* destination, uint32_t destination_alignment, Value* source, uint32_t source_alignment, uint64_t size, bool is_volatile)

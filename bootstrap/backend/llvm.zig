@@ -166,6 +166,7 @@ pub const LLVM = struct {
         const getInsertBlock = bindings.NativityLLVMBuilderGetInsertBlock;
         const isCurrentBlockTerminated = bindings.NativityLLVMBuilderIsCurrentBlockTerminated;
         const setCurrentDebugLocation = bindings.NativityLLVMBuilderSetCurrentDebugLocation;
+        const setInstructionDebugLocation = bindings.NativityLLVMBuilderSetInstructionDebugLocation;
     };
 
     pub const DebugInfo = struct {

@@ -23,6 +23,7 @@ pub extern fn NativityLLVMDebugInfoBuilderCreateLexicalBlock(builder: *LLVM.Debu
 
 pub extern fn NativityLLVMDebugInfoBuilderCreateExpression(builder: *LLVM.DebugInfo.Builder, address: [*]const u64, length: usize) *LLVM.DebugInfo.Expression;
 pub extern fn NativityLLVMDebugInfoBuilderCreateGlobalVariableExpression(builder: *LLVM.DebugInfo.Builder, scope: *LLVM.DebugInfo.Scope, name_ptr: [*]const u8, name_len: usize, linkage_name_ptr: [*]const u8, linkage_name_len: usize, file: *LLVM.DebugInfo.File, line_number: c_uint, type: *LLVM.DebugInfo.Type, is_local_to_unit: bool, is_defined: bool, expression: ?*LLVM.DebugInfo.Expression, declaration: ?*LLVM.Metadata.Node, template_parameters: ?*LLVM.Metadata.Tuple, alignment: u32) *LLVM.DebugInfo.GlobalVariableExpression;
+pub extern fn NativityLLVMDebugInfoGlobalVariableAddDebugInfo(global_variable: *LLVM.Value.Constant.GlobalVariable, global_variable_expression: *LLVM.DebugInfo.GlobalVariableExpression) void;
 pub extern fn NativityLLVMDebugInfoBuilderCreateParameterVariable(builder: *LLVM.DebugInfo.Builder, scope: *LLVM.DebugInfo.Scope, name_ptr: [*]const u8, name_len: usize, argument_index: c_uint, file: *LLVM.DebugInfo.File, line_number: c_uint, type: *LLVM.DebugInfo.Type, always_preserve: bool, flags: LLVM.DebugInfo.Node.Flags) *LLVM.DebugInfo.LocalVariable;
 pub extern fn NativityLLVMDebugInfoBuilderCreateAutoVariable(builder: *LLVM.DebugInfo.Builder, scope: *LLVM.DebugInfo.Scope, name_ptr: [*]const u8, name_len: usize, file: *LLVM.DebugInfo.File, line_number: c_uint, type: *LLVM.DebugInfo.Type, always_preserve: bool, flags: LLVM.DebugInfo.Node.Flags, alignment: u32) *LLVM.DebugInfo.LocalVariable; // 0 means 1 << 0 (alignment of 1)
 pub extern fn NativityLLVMDebugInfoBuilderInsertDeclare(builder: *LLVM.DebugInfo.Builder, pointer: *LLVM.Value, local_variable: *LLVM.DebugInfo.LocalVariable, context: *LLVM.Context, line: c_uint, column: c_uint, scope: *LLVM.DebugInfo.Scope, basic_block: *LLVM.Value.BasicBlock) *LLVM.Value.Instruction;
@@ -47,6 +48,8 @@ pub extern fn NativityLLVMBasicBlockRemoveFromParent(basic_block: *LLVM.Value.Ba
 pub extern fn NativityLLVMBuilderSetInsertPoint(builder: *LLVM.Builder, basic_block: *LLVM.Value.BasicBlock) void;
 pub extern fn NativityLLVMBuilderGetInsertBlock(builder: *LLVM.Builder) *LLVM.Value.BasicBlock;
 pub extern fn NativityLLVMBuilderSetCurrentDebugLocation(builder: *LLVM.Builder, context: *LLVM.Context, line: c_uint, column: c_uint, scope: *LLVM.DebugInfo.Scope, function: *LLVM.Value.Constant.Function) void;
+pub extern fn NativityLLVMBuilderClearCurrentDebugLocation(builder: *LLVM.Builder) void;
+pub extern fn NativityLLVMBuilderSetInstructionDebugLocation(builder: *LLVM.Builder, instruction: *LLVM.Value.Instruction) void;
 pub extern fn NativityLLVMValueSetName(value: *LLVM.Value, name_ptr: [*]const u8, name_len: usize) void;
 pub extern fn NativityLLVMValueGetType(value: *LLVM.Value) *LLVM.Type;
 pub extern fn NativityLLVMValueGetContext(value: *LLVM.Value) *LLVM.Context;
@@ -75,6 +78,7 @@ pub extern fn NativityLLVMContextGetAttributeFromType(context: *LLVM.Context, at
 pub extern fn NativityLLVMContextGetAttributeSet(context: *LLVM.Context, attribute_ptr: ?[*]const *LLVM.Attribute, attribute_count: usize) *const LLVM.Attribute.Set;
 pub extern fn NativityLLVMFunctionSetAttributes(function: *LLVM.Value.Constant.Function, context: *LLVM.Context, function_attributes: *const LLVM.Attribute.Set, return_attributes: *const LLVM.Attribute.Set, parameter_attribute_set_ptr: [*]const *const LLVM.Attribute.Set, parameter_attribute_set_count: usize) void;
 pub extern fn NativityLLVMCallSetAttributes(call: *LLVM.Value.Instruction.Call, context: *LLVM.Context, function_attributes: *const LLVM.Attribute.Set, return_attributes: *const LLVM.Attribute.Set, parameter_attribute_set_ptr: [*]const *const LLVM.Attribute.Set, parameter_attribute_set_count: usize) void;
+pub extern fn NativityLLVMGlobalObjectSetAlignment(global_object: *LLVM.Value.Constant.GlobalObject, alignment: u32) void;
 // pub extern fn NativityLLVMFunctionAddAttributeKey(builder: *LLVM.Value.Constant.Function, attribute_key: LLVM.Attribute) void;
 pub extern fn NativityLLVMGetVoidType(context: *LLVM.Context) *LLVM.Type;
 pub extern fn NativityLLVMGetInlineAssembly(function_type: *LLVM.Type.Function, assembly_ptr: [*]const u8, assembly_len: usize, constraints_ptr: [*]const u8, constrains_len: usize, has_side_effects: bool, is_align_stack: bool, dialect: LLVM.Value.InlineAssembly.Dialect, can_throw: bool) *LLVM.Value.InlineAssembly;
