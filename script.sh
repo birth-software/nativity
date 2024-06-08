@@ -2,7 +2,7 @@
 
 set -ex
 
-MY_SOURCE_FILE=retest/standalone/first/main.nat
+MY_SOURCE_FILE=retest/standalone/call_other_file/main.nat
 
 i=$((0))
 while ((i < 1000)); do

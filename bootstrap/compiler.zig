@@ -91,7 +91,6 @@ const GlobalSymbol = struct{
     type: *Type,
     alignment: u32,
     value: Value,
-    file: u32,
     id: GlobalSymbol.Id,
 
     pub fn get_type(global_symbol: *GlobalSymbol) *Type {
@@ -255,17 +254,10 @@ const Parser = struct{
                     parser.skip_space(src);
                     parser.expect_character(src, '(');
                     parser.skip_space(src);
-                    const size_type = parser.parse_type_expression(thread, file);
+                    const size_type = parser.parse_type_expression(thread, file, analyzer.current_scope);
                     parser.skip_space(src);
                     parser.expect_character(src, ')');
-                    const constant_int = thread.constant_ints.append(.{
-                        .value = .{
-                            .sema = .{
-                                .thread = thread.get_index(),
-                                .resolved = size_type.sema.resolved,
-                                .id = .constant_int,
-                            },
-                        },
+                    const constant_int = create_constant_int(thread, .{
                         .n = size_type.size,
                         .type = ty orelse unreachable,
                     });
@@ -429,7 +421,7 @@ const Parser = struct{
         return integer;
     }
 
-    fn parse_type_expression(parser: *Parser, thread: *Thread, file: *File) *Type {
+    fn parse_type_expression(parser: *Parser, thread: *Thread, file: *File, current_scope: *Scope) *Type {
         const src = file.source_code;
         const starting_ch = src[parser.i];
         const is_array_start = starting_ch == '[';
@@ -496,7 +488,7 @@ const Parser = struct{
                     parser.expect_character(src, ']');
                     parser.skip_space(src);
 
-                    const element_type = parser.parse_type_expression(thread, file);
+                    const element_type = parser.parse_type_expression(thread, file, current_scope);
                     const array_type = get_array_type(thread, .{
                         .element_type = element_type,
                         .element_count = constant_int.n,
@@ -505,9 +497,27 @@ const Parser = struct{
                 },
                 else => |t| @panic(@tagName(t)),
             }
-        } else {
-            exit_with_error("Unrecognized type expression");
         }
+
+        const identifier = parser.parse_identifier(thread, src);
+        if (current_scope.get_declaration(identifier)) |lookup| {
+            switch (lookup.declaration.*.id) {
+                .global => {
+                    const global_declaration = lookup.declaration.*.get_payload(.global);
+                    switch (global_declaration.id) {
+                        .global_struct => {
+                            const global_struct = global_declaration.get_payload(.global_struct);
+                            return &global_struct.type;
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                },
+                else => |t| @panic(@tagName(t)),
+            }
+            unreachable;
+        }
+
+        exit_with_error("Unrecognized type expression");
     }
 
     fn parse_constant_integer(parser: *Parser, thread: *Thread, file: *File, ty: *Type) *ConstantInt {
@@ -550,14 +560,7 @@ const Parser = struct{
                         const slice = src[start..parser.i];
                         const number = parse_hex(slice);
 
-                        const constant_int = thread.constant_ints.append(.{
-                            .value = .{
-                                .sema = .{
-                                    .thread = thread.get_index(),
-                                    .resolved = true,
-                                    .id = .constant_int,
-                                },
-                            },
+                        const constant_int = create_constant_int(thread, .{
                             .n = number,
                             .type = ty,
                         });
@@ -573,14 +576,7 @@ const Parser = struct{
                 exit(1);
             } else if (is_valid_after_zero) {
                 parser.i += 1;
-                const constant_int = thread.constant_ints.append(.{
-                    .value = .{
-                        .sema = .{
-                            .thread = thread.get_index(),
-                            .resolved = true,
-                            .id = .constant_int,
-                        },
-                        },
+                const constant_int = create_constant_int(thread, .{
                     .n = 0,
                     .type = ty,
                 });
@@ -609,14 +605,7 @@ const Parser = struct{
             factor *= 10;
         }
 
-        const constant_int = thread.constant_ints.append(.{
-            .value = .{
-                .sema = .{
-                    .thread = thread.get_index(),
-                    .resolved = true,
-                    .id = .constant_int,
-                },
-                },
+        const constant_int = create_constant_int(thread, .{
             .n = integer,
             .type = ty,
         });
@@ -642,6 +631,80 @@ const Parser = struct{
                 // parse intrinsic
                 const value = parser.parse_intrinsic(analyzer, thread, file, maybe_type) orelse unreachable;
                 return value;
+            },
+            brace_open => {
+                parser.i += 1;
+
+                // This is a composite initialization
+                const ty = maybe_type orelse exit(1);
+                switch (ty.sema.id) {
+                    .global_struct => {
+                        const global_struct = ty.get_payload(.global_struct);
+
+                        var names_initialized = PinnedArray(u32){};
+                        var is_constant = true;
+                        var values = PinnedArray(*Value){};
+
+                        while (true) {
+                            parser.skip_space(src);
+
+                            if (src[parser.i] == brace_close) {
+                                break;
+                            }
+
+                            parser.expect_character(src, '.');
+                            const name = parser.parse_identifier(thread, src);
+                            for (names_initialized.const_slice()) |initialized_name| {
+                                if (initialized_name == name) {
+                                    exit(1);
+                                }
+                            }
+                            _ = names_initialized.append(name);
+                            const field_index = for (global_struct.fields) |field| {
+                                if (field.name == name) {
+                                    break field.index;
+                                }
+                            } else {
+                                exit(1);
+                            };
+                            const field_type = global_struct.fields[field_index].type;
+                            parser.skip_space(src);
+                            parser.expect_character(src, '=');
+                            parser.skip_space(src);
+                            const field_value = parser.parse_expression(analyzer, thread, file, field_type, .right);
+                            _ = values.append(field_value);
+                            is_constant = is_constant and field_value.is_constant();
+
+                            parser.skip_space(src);
+
+                            switch (src[parser.i]) {
+                                brace_close => {},
+                                ',' => parser.i += 1,
+                                else => exit(1),
+                            }
+                        }
+
+                        parser.i += 1;
+
+                        if (is_constant) {
+                            const constant_struct = thread.constant_structs.append(.{
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = true,
+                                        .id = .constant_struct,
+                                    },
+                                },
+                                .values = values.const_slice(),
+                                .type = ty,
+                            });
+                            return &constant_struct.value;
+                        } else {
+                            exit_with_error("TODO: runtime struct initialization");
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
             },
             '[' => {
                 // This is an array expression
@@ -882,6 +945,67 @@ const Parser = struct{
                                     else => |t| @panic(@tagName(t)),
                                 }
                             },
+                            .local => {
+                                parser.i += 1;
+
+                                const local_declaration = lookup_result.declaration.*.get_payload(.local);
+                                const local_symbol = local_declaration.to_symbol();
+                                switch (local_symbol.type.sema.id) {
+                                    .global_struct => {
+                                        const global_struct = local_symbol.type.get_payload(.global_struct);
+                                        const field_name = parser.parse_identifier(thread, src);
+                                        const field_index = for (global_struct.fields) |field| {
+                                            if (field.name == field_name) {
+                                                break field.index;
+                                            }
+                                        } else exit(1);
+
+                                        const index_value = create_constant_int(thread, .{
+                                            .type = &thread.integers[31].type,
+                                            .n = field_index,
+                                        });
+
+                                        const gep = thread.geps.append(.{
+                                            .instruction = new_instruction(thread, .{
+                                                .id = .get_element_pointer,
+                                                .line = debug_line,
+                                                .column = debug_column,
+                                                .scope = analyzer.current_scope,
+                                            }),
+                                            .pointer = &local_symbol.instruction.value,
+                                            .index = &index_value.value,
+                                            .aggregate_type = local_symbol.type,
+                                            .type = global_struct.fields[field_index].type,
+                                            .is_struct = true,
+                                        });
+                                        analyzer.append_instruction(&gep.instruction);
+
+                                        const result = switch (side) {
+                                            .right => block: {
+                                                const load = emit_load(analyzer, thread, .{
+                                                    .value = &gep.instruction.value,
+                                                    .type = gep.type,
+                                                    .scope = analyzer.current_scope,
+                                                    .line = debug_line,
+                                                    .column = debug_column,
+                                                });
+
+                                                break :block &load.instruction.value;
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        };
+                                        const result_type = result.get_type();
+                                        if (maybe_type) |ty| {
+                                            switch (typecheck(ty, result_type)) {
+                                                .success => {},
+                                            }
+                                        }
+
+                                        return result;
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+                            },
                             else => |t| @panic(@tagName(t)),
                         }
                     },
@@ -929,6 +1053,7 @@ const Parser = struct{
                             .pointer = declaration_value,
                             .index = index,
                             .type = declaration_element_type,
+                            .aggregate_type = declaration_type,
                             .is_struct = false,
                         });
                         analyzer.append_instruction(&gep.instruction);
@@ -1086,15 +1211,8 @@ const Parser = struct{
                         return switch (unary) {
                             .none => declaration_value,
                             .one_complement => block: {
-                                const operand = thread.constant_ints.append(.{
+                                const operand = create_constant_int(thread, .{
                                     .type = declaration_type,
-                                    .value = .{
-                                        .sema = .{
-                                            .thread = thread.get_index(),
-                                            .resolved = true,
-                                            .id = .constant_int,
-                                        },
-                                    },
                                     .n = std.math.maxInt(u64),
                                 });
                                 const xor = thread.integer_binary_operations.append(.{
@@ -1779,6 +1897,7 @@ const Value = struct {
         argument,
         basic_block,
         constant_array,
+        constant_struct,
         constant_int,
         instruction,
         global_symbol,
@@ -1789,6 +1908,7 @@ const Value = struct {
         .argument = ArgumentSymbol,
         .basic_block = BasicBlock,
         .constant_array = ConstantArray,
+        .constant_struct = ConstantStruct,
         .constant_int = ConstantInt,
         .global_symbol = GlobalSymbol,
         .instruction = Instruction,
@@ -1874,6 +1994,7 @@ const Type = struct {
         array,
         pointer,
         function,
+        global_struct,
     };
 
     const Integer = struct {
@@ -1903,6 +2024,22 @@ const Type = struct {
         return_type: *Type,
     };
 
+    const GlobalStruct = struct {
+        type: Type,
+        global_declaration: GlobalDeclaration,
+        fields: []const *AggregateField,
+    };
+
+    const AggregateField = struct{
+        type: *Type,
+        parent: *Type,
+        member_offset: u64,
+        name: u32,
+        index: u32,
+        line: u32,
+        column: u32,
+    };
+
     const id_to_type_map = std.EnumArray(Id, type).init(.{
         .unresolved = void,
         .void = void,
@@ -1910,11 +2047,53 @@ const Type = struct {
         .array = Array,
         .pointer = void,
         .function = Type.Function,
+        .global_struct = Type.GlobalStruct,
     });
 
     fn get_payload(ty: *Type, comptime id: Id) *id_to_type_map.get(id) {
         assert(ty.sema.id == id);
         return @fieldParentPtr("type", ty);
+    }
+
+    fn clone(ty: *Type, args: struct{
+        destination_thread: *Thread,
+        source_thread_index: u16,
+    }) *Type {
+        assert(ty.sema.resolved);
+        assert(ty.sema.thread == args.source_thread_index);
+
+        switch (ty.sema.id) {
+            .function => {
+                const source_function_type = ty.get_payload(.function);
+                const return_type = source_function_type.return_type.clone(.{
+                    .destination_thread = args.destination_thread,
+                    .source_thread_index = args.source_thread_index,
+                });
+                var argument_types = PinnedArray(*Type){};
+                for (source_function_type.argument_types) |argument_type| {
+                    const new = argument_type.clone(.{
+                        .destination_thread = args.destination_thread,
+                        .source_thread_index = args.source_thread_index,
+                    });
+                    _ = argument_types.append(new);
+                }
+                const function_type = args.destination_thread.function_types.append(.{
+                    .type = source_function_type.type,
+                    .argument_types = argument_types.const_slice(),
+                    .return_type = return_type,
+                });
+                function_type.type.llvm = null;
+                function_type.type.sema.thread = args.destination_thread.get_index();
+                return &function_type.type;
+            },
+            .integer => {
+                const source_thread = &instance.threads[args.source_thread_index];
+                const source_integer_type = ty.get_payload(.integer);
+                const index = @divExact(@intFromPtr(source_integer_type) - @intFromPtr(&source_thread.integers), @sizeOf(Type.Integer));
+                return &args.destination_thread.integers[index].type;
+            },
+            else => |t| @panic(@tagName(t)),
+        }
     }
 };
 
@@ -1951,10 +2130,11 @@ fn parse_keyword(identifier: []const u8) u32 {
 
 const Scope = struct {
     declarations: PinnedHashMap(u32, *Declaration) = .{},
-    line: u32,
-    column: u32,
     parent: ?*Scope,
     llvm: ?*LLVM.DebugInfo.Scope = null,
+    line: u32,
+    column: u32,
+    file: u32,
     id: Id,
 
     pub fn get_global_declaration(scope: *Scope, name: u32) ?*GlobalDeclaration {
@@ -2026,6 +2206,7 @@ const GlobalDeclaration = struct {
         file,
         unresolved_import,
         global_symbol,
+        global_struct,
         // global_variable,
     };
 
@@ -2034,6 +2215,7 @@ const GlobalDeclaration = struct {
         // .function_declaration = Function.Declaration,
         .file = File,
         .global_symbol = GlobalSymbol,
+        .global_struct = Type.GlobalStruct,
         // .global_variable = GlobalVariable,
         .unresolved_import = Import,
     });
@@ -2130,6 +2312,33 @@ const Function = struct{
             const function_type = ty.get_payload(.function);
             return function_type;
         }
+
+        fn clone(declaration: Function.Declaration, destination_thread: *Thread) *Function.Declaration{
+            assert(declaration.global_symbol.value.sema.resolved);
+
+            const source_thread_index = declaration.global_symbol.value.sema.thread;
+            const source_thread = &instance.threads[source_thread_index];
+            assert(source_thread != destination_thread);
+
+            const result = destination_thread.external_functions.append(.{
+                .global_symbol = .{
+                    .type = declaration.global_symbol.type.clone(.{
+                        .destination_thread = destination_thread,
+                        .source_thread_index = source_thread_index,
+                    }),
+                    .attributes = declaration.global_symbol.attributes,
+                    .global_declaration = declaration.global_symbol.global_declaration,
+                    .alignment = declaration.global_symbol.alignment,
+                    .value = declaration.global_symbol.value,
+                    .id = declaration.global_symbol.id,
+                },
+            });
+            result.global_symbol.attributes.@"export" = false;
+            result.global_symbol.attributes.@"extern" = true;
+            result.global_symbol.value.sema.thread = destination_thread.get_index();
+            result.global_symbol.value.llvm = null;
+            return result;
+        }
     };
 
     const Scope = struct {
@@ -2150,6 +2359,12 @@ const ConstantInt = struct{
 };
 
 const ConstantArray = struct{
+    value: Value,
+    values: []const *Value,
+    type: *Type,
+};
+
+const ConstantStruct = struct{
     value: Value,
     values: []const *Value,
     type: *Type,
@@ -2215,6 +2430,7 @@ const GEP = struct {
     instruction: Instruction,
     pointer: *Value,
     index: *Value,
+    aggregate_type: *Type,
     type: *Type,
     is_struct: bool,
 };
@@ -2372,7 +2588,6 @@ const Import = struct {
 
 const LocalBlock = struct {
     scope: Scope,
-    file: u32,
     terminated: bool = false,
 };
 
@@ -2412,6 +2627,7 @@ const Thread = struct{
     identifiers: PinnedHashMap(u32, []const u8) = .{},
     constant_ints: PinnedArray(ConstantInt) = .{},
     constant_arrays: PinnedArray(ConstantArray) = .{},
+    constant_structs: PinnedArray(ConstantStruct) = .{},
     basic_blocks: PinnedArray(BasicBlock) = .{},
     task_system: TaskSystem = .{},
     debug_info_file_map: PinnedHashMap(u32, LLVMFile) = .{},
@@ -2440,6 +2656,8 @@ const Thread = struct{
     function_types: PinnedArray(Type.Function) = .{},
     array_type_map: PinnedHashMap(Type.Array.Descriptor, *Type) = .{},
     array_types: PinnedArray(Type.Array) = .{},
+    global_structs: PinnedArray(Type.GlobalStruct) = .{},
+    fields: PinnedArray(Type.AggregateField) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -2746,6 +2964,7 @@ fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) u32
                 .parent = null,
                 .line = 1,
                 .column = 1,
+                .file = new_file_index,
             },
         },
         .source_code = &.{},
@@ -3403,6 +3622,12 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
     const thread = &instance.threads[thread_index];
     thread.arena = Arena.init(4 * 1024 * 1024) catch unreachable;
 
+    for (&thread.integers) |*integer| {
+        integer.type.sema.thread = @intCast(thread_index);
+    }
+    thread.pointer.sema.thread = @intCast(thread_index);
+    thread.void.sema.thread = @intCast(thread_index);
+
     while (true) {
         while (thread.get_worker_job()) |job| {
             const c = thread.task_system.job.worker.completed;
@@ -3461,6 +3686,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                                                 assert(names.len == 1);
                                                                                 const file_declaration = declaration_reference.*.get_payload(.file);
                                                                                 assert(file_declaration == file);
+
                                                                                 if (file.scope.scope.declarations.get(names[0])) |callable_declaration| {
                                                                                     const global_declaration = callable_declaration.get_payload(.global);
                                                                                     switch (global_declaration.id) {
@@ -3469,16 +3695,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                                                             switch (global_symbol.id) {
                                                                                                 .function_definition => {
                                                                                                     const function_definition = global_symbol.get_payload(.function_definition);
-                                                                                                    assert(function_definition.declaration.global_symbol.value.sema.resolved);
-                                                                                                    assert(function_definition.declaration.global_symbol.value.sema.resolved);
-                                                                                                    const function_type = function_definition.declaration.get_type();
-                                                                                                    assert(function_type.return_type.sema.thread == thread.get_index());
-                                                                                                    // // TODO: here we are duplicating the function declaration, but not the types. It could be interesting to duplicate the types so in the LLVM IR no special case has to take place to deduplicate work done in different threads
-                                                                                                    const external_fn = thread.external_functions.append(function_definition.declaration);
-                                                                                                    external_fn.global_symbol.attributes.@"export" = false;
-                                                                                                    external_fn.global_symbol.attributes.@"extern" = true;
-                                                                                                    external_fn.global_symbol.value.sema.thread = thread.get_index();
-                                                                                                    external_fn.global_symbol.value.llvm = null;
+                                                                                                    const external_fn = function_definition.declaration.clone(thread);
                                                                                                     
                                                                                                     call.callable = &external_fn.global_symbol.value;
                                                                                                     value.sema.resolved = true;
@@ -3648,7 +3865,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             nat_global.global_symbol.value.llvm = global_variable.toValue();
 
                             if (thread.generate_debug_information) {
-                                const file_index = nat_global.global_symbol.file;
+                                const file_index = nat_global.global_symbol.global_declaration.declaration.scope.file;
                                 const file_struct = llvm_get_file(thread, file_index);
                                 const file = file_struct.file;
                                 const scope = file.toScope();
@@ -3668,7 +3885,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                         for (thread.functions.slice()) |*nat_function| {
                             const function = nat_function.declaration.global_symbol.value.llvm.?.toFunction() orelse unreachable;
-                            const file_index = nat_function.declaration.global_symbol.file;
+                            const file_index = nat_function.declaration.global_symbol.global_declaration.declaration.scope.file;
                             var basic_block_command_buffer = BasicBlock.CommandList{};
                             var emit_allocas = true;
                             {
@@ -3987,14 +4204,14 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         },
                                         .get_element_pointer => block: {
                                             const gep = instruction.get_payload(.get_element_pointer);
-                                            const base_type = llvm_get_type(thread, gep.type);
+                                            const aggregate_type = llvm_get_type(thread, gep.aggregate_type);
                                             const pointer = llvm_get_value(thread, gep.pointer);
                                             const in_bounds = true;
                                             const index = llvm_get_value(thread, gep.index);
                                             const struct_index = context.getConstantInt(@bitSizeOf(u32), 0, false);
                                             const index_buffer = [2]*LLVM.Value{ struct_index.toValue(), index };
                                             const indices = index_buffer[@intFromBool(!gep.is_struct)..];
-                                            const get_element_pointer = builder.createGEP(base_type, pointer, indices.ptr, indices.len, "".ptr, "".len, in_bounds);
+                                            const get_element_pointer = builder.createGEP(aggregate_type, pointer, indices.ptr, indices.len, "".ptr, "".len, in_bounds);
                                             break :block get_element_pointer;
                                         },
                                         else => |t| @panic(@tagName(t)),
@@ -4151,6 +4368,17 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
                 const result = array_type.toArray().?.getConstant(values.pointer, values.length);
                 break :b result.toValue();
             },
+            .constant_struct => b: {
+                const constant_struct = value.get_payload(.constant_struct);
+                const struct_type = llvm_get_type(thread, constant_struct.type);
+                var values = PinnedArray(*LLVM.Value.Constant){};
+                for (constant_struct.values) |v| {
+                    const val = llvm_get_value(thread, v);
+                    _ = values.append(val.toConstant() orelse unreachable);
+                }
+                const result = struct_type.toStruct().?.getConstant(values.pointer, values.length);
+                break :b result.toValue();
+            },
             .instruction => {
                 const instruction = value.get_payload(.instruction);
                 switch (instruction.id) {
@@ -4231,6 +4459,62 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                 const pointer_type = builder.createPointerType(element_type, pointer_width, alignment, "*dummyptr", "*dummyptr".len);
                 break :block pointer_type.toType();
             },
+            .global_struct => block: {
+                const nat_struct_type = ty.get_payload(.global_struct);
+                const file_struct = llvm_get_file(thread, nat_struct_type.global_declaration.declaration.scope.file);
+                const flags = LLVM.DebugInfo.Node.Flags{
+                    .visibility = .none,
+                    .forward_declaration = false,
+                    .apple_block = false,
+                    .block_by_ref_struct = false,
+                    .virtual = false,
+                    .artificial = false,
+                    .explicit = false,
+                    .prototyped = false,
+                    .objective_c_class_complete = false,
+                    .object_pointer = false,
+                    .vector = false,
+                    .static_member = false,
+                    .lvalue_reference = false,
+                    .rvalue_reference = false,
+                    .reserved = false,
+                    .inheritance = .none,
+                    .introduced_virtual = false,
+                    .bit_field = false,
+                    .no_return = false,
+                    .type_pass_by_value = false,
+                    .type_pass_by_reference = false,
+                    .enum_class = false,
+                    .thunk = false,
+                    .non_trivial = false,
+                    .big_endian = false,
+                    .little_endian = false,
+                    .all_calls_described = false,
+                };
+                const file = file_struct.file;
+                const name = thread.identifiers.get(nat_struct_type.global_declaration.declaration.name).?;
+                const line = nat_struct_type.global_declaration.declaration.line;
+
+                const bitsize = nat_struct_type.type.size * 8;
+                const alignment = nat_struct_type.type.alignment;
+                var member_types = PinnedArray(*LLVM.DebugInfo.Type){};
+
+                const struct_type = builder.createStructType(file.toScope(), name.ptr, name.len, file, line, bitsize, alignment, flags, null, member_types.pointer, member_types.length, null);
+                ty.llvm_debug = struct_type.toType();
+
+                for (nat_struct_type.fields) |field| {
+                    const field_type = llvm_get_debug_type(thread, builder, field.type, null);
+                    const field_name = thread.identifiers.get(field.name).?;
+                    const field_bitsize = field.type.size * 8;
+                    const field_alignment = field.type.alignment * 8;
+                    const field_offset = field.member_offset * 8;
+                    const member_type = builder.createMemberType(file.toScope(), field_name.ptr, field_name.len, file, field.line, field_bitsize, field_alignment, field_offset, flags, field_type);
+                    _ = member_types.append(member_type.toType());
+                }
+
+                builder.replaceCompositeTypes(struct_type, member_types.pointer, member_types.length);
+                break :block struct_type.toType();
+            },
             else => |t| @panic(@tagName(t)),
         };
 
@@ -4275,8 +4559,24 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
                 const function_type = LLVM.getFunctionType(return_type, argument_types.pointer, argument_types.length, is_var_args);
                 break :b function_type.toType();
             },
+            .global_struct => b: {
+                const nat_struct_type = ty.get_payload(.global_struct);
+                var struct_types = PinnedArray(*LLVM.Type){};
+                for (nat_struct_type.fields) |field| {
+                    const field_type = llvm_get_type(thread, field.type);
+                    _ = struct_types.append(field_type);
+                }
+
+                const types = struct_types.const_slice();
+                const is_packed = false;
+                const name = thread.identifiers.get(nat_struct_type.global_declaration.declaration.name).?;
+                const struct_type = thread.llvm.context.createStructType(types.ptr, types.len, name.ptr, name.len, is_packed);
+                break :b struct_type.toType();
+            },
             else => |t| @panic(@tagName(t)),
         };
+
+        ty.llvm = llvm_type;
 
         return llvm_type;
     }
@@ -4324,7 +4624,7 @@ fn llvm_get_scope(thread: *Thread, scope: *Scope) *LLVM.DebugInfo.Scope {
         const llvm_scope = switch (scope.id) {
             .local => block: {
                 const local_block: *LocalBlock = @fieldParentPtr("scope", scope);
-                const file = llvm_get_file(thread, local_block.file);
+                const file = llvm_get_file(thread, local_block.scope.file);
                 const parent_scope = llvm_get_scope(thread, scope.parent.?);
                 const lexical_block = file.builder.createLexicalBlock(parent_scope, file.file, scope.line, scope.column);
                 break :block lexical_block.toScope();
@@ -4350,7 +4650,7 @@ fn llvm_emit_function_declaration(thread: *Thread, nat_function: *Function.Decla
     const function = thread.llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, function_name.ptr, function_name.len);
 
     if (thread.generate_debug_information) {
-        const file_index = nat_function.global_symbol.file;
+        const file_index = nat_function.global_symbol.global_declaration.declaration.scope.file;
         const llvm_file = llvm_get_file(thread, file_index);
         var debug_argument_types = PinnedArray(*LLVM.DebugInfo.Type){};
         _ = &debug_argument_types;
@@ -4420,6 +4720,25 @@ fn llvm_emit_function_declaration(thread: *Thread, nat_function: *Function.Decla
     nat_function.global_symbol.value.llvm = function.toValue();
 }
 
+fn create_constant_int(thread: *Thread, args: struct {
+    n: u64,
+    type: *Type,
+    resolved: bool = true,
+}) *ConstantInt {
+    const constant_int = thread.constant_ints.append(.{
+        .value = .{
+            .sema = .{
+                .thread = thread.get_index(),
+                .resolved = args.resolved,
+                .id = .constant_int,
+            },
+            },
+        .n = args.n,
+        .type = args.type,
+    });
+    return constant_int;
+}
+
 fn create_basic_block(thread: *Thread) *BasicBlock {
     const block = thread.basic_blocks.append(.{
         .value = .{
@@ -4465,8 +4784,8 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
             .parent = analyzer.current_scope,
             .line = block_line,
             .column = @intCast(block_column),
+            .file = file.scope.scope.file,
         },
-        .file = instance.files.get_index(file),
     });
     analyzer.current_scope = &local_block.scope;
     parser.skip_space(src);
@@ -4517,7 +4836,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
                         parser.skip_space(src);
 
-                        const local_type = parser.parse_type_expression(thread, file);
+                        const local_type = parser.parse_type_expression(thread, file, analyzer.current_scope);
 
                         parser.skip_space(src);
                         parser.expect_character(src, '=');
@@ -5014,7 +5333,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                 parser.skip_space(src);
 
-                const global_type = parser.parse_type_expression(thread, file);
+                const global_type = parser.parse_type_expression(thread, file, &file.scope.scope);
 
                 parser.skip_space(src);
 
@@ -5048,7 +5367,6 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         .alignment = global_type.alignment,
                         .id = .global_variable,
                         .type = global_type,
-                        .file = file_index,
                     },
                     .initial_value = global_initial_value,
                 });
@@ -5085,7 +5403,6 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 },
                                 .id = .function_definition,
                                 .type = undefined,
-                                .file = file_index,
                             },
                         },
                         .scope = .{
@@ -5094,6 +5411,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 .parent = &file.scope.scope,
                                 .line = declaration_line + 1,
                                 .column = declaration_column + 1,
+                                .file = file_index,
                             },
                         },
                         .entry_block = entry_block,
@@ -5261,7 +5579,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                         parser.skip_space(src);
                         
-                        const argument_type = parser.parse_type_expression(thread, file);
+                        const argument_type = parser.parse_type_expression(thread, file, analyzer.current_scope);
                         _ = arguments.append(.{
                             .type = argument_type,
                             .name = argument_name,
@@ -5283,7 +5601,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     parser.skip_space(src);
 
-                    const return_type = parser.parse_type_expression(thread, file);
+                    const return_type = parser.parse_type_expression(thread, file, analyzer.current_scope);
 
                     const function_type = thread.function_types.append(.{
                         .type = .{
@@ -5445,6 +5763,94 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             .count = @intCast(file_index),
                         });
                     }
+                } else {
+                    exit(1);
+                }
+            },
+            's' => {
+                const lead_identifier = parser.parse_raw_identifier(src);
+                if (byte_equal(lead_identifier, "struct")) {
+                    parser.skip_space(src);
+
+                    const struct_name = parser.parse_identifier(thread, src);
+                    const struct_type = thread.global_structs.append(.{
+                        .type = .{
+                            .sema = .{
+                                .id = .global_struct,
+                                .thread = thread.get_index(),
+                                .resolved = true,
+                            },
+                            .size = 0,
+                            .alignment = 1,
+                        },
+                        .global_declaration = .{
+                            .declaration = .{
+                                .name = struct_name,
+                                .id = .global,
+                                .line = declaration_line,
+                                .column = declaration_column,
+                                .scope = &file.scope.scope,
+                            },
+                            .id = .global_struct,
+                        },
+                        .fields = &.{},
+                    });
+                    file.scope.scope.declarations.put_no_clobber(struct_name, &struct_type.global_declaration.declaration);
+
+                    parser.skip_space(src);
+
+                    parser.expect_character(src, brace_open);
+
+                    var fields = PinnedArray(*Type.AggregateField){};
+
+                    while (true) {
+                        parser.skip_space(src);
+
+                        if (src[parser.i] == brace_close) {
+                            break;
+                        }
+
+                        const field_line = parser.get_debug_line();
+                        const field_column = parser.get_debug_column();
+                        const field_name = parser.parse_identifier(thread, src);
+
+                        parser.skip_space(src);
+
+                        parser.expect_character(src, ':');
+
+                        parser.skip_space(src);
+
+                        const field_type = parser.parse_type_expression(thread, file, &file.scope.scope);
+                                        //
+                        struct_type.type.alignment = @max(struct_type.type.alignment, field_type.alignment);
+                        const aligned_offset = library.align_forward(struct_type.type.size, field_type.alignment);
+                        const field = thread.fields.append(.{
+                            .type = field_type,
+                            .parent = &struct_type.type,
+                            .name = field_name,
+                            .index = thread.fields.length,
+                            .line = field_line,
+                            .column = field_column,
+                            .member_offset = aligned_offset,
+                        });
+                        _ = fields.append(field);
+                        struct_type.type.size = aligned_offset + field.type.size;
+
+                        parser.skip_space(src);
+
+                        switch (src[parser.i]) {
+                            ',' => parser.i += 1,
+                            '=' => {
+                                exit_with_error("TODO: field default value");
+                            },
+                            else => exit(1),
+                        }
+                    }
+
+                    parser.i += 1;
+
+                    struct_type.type.size = library.align_forward(struct_type.type.size, struct_type.type.alignment);
+                    struct_type.fields = fields.const_slice();
                 } else {
                     exit(1);
                 }
@@ -5692,14 +6098,7 @@ fn emit_condition(analyzer: *Analyzer, thread: *Thread, args: struct {
             if (integer_ty.bit_count == 1) {
                 break :int args.condition;
             } else {
-                const zero = thread.constant_ints.append(.{
-                    .value = .{
-                        .sema = .{
-                            .thread = thread.get_index(),
-                            .resolved = true,
-                            .id = .constant_int,
-                        },
-                    },
+                const zero = create_constant_int(thread, .{
                     .n = 0,
                     .type = condition_type,
                 });
@@ -5802,6 +6201,7 @@ pub const LLVM = struct {
         const getIntegerType = bindings.NativityLLVMGetIntegerType;
         const getPointerType = bindings.NativityLLVMGetPointerType;
         const getStructType = bindings.NativityLLVMGetStructType;
+        const createStructType = bindings.NativityLLVMCreateStructType;
         const getIntrinsicType = bindings.NativityLLVMContextGetIntrinsicType;
         const getAttributeFromEnum = bindings.NativityLLVMContextGetAttributeFromEnum;
         const getAttributeFromString = bindings.NativityLLVMContextGetAttributeFromString;

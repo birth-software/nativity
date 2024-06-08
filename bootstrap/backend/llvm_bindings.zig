@@ -11,6 +11,7 @@ pub extern fn NativityLLVMGetPointerType(context: *LLVM.Context, address_space: 
 pub extern fn NativityLLVMPointerTypeGetNull(pointer_type: *LLVM.Type.Pointer) *LLVM.Value.Constant.PointerNull;
 pub extern fn NativityLLVMGetArrayType(element_type: *LLVM.Type, element_count: u64) *LLVM.Type.Array;
 pub extern fn NativityLLVMGetStructType(context: *LLVM.Context, type_ptr: [*]const *LLVM.Type, type_count: usize, is_packed: bool) *LLVM.Type.Struct;
+pub extern fn NativityLLVMCreateStructType(context: *LLVM.Context, type_pointer: [*]const *LLVM.Type, type_count: usize, name_pointer: [*]const u8, name_length: usize, is_packed: bool) *LLVM.Type.Struct;
 pub extern fn NativityLLVMConstantStruct(struct_type: *LLVM.Type.Struct, constant_ptr: [*]const *LLVM.Value.Constant, constant_count: usize) *LLVM.Value.Constant;
 pub extern fn NativityLLVMModuleGetFunction(module: *LLVM.Module, name_ptr: [*]const u8, name_len: usize) ?*LLVM.Value.Constant.Function;
 pub extern fn NativityLLVModuleCreateFunction(module: *LLVM.Module, function_type: *LLVM.Type.Function, linkage: LLVM.Linkage, address_space: c_uint, name_ptr: [*]const u8, name_len: usize) *LLVM.Value.Constant.Function;
