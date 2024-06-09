@@ -1,0 +1,4 @@
+fn[cc(.c)] main[export]() s32
+{
+    return 0;
+}

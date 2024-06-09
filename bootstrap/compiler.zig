@@ -3069,6 +3069,7 @@ const Job = packed struct(u64) {
         llvm_optimize,
         llvm_emit_object,
         llvm_notify_object_done,
+        compile_c_source_file,
     };
 };
 
@@ -3322,6 +3323,7 @@ const Unit = struct {
         main_source_file_path: []const u8,
         executable_path: []const u8,
         object_path: []const u8,
+        c_source_files: []const []const u8,
         target: Target,
         optimization: Optimization,
         generate_debug_information: bool,
@@ -3336,34 +3338,50 @@ const Unit = struct {
             .descriptor = descriptor,
         };
 
-        switch (unit.descriptor.target.arch) {
-            inline else => |a| {
-                const arch = @field(LLVM, @tagName(a));
-                arch.initializeTarget();
-                arch.initializeTargetInfo();
-                arch.initializeTargetMC();
-                arch.initializeAsmPrinter();
-                arch.initializeAsmParser();
-            },
+        if (descriptor.c_source_files.len > 0) {
+            LLVM.initializeAll();
+        } else {
+            switch (unit.descriptor.target.arch) {
+                inline else => |a| {
+                    const arch = @field(LLVM, @tagName(a));
+                    arch.initializeTarget();
+                    arch.initializeTargetInfo();
+                    arch.initializeTargetMC();
+                    arch.initializeAsmPrinter();
+                    arch.initializeAsmParser();
+                },
+            }
         }
-
 
         const main_source_file_absolute = instance.path_from_cwd(instance.arena, unit.descriptor.main_source_file_path);
         const new_file_index = add_file(main_source_file_absolute, &.{});
-        instance.threads[0].task_system.program_state = .analysis;
-        instance.threads[0].add_thread_work(Job{
+        var last_assigned_thread_index: u32 = 0;
+        instance.threads[last_assigned_thread_index].task_system.program_state = .analysis;
+        instance.threads[last_assigned_thread_index].add_thread_work(Job{
             .offset = new_file_index,
             .count = 1,
             .id = .analyze_file,
         });
-        control_thread(unit);
+        last_assigned_thread_index += 1;
+
+        for (descriptor.c_source_files, 0..) |_, index| {
+            const thread_index = last_assigned_thread_index % instance.threads.len;
+            instance.threads[thread_index].add_thread_work(Job{
+                .offset = @intCast(index),
+                .count = 1,
+                .id = .compile_c_source_file,
+            });
+            last_assigned_thread_index += 1;
+        }
+
+        control_thread(unit, last_assigned_thread_index);
 
         return unit;
     }
 };
 
-fn control_thread(unit: *Unit) void {
-    var last_assigned_thread_index: u32 = 1;
+fn control_thread(unit: *Unit, lati: u32) void {
+    var last_assigned_thread_index: u32 = lati;
     var first_ir_done = false;
     var total_is_done: bool = false;
     var iterations_without_work_done: u32 = 0;
@@ -3613,6 +3631,7 @@ fn command_exe(arguments: []const []const u8) void {
         .main_source_file_path = main_source_file_path,
         .object_path = object_path,
         .executable_path = executable_path,
+        .c_source_files = &.{},
         .optimization = optimization,
         .generate_debug_information = generate_debug_information,
         .codegen_backend = .{
@@ -6650,6 +6669,7 @@ fn get_array_type(thread: *Thread, descriptor: Type.Array.Descriptor) *Type {
 
 pub const LLVM = struct {
     const bindings = @import("backend/llvm_bindings.zig");
+    pub const initializeAll = bindings.NativityLLVMInitializeAll;
     pub const x86_64 = struct {
         pub const initializeTarget = bindings.LLVMInitializeX86Target;
         pub const initializeTargetInfo = bindings.LLVMInitializeX86TargetInfo;

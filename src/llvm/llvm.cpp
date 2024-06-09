@@ -25,6 +25,15 @@ using namespace llvm;
 using llvm::orc::ThreadSafeContext;
 using llvm::orc::ThreadSafeModule;
 
+extern "C" void NativityLLVMInitializeAll()
+{
+    InitializeAllTargetInfos();
+    InitializeAllTargets();
+    InitializeAllTargetMCs();
+    InitializeAllAsmParsers();
+    InitializeAllAsmPrinters();
+}
+
 extern "C" LLVMContext* NativityLLVMCreateContext()
 {
     auto* context = new LLVMContext();
@@ -940,14 +949,6 @@ extern "C" void NativityLLVMCallSetCallingConvention(CallBase& call_instruction,
     call_instruction.setCallingConv(calling_convention);
 }
 
-extern "C" void NativityLLVMInitializeCodeGeneration()
-{
-    InitializeAllTargetInfos();
-    InitializeAllTargets();
-    InitializeAllTargetMCs();
-    InitializeAllAsmParsers();
-    InitializeAllAsmPrinters();
-}
 
 extern "C" const Target* NativityLLVMGetTarget(const char* target_triple_ptr, size_t target_triple_len, const char** message_ptr, size_t* message_len)
 {
