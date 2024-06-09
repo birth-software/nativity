@@ -1,0 +1,7 @@
+fn[cc(.c)] main[export]() s32 {
+    return foo();
+}
+
+fn foo() s32 {
+    return 0;
+}
