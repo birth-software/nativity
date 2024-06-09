@@ -23,12 +23,13 @@ fn exit(exit_code: u8) noreturn {
     std.posix.exit(exit_code);
 }
 
-fn is_space(ch: u8) bool {
+fn is_space(ch: u8, next_ch: u8) bool {
+    const is_comment = ch == '/' and next_ch == '/';
     const is_whitespace = ch == ' ';
     const is_tab = ch == '\t';
     const is_line_feed = ch == '\n';
     const is_carry_return = ch == '\r';
-    const result = (is_whitespace or is_tab) or (is_line_feed or is_carry_return);
+    const result = (is_whitespace or is_tab) or (is_line_feed or is_carry_return) or is_comment;
     return result;
 }
 
@@ -186,10 +187,24 @@ const Parser = struct{
         return @intCast(parser.i - parser.column + 1);
     }
 
+    fn safe_flag(value: anytype, boolean: bool) @TypeOf(value) {
+        const result = value & (@as(@TypeOf(value), 0) -% @intFromBool(boolean));
+        return result;
+    }
+
+    fn get_next_ch_safe(file: []const u8, index: u64) u8 {
+        const next_index = index + 1;
+        const is_in_range = next_index < file.len;
+        const safe_index = safe_flag(next_index, is_in_range);
+        const unsafe_result = file[safe_index];
+        const safe_result = safe_flag(unsafe_result, is_in_range);
+        return safe_result;
+    }
+
     fn skip_space(parser: *Parser, file: []const u8) void {
         const original_i = parser.i;
 
-        if (original_i == file.len or !is_space(file[original_i])) return;
+        if (original_i == file.len or !is_space(file[original_i], get_next_ch_safe(file, original_i))) return;
 
         while (parser.i < file.len) : (parser.i += 1) {
             const ch = file[parser.i];
@@ -200,8 +215,21 @@ const Parser = struct{
                 parser.column = @intCast(parser.i + 1);
             }
 
-            if (!is_space(ch)) {
+            if (!is_space(ch, get_next_ch_safe(file, parser.i))) {
                 return;
+            }
+
+            if (file[parser.i] == '/') {
+                parser.i += 2;
+
+                while (parser.i < file.len) : (parser.i += 1) {
+                    const is_line_feed = file[parser.i] == '\n';
+                    if (is_line_feed) {
+                        break;
+                    }
+                }
+
+                if (parser.i == file.len) break;
             }
         }
     }
@@ -626,7 +654,7 @@ const Parser = struct{
             const is_prefixed_start = is_hex_start or is_octal_start or is_bin_start;
             const follow_up_alpha = is_alphabetic(follow_up_character);
             const follow_up_digit = is_decimal_digit(follow_up_character);
-            const is_valid_after_zero = is_space(follow_up_character) or (!follow_up_digit and !follow_up_alpha);
+            const is_valid_after_zero = is_space(follow_up_character, get_next_ch_safe(src, follow_up_character)) or (!follow_up_digit and !follow_up_alpha);
 
             if (is_prefixed_start) {
                 const Prefix = enum {

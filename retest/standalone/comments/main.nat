@@ -1,0 +1,9 @@
+// comment
+fn[cc(.c)] 
+// comment
+main[export]() 
+// comment
+s32 { // comment
+// comment
+    return 0; // comment
+} // comment
