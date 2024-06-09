@@ -93,9 +93,9 @@ pub fn build(b: *std.Build) !void {
     const cpp_files = .{
         "src/llvm/llvm.cpp",
         "src/llvm/lld.cpp",
-        // "src/llvm/clang_main.cpp",
-        // "src/llvm/clang_cc1.cpp",
-        // "src/llvm/clang_cc1as.cpp",
+        "src/llvm/clang_main.cpp",
+        "src/llvm/clang_cc1.cpp",
+        "src/llvm/clang_cc1as.cpp",
         // "src/llvm/ar.cpp",
     };
 
@@ -108,10 +108,11 @@ pub fn build(b: *std.Build) !void {
             "-D__STDC_FORMAT_MACROS",
             "-D__STDC_LIMIT_MACROS",
             "-D_GNU_SOURCE",
-            "-fvisibility-inlines-hidden",
             "-fno-exceptions",
             "-fno-rtti",
-            "-Werror=type-limits",
+            "-fno-stack-protector",
+            "-fvisibility-inlines-hidden",
+            "-Wno-type-limits",
             "-Wno-missing-braces",
             "-Wno-comment",
         },
@@ -429,7 +430,7 @@ pub fn build(b: *std.Build) !void {
         }
     } else {
         compiler.linkSystemLibrary("LLVM");
-        // compiler.linkSystemLibrary("clang-cpp");
+        compiler.linkSystemLibrary("clang-cpp");
         compiler.linkSystemLibrary("lldCommon");
         compiler.linkSystemLibrary("lldCOFF");
         compiler.linkSystemLibrary("lldELF");
