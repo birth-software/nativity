@@ -32,12 +32,14 @@ jobs:
           sudo apt install liblld-$NAT_LLVM_VERSION-dev libclang-$NAT_LLVM_VERSION-dev liblld-$NAT_LLVM_VERSION ninja-build cmake -y
       - name: Build
         run: |
+          set -ex
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=Debug
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSafe
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSmall
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseFast
       - name: Test
         run: |
+          set -ex
           $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=Debug
           $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSafe
           $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSmall
@@ -58,12 +60,14 @@ jobs:
           brew install llvm@$NAT_LLVM_VERSION ninja
       - name: Build
         run: |
+          set -ex
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=Debug
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSafe
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSmall
           $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseFast
       - name: Test
         run: |
+          set -ex
           $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=Debug
           $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSafe
           $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSmall
