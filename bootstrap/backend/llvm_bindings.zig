@@ -1,6 +1,7 @@
 const compiler = @import("../compiler.zig");
 const LLVM = compiler.LLVM;
 
+pub extern fn NativityLLVMInitializeAll() void;
 pub extern fn NativityLLVMCreateContext() *LLVM.Context;
 pub extern fn NativityLLVMCreateModule(module_name_ptr: [*]const u8, module_name_len: usize, context: *LLVM.Context) *LLVM.Module;
 pub extern fn NativityLLVMCreateBuilder(context: *LLVM.Context) *LLVM.Builder;

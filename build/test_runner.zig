@@ -31,6 +31,113 @@ fn collectDirectoryDirEntries(allocator: Allocator, path: []const u8) ![]const [
 
 const bootstrap_relative_path = "zig-out/bin/nat";
 
+const Run = struct{
+    compilation_run: usize = 0,
+    compilation_failure: usize = 0,
+    test_run: usize = 0,
+    test_failure: usize = 0,
+
+    fn add(run: *Run, other: Run) void {
+        run.compilation_run += other.compilation_run;
+        run.compilation_failure += other.compilation_failure;
+        run.test_run += other.test_run;
+        run.test_failure += other.test_failure;
+    }
+};
+
+fn compiler_run(allocator: Allocator, args: struct{
+    test_name: []const u8,
+    repetitions: usize,
+    extra_arguments: []const []const u8,
+    source_file_path: []const u8,
+    compiler_path: []const u8,
+    is_test: bool,
+    self_hosted: bool,
+}) !Run {
+    std.debug.print("{s} [repetitions={}] {s}", .{args.test_name, args.repetitions, if (args.repetitions > 1) "\n\n" else ""});
+    var run = Run{};
+
+    for (0..args.repetitions) |_| {
+        const base_argv: []const []const u8 = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", args.source_file_path };
+        const argv = try std.mem.concat(allocator, []const u8, &.{base_argv, args.extra_arguments});
+        // if (std.mem.eql(u8, args.compiler_path, "nat/compiler_lightly_optimize_for_speed")) @breakpoint();
+        const compile_run = try std.process.Child.run(.{
+            .allocator = allocator,
+            // TODO: delete -main_source_file?
+            .argv = argv,
+            .max_output_bytes = std.math.maxInt(u64),
+        });
+        run.compilation_run += 1;
+
+        const compilation_result: TestError!bool = switch (compile_run.term) {
+            .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
+            .Signal => error.signaled,
+            .Stopped => error.stopped,
+            .Unknown => error.unknown,
+        };
+
+        const compilation_success = compilation_result catch b: {
+            run.compilation_failure += 1;
+            break :b false;
+        };
+
+        std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+        if (compile_run.stdout.len > 0) {
+            std.debug.print("STDOUT:\n\n{s}\n\n", .{compile_run.stdout});
+        }
+        if (compile_run.stderr.len > 0) {
+            std.debug.print("STDERR:\n\n{s}\n\n", .{compile_run.stderr});
+        }
+
+        if (compilation_success and !args.self_hosted) {
+            const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", args.test_name });
+            const test_run = try std.process.Child.run(.{
+                .allocator = allocator,
+                .argv = &.{test_path},
+                .max_output_bytes = std.math.maxInt(u64),
+            });
+            run.test_run += 1;
+            const test_result: TestError!bool = switch (test_run.term) {
+                .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
+                .Signal => error.signaled,
+                .Stopped => error.stopped,
+                .Unknown => error.unknown,
+            };
+
+            const test_success = test_result catch b: {
+                break :b false;
+            };
+            run.test_failure += @intFromBool(!test_success);
+
+            std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
+            if (test_run.stdout.len > 0) {
+                std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
+            }
+            if (test_run.stderr.len > 0) {
+                std.debug.print("STDERR:\n\n{s}\n\n", .{test_run.stderr});
+            }
+        } else {
+            std.debug.print("\n", .{});
+        }
+    }
+
+    return run;
+}
+
+fn group_start(group: []const u8, test_count: usize) void {
+    std.debug.print("\n[{s} START ({} tests queued)]\n\n", .{group, test_count});
+}
+
+fn group_end(group: []const u8, test_count: usize, run: Run) !void {
+    std.debug.print("\n{s} COMPILATIONS: {}. FAILED: {}\n", .{ group, test_count, run.compilation_failure });
+    std.debug.print("{s} TESTS: {}. RAN: {}. FAILED: {}\n", .{ group, test_count, run.test_run, run.test_failure });
+    std.debug.print("\n[{s} END]\n\n", .{group});
+
+    if (run.compilation_failure > 0 or run.test_failure > 0) {
+        return error.fail;
+    }
+}
+
 fn runStandalone(allocator: Allocator, args: struct {
     directory_path: []const u8,
     group_name: []const u8,
@@ -42,88 +149,25 @@ fn runStandalone(allocator: Allocator, args: struct {
     const test_names = try collectDirectoryDirEntries(allocator, args.directory_path);
     std.debug.assert(args.repetitions > 0);
 
-    const total_compilation_count = test_names.len;
-    var ran_compilation_count: usize = 0;
-    var failed_compilation_count: usize = 0;
+    var total_run = Run{};
 
-    var ran_test_count: usize = 0;
-    var failed_test_count: usize = 0;
-    const total_test_count = test_names.len;
-
-    std.debug.print("\n[{s} START]\n\n", .{args.group_name});
+    group_start(args.group_name, test_names.len * args.repetitions);
 
     for (test_names) |test_name| {
-        std.debug.print("{s} [repetitions={}]{s}", .{test_name, args.repetitions, if (args.repetitions > 1) "\n\n" else ""});
-        for (0..args.repetitions) |_| {
-            const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
-            const argv: []const []const u8 = &.{ args.compiler_path, if (args.is_test) "test" else "exe", "-main_source_file", source_file_path };
-            // if (std.mem.eql(u8, args.compiler_path, "nat/compiler_lightly_optimize_for_speed")) @breakpoint();
-            const compile_run = try std.process.Child.run(.{
-                .allocator = allocator,
-                // TODO: delete -main_source_file?
-                .argv = argv,
-                .max_output_bytes = std.math.maxInt(u64),
-            });
-            ran_compilation_count += 1;
-
-            const compilation_result: TestError!bool = switch (compile_run.term) {
-                .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
-                .Signal => error.signaled,
-                .Stopped => error.stopped,
-                .Unknown => error.unknown,
-            };
-
-            const compilation_success = compilation_result catch b: {
-                failed_compilation_count += 1;
-                break :b false;
-            };
-
-            std.debug.print("[COMPILATION {s}] ", .{if (compilation_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
-            if (compile_run.stdout.len > 0) {
-                std.debug.print("STDOUT:\n\n{s}\n\n", .{compile_run.stdout});
-            }
-            if (compile_run.stderr.len > 0) {
-                std.debug.print("STDERR:\n\n{s}\n\n", .{compile_run.stderr});
-            }
-
-            if (compilation_success and !args.self_hosted) {
-                const test_path = try std.mem.concat(allocator, u8, &.{ "nat/", test_name });
-                const test_run = try std.process.Child.run(.{
-                    .allocator = allocator,
-                    .argv = &.{test_path},
-                    .max_output_bytes = std.math.maxInt(u64),
-                });
-                ran_test_count += 1;
-                const test_result: TestError!bool = switch (test_run.term) {
-                    .Exited => |exit_code| if (exit_code == 0) true else error.abnormal_exit_code,
-                    .Signal => error.signaled,
-                    .Stopped => error.stopped,
-                    .Unknown => error.unknown,
-                };
-
-                const test_success = test_result catch b: {
-                    failed_test_count += 1;
-                    break :b false;
-                };
-                std.debug.print("[TEST {s}]\n", .{if (test_success) "\x1b[32mOK\x1b[0m" else "\x1b[31mFAILED\x1b[0m"});
-                if (test_run.stdout.len > 0) {
-                    std.debug.print("STDOUT:\n\n{s}\n\n", .{test_run.stdout});
-                }
-                if (test_run.stderr.len > 0) {
-                    std.debug.print("STDERR:\n\n{s}\n\n", .{test_run.stderr});
-                }
-            } else {
-                std.debug.print("\n", .{});
-            }
-        }
+        const source_file_path = try std.mem.concat(allocator, u8, &.{ args.directory_path, "/", test_name, "/main.nat" });
+        const run = try compiler_run(allocator, .{
+            .compiler_path = args.compiler_path,
+            .source_file_path = source_file_path,
+            .test_name = test_name,
+            .repetitions = args.repetitions,
+            .extra_arguments = &.{},
+            .is_test = args.is_test,
+            .self_hosted = args.self_hosted,
+        });
+        total_run.add(run);
     }
 
-    std.debug.print("\n{s} COMPILATIONS: {}. FAILED: {}\n", .{ args.group_name, total_compilation_count, failed_compilation_count });
-    std.debug.print("{s} TESTS: {}. RAN: {}. FAILED: {}\n", .{ args.group_name, total_test_count, ran_test_count, failed_test_count });
-
-    if (failed_compilation_count > 0 or failed_test_count > 0) {
-        return error.fail;
-    }
+    try group_end(args.group_name, test_names.len * args.repetitions, total_run);
 }
 
 fn runBuildTests(allocator: Allocator, args: struct {
@@ -583,6 +627,22 @@ fn run_test_suite(allocator: Allocator, args: struct {
     return errors;
 }
 
+fn c_abi_tests(allocator: Allocator) !void {
+    const test_count = 1;
+    const group = "C ABI";
+    group_start(group, test_count);
+    const run = try compiler_run(allocator, .{
+        .test_name = "c_abi",
+        .repetitions = 1,
+        .extra_arguments = &.{},
+        .source_file_path = "retest/c_abi/main.nat",
+        .compiler_path = bootstrap_relative_path,
+        .is_test = false,
+        .self_hosted = false,
+    });
+    try group_end(group, test_count, run); 
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
@@ -595,6 +655,8 @@ pub fn main() !void {
         .directory_path = "retest/standalone",
         .repetitions = 1,
     });
+
+    try c_abi_tests(allocator);
 
     // var errors = run_test_suite(allocator, .{
     //     .self_hosted = false,
