@@ -1,0 +1,10 @@
+struct Struct {
+    a: s32,
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >result: Struct = {
+        .a = 0,
+    };
+    return result.a;
+}

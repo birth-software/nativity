@@ -307,6 +307,14 @@ extern "C" StructType* NativityLLVMGetStructType(LLVMContext& context, Type** ty
     return struct_type;
 }
 
+extern "C" StructType* NativityLLVMCreateStructType(LLVMContext& context, Type** type_ptr, size_t type_count, const char* name_pointer, size_t name_length, bool is_packed)
+{
+    auto types = ArrayRef<Type*>(type_ptr, type_count);
+    auto name = StringRef(name_pointer, name_length);
+    auto* struct_type = StructType::create(context, types, name, is_packed);
+    return struct_type;
+}
+
 extern "C" LLVMContext* NativityLLVMTypeGetContext(Type& type)
 {
     auto& context = type.getContext();
