@@ -11,7 +11,8 @@ on:
 env:
   NAT_LLVM_VERSION: 18
   NAT_ZIG_GENERIC_COMMAND: zig build -Dthird_party_ci=true
-  NAT_ZIG_TEST_GENERIC_COMMAND: zig build -Dthird_party_ci=true
+  NAT_ZIG_TEST_GENERIC_COMMAND: zig build test -Dthird_party_ci=true
+  TIMEOUT_MINUTES: 15
 jobs:
   linux-gnu:
     runs-on: ubuntu-latest
