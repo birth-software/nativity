@@ -863,18 +863,6 @@ const Parser = struct{
                                     .type = bitfield_type.backing_type,
                                 });
                                 return &constant_int.value; // autofix
-                                // const constant_bitfield = thread.constant_bitfields.append(.{
-                                //     .value = .{
-                                //         .sema = .{
-                                //             .thread = thread.get_index(),
-                                //             .resolved = true,
-                                //             .id = .constant_bitfield,
-                                //         },
-                                //     },
-                                //     .n = result,
-                                //     .type = ty,
-                                // });
-                                // return &constant_bitfield.value;
                             } else {
                                 unreachable;
                             }
@@ -1042,116 +1030,6 @@ const Parser = struct{
                     },
                     else => |t| @panic(@tagName(t)),
                 }
-                // switch (src[parser.i]) {
-                //     '(' => {
-                //         parser.i += 1;
-                //         parser.skip_space(src);
-                //
-                //         const FunctionCallData = struct{
-                //             type: *Type.Function,
-                //             value: *Value,
-                //         };
-                //         const declaration = lookup_result.declaration.*;
-                //         const function_call_data: FunctionCallData = switch (declaration.id) {
-                //             .local => local: {
-                //                 const local_declaration = declaration.get_payload(.local);
-                //                 const local_symbol = local_declaration.to_symbol();
-                //                 break :local switch (local_symbol.type.sema.id) {
-                //                     .pointer => p: {
-                //                         const appointee_type = local_symbol.appointee_type.?;
-                //                         break :p switch (appointee_type.sema.id) {
-                //                             .function => f: {
-                //                                 const function_type = appointee_type.get_payload(.function);
-                //                                 const load = emit_load(analyzer, thread, .{
-                //                                     .value = &local_symbol.instruction.value,
-                //                                     .type = local_symbol.type,
-                //                                     .line = debug_line,
-                //                                     .column = debug_column,
-                //                                     .scope = analyzer.current_scope,
-                //                                 });
-                //                                 break :f .{
-                //                                     .type = function_type,
-                //                                     .value = &load.instruction.value,
-                //                                 };
-                //                             },
-                //                             else => |t| @panic(@tagName(t)),
-                //                         };
-                //                     },
-                //                     else => |t| @panic(@tagName(t)),
-                //                 };
-                //             },
-                //             .global => g: {
-                //                 const global_declaration = lookup_result.declaration.*.get_payload(.global);
-                //                 break :g switch (global_declaration.id) {
-                //                     .global_symbol => gs: {
-                //                         const global_symbol = global_declaration.to_symbol();
-                //                         break :gs switch (global_symbol.id) {
-                //                             .function_definition => f: {
-                //                                 const function_definition = global_symbol.get_payload(.function_definition);
-                //                                 const function_type = function_definition.declaration.get_type();
-                //                                 break :f .{
-                //                                     .type = function_type,
-                //                                     .value = &function_definition.declaration.global_symbol.value,
-                //                                 };
-                //                             },
-                //                             else => |t| @panic(@tagName(t)),
-                //                         };
-                //                     },
-                //                     else => |t| @panic(@tagName(t)),
-                //                 };
-                //             },
-                //             .argument => unreachable,
-                //             .@"struct" => unreachable,
-                //             .bitfield => unreachable,
-                //         };
-                //
-                //         const function_type = function_call_data.type;
-                //         const function_value = function_call_data.value;
-                //         const declaration_argument_count = function_type.argument_types.len;
-                //
-                //         var argument_values = PinnedArray(*Value){};
-                //
-                //         while (true) {
-                //             parser.skip_space(src);
-                //
-                //             if (src[parser.i] == ')') {
-                //                 break;
-                //             }
-                //
-                //             const argument_index = argument_values.length;
-                //             if (argument_index >= declaration_argument_count) {
-                //                 exit(1);
-                //             }
-                //             const expected_argument_type = function_type.argument_types[argument_index];
-                //             const passed_argument_value = parser.parse_expression(analyzer, thread, file, expected_argument_type, .right);
-                //             _ = argument_values.append(passed_argument_value);
-                //
-                //             parser.skip_space(src);
-                //
-                //             switch (src[parser.i]) {
-                //                 ',' => parser.i += 1,
-                //                 ')' => {},
-                //                 else => unreachable,
-                //             }
-                //         }
-                //
-                //         parser.i += 1;
-                //
-                //         const call = thread.calls.append(.{
-                //             .instruction = new_instruction(thread, .{
-                //                 .id = .call,
-                //                 .line = debug_line,
-                //                 .column = debug_column,
-                //                 .scope = analyzer.current_scope,
-                //             }),
-                //             .callable = function_value,
-                //             .arguments = argument_values.const_slice(),
-                //         });
-                //         analyzer.append_instruction(&call.instruction);
-                //         return &call.instruction.value;
-                //     },
-                //     else => exit(1),
-                // }
             } else blk: {
                 resolved = false;
                 const lazy_expression = thread.local_lazy_expressions.append(.{
@@ -7987,3 +7865,5 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
         },
     }
 }
+
+
