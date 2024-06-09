@@ -234,6 +234,13 @@ extern "C" DIDerivedType* NativityLLVMDebugInfoBuilderCreateMemberType(DIBuilder
     return member_type;
 }
 
+extern "C" DIDerivedType* NativityLLVMDebugInfoBuilderCreateBitfieldMemberType(DIBuilder& builder, DIScope *scope, const char* name_ptr, size_t name_len, DIFile* file, unsigned line_number, uint64_t bit_size, uint64_t bit_offset, uint64_t storage_bit_offset, DINode::DIFlags flags, DIType* type)
+{
+    auto name = StringRef(name_ptr, name_len);
+    auto* member_type = builder.createBitFieldMemberType(scope, name, file, line_number, bit_size, bit_offset, storage_bit_offset, flags, type);
+    return member_type;
+}
+
 extern "C" bool NativityLLLVMDITypeIsResolved(DIType* type)
 {
     return type->isResolved();

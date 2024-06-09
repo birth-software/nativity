@@ -1,0 +1,25 @@
+bitfield(s32) Bitfield{
+    a: u1,
+    b: u1,
+    c: u1,
+    d: u29,
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >bf: Bitfield = {
+        .a = 0,
+        .b = 1,
+        .c = 1,
+        .d = 0,
+    };
+    >bf_int: s32 = #transmute(bf);
+
+    >bf_int2: s32 = 6;
+    >bf2: Bitfield = #transmute(bf_int2);
+    #assert(bf.a == bf2.a);
+    #assert(bf.b == bf2.b);
+    #assert(bf.c == bf2.c);
+    #assert(bf.d == bf2.d);
+    
+    return bf_int - bf_int2;
+}
