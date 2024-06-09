@@ -8,6 +8,10 @@ on:
   schedule:
     - cron: "0 0 * * *"
 
+env:
+  NAT_LLVM_VERSION: 18
+  NAT_ZIG_GENERIC_COMMAND: zig build -Dthird_party_ci=true
+  NAT_ZIG_TEST_GENERIC_COMMAND: zig build -Dthird_party_ci=true
 jobs:
   linux-gnu:
     runs-on: ubuntu-latest
@@ -15,13 +19,51 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build and test
-        run: ./ci/linux_gnu_runner.sh
+      - name: Set Zig up mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v1
+        with:
+          version: master
+      - name: Set up LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh $NAT_LLVM_VERSION all
+          sudo apt install liblld-$NAT_LLVM_VERSION-dev libclang-$NAT_LLVM_VERSION-dev liblld-$NAT_LLVM_VERSION ninja-build cmake -y
+      - name: Build
+        run: |
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=Debug
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSafe
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSmall
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseFast
+      - name: Test
+        run: |
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=Debug
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSafe
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSmall
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseFast
   macos:
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build and test
-        run: ./ci/macos_runner.sh
+      - name: Set Zig up mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v1
+        with:
+          version: master
+      - name: Set up LLVM
+        run: |
+          brew update
+          brew install llvm@$NAT_LLVM_VERSION ninja
+      - name: Build
+        run: |
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=Debug
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSafe
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseSmall
+          $NAT_ZIG_GENERIC_COMMAND -Doptimize=ReleaseFast
+      - name: Test
+        run: |
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=Debug
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSafe
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseSmall
+          $NAT_ZIG_TEST_GENERIC_COMMAND -Doptimize=ReleaseFast
