@@ -5745,7 +5745,6 @@ fn compile_c_source_files(thread: *Thread, arguments: []const []const u8) void {
                     };
 
                     for (libc_include_dirs) |include_dir| {
-                        std.debug.print("Include path: {s}\n", .{include_dir});
                         argv.appendSliceAssumeCapacity(&.{ "-isystem", include_dir });
                     }
 
