@@ -803,12 +803,12 @@ pub fn read_file(arena: *Arena, directory: std.fs.Dir, file_relative_path: []con
 }
 
 pub fn self_exe_path(arena: *Arena) ![]const u8 {
-    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
     return try arena.duplicate_bytes(try std.fs.selfExePath(&buffer));
 }
 
 pub fn realpath(arena: *Arena, dir: std.fs.Dir, relative_path: []const u8) ![]const u8 {
-    var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const stack_realpath = try dir.realpath(relative_path, &buffer);
     const heap_realpath = try arena.new_array(u8, stack_realpath.len);
     @memcpy(heap_realpath, stack_realpath);

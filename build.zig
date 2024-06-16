@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) !void {
         .windows => true,
         // .macos => true,
     };
+    const timers = b.option(bool, "timers", "This option enables to make and print timers") orelse !is_ci;
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
@@ -467,7 +468,7 @@ pub fn build(b: *std.Build) !void {
                         unreachable;
                     }
 
-                    var tokenizer = std.mem.tokenize(u8, result.stdout, " ");
+                    var tokenizer = std.mem.tokenizeScalar(u8, result.stdout, ' ');
                     const cxx_version = while (tokenizer.next()) |chunk| {
                         if (std.ascii.isDigit(chunk[0])) {
                             if (std.SemanticVersion.parse(chunk)) |sema_version| {
@@ -565,6 +566,7 @@ pub fn build(b: *std.Build) !void {
     compiler_options.addOption(bool, "editor", use_editor);
     compiler_options.addOption(bool, "sleep_on_thread_hot_loops", sleep_on_thread_hot_loops);
     compiler_options.addOption([]const []const u8, "include_paths", include_paths.items);
+    compiler_options.addOption(bool, "timers", timers);
     compiler.root_module.addOptions("configuration", compiler_options);
 
     if (target.result.os.tag == .windows) {
