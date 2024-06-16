@@ -3844,6 +3844,11 @@ const File = struct{
     local_lazy_expressions: PinnedArray(*LocalLazyExpression) = .{},
     timestamp: std.time.Instant,
     timers: Timers = Timers.initFill(.{ .range = std.mem.zeroes(TimeRange) }),
+    top_level_declaration_timers: PinnedArray(struct {
+        name: []const u8,
+        start: std.time.Instant,
+        end: std.time.Instant,
+    }) = .{},
     const Timers = std.EnumArray(Timer, TimeUnion);
     const Timer = enum{
         queue,
@@ -4400,7 +4405,7 @@ pub fn main() void {
     const print_timers = configuration.timers;
     if (print_timers) {
         for (instance.files.slice()) |*file| {
-            std.debug.print("File {s}:\n", .{file.path});
+            std.debug.print("File {s}:\nStages:\n", .{file.path});
             var it = file.timers.iterator();
             while (it.next()) |timer_entry| {
                 const ns = switch (timer_entry.value.*) {
@@ -4409,6 +4414,13 @@ pub fn main() void {
                 };
                 const ms = @as(f64, @floatFromInt(ns)) / 1000_000.0;
                 std.debug.print("- {s}: {d} ns ({d:.02} ms)\n", .{@tagName(timer_entry.key), ns, ms});
+            }
+
+            std.debug.print("Top level declarations:\n", .{});
+            for (file.top_level_declaration_timers.slice()) |timer| {
+                const ns = timer.end.since(timer.start);
+                const ms = @as(f64, @floatFromInt(ns)) / 1000_000.0;
+                std.debug.print("- {s}: {d} ns ({d:.02} ms)\n", .{timer.name, ns, ms});
             }
         }
 
@@ -7742,6 +7754,9 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
         const declaration_line = parser.get_debug_line();
         const declaration_column = parser.get_debug_column();
 
+        var top_level_declaration_name: []const u8 = "anonymous";
+        const top_level_declaration_start = std.time.Instant.now() catch unreachable;
+
         switch (declaration_start_ch) {
             '>' => {
                 parser.i += 1;
@@ -7751,6 +7766,8 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                 if (global_name == 0) {
                     fail_message("discard identifier '_' cannot be used as a global variable name");
                 }
+
+                top_level_declaration_name = thread.identifiers.get(global_name).?;
 
                 if (file.scope.scope.get_global_declaration(global_name)) |existing_global| {
                     _ = existing_global; // autofix
@@ -7826,6 +7843,8 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             parser.skip_space(src);
 
                             const bitfield_name = parser.parse_identifier(thread, src);
+                            top_level_declaration_name = thread.identifiers.get(bitfield_name).?;
+
                             const bitfield_type = thread.bitfields.append(.{
                                 .type = .{
                                     .sema = .{
@@ -7991,7 +8010,9 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         parser.skip_space(src);
                     }
 
-                    function_declaration_data.global_symbol.global_declaration.declaration.name = parser.parse_identifier(thread, src);
+                    const function_name = parser.parse_identifier(thread, src);
+                    function_declaration_data.global_symbol.global_declaration.declaration.name = function_name;
+                    top_level_declaration_name = thread.identifiers.get(function_name).?;
 
                     parser.skip_space(src);
 
@@ -8871,6 +8892,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     parser.skip_space(src);
 
                     const string_literal = parser.parse_non_escaped_string_literal_content(src);
+                    top_level_declaration_name = string_literal;
                     parser.skip_space(src);
 
                     parser.expect_character(src, ';');
@@ -8932,6 +8954,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     parser.skip_space(src);
 
                     const struct_name = parser.parse_identifier(thread, src);
+                    top_level_declaration_name = thread.identifiers.get(struct_name).?;
                     const struct_type = thread.structs.append(.{
                         .type = .{
                             .sema = .{
@@ -8987,6 +9010,13 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
             },
             else => fail(),
         }
+
+        const top_level_declaration_end = std.time.Instant.now() catch unreachable;
+        _ = file.top_level_declaration_timers.append(.{
+            .name = top_level_declaration_name,
+            .start = top_level_declaration_start,
+            .end = top_level_declaration_end,
+        });
     } 
 
     for (file.local_lazy_expressions.slice()) |local_lazy_expression| {

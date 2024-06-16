@@ -36,7 +36,10 @@ pub fn build(b: *std.Build) !void {
         .windows => true,
         // .macos => true,
     };
-    const timers = b.option(bool, "timers", "This option enables to make and print timers") orelse !is_ci;
+    const timers = b.option(bool, "timers", "This option enables to make and print timers") orelse !is_ci and switch (optimization) {
+        .Debug => false,
+        else => true,
+    };
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
