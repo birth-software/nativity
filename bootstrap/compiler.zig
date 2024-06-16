@@ -3617,6 +3617,16 @@ const Thread = struct{
     discard_count: u64 = 0,
     handle: std.Thread = undefined,
     generate_debug_information: bool = true,
+    timestamp: std.time.Instant = std.mem.zeroes(std.time.Instant),
+    timers: Timers = Timers.initFill(std.mem.zeroes(TimeRange)),
+    const Timers = std.EnumArray(Timer, TimeRange);
+
+    const Timer = enum{
+        setup,
+        analysis,
+        llvm_build_ir,
+        llvm_emit_object,
+    };
 
     fn add_thread_work(thread: *Thread, job: Job) void {
         @atomicStore(@TypeOf(thread.task_system.state), &thread.task_system.state, .running, .seq_cst);
@@ -3700,7 +3710,6 @@ const TaskSystem = struct{
         c_source_file,
         c_source_file_done,
         analysis,
-        analysis_resolution,
         llvm_generate_ir,
         llvm_emit_object,
         llvm_finished_object,
@@ -3803,6 +3812,19 @@ const Instance = struct{
     }
 };
 
+const TimeRange = struct{
+    start: std.time.Instant,
+    end: std.time.Instant,
+};
+
+const TimeUnion = union(enum){
+    range: TimeRange,
+    accumulating: struct{
+        sum: u64,
+        previous: std.time.Instant,
+    },
+};
+
 const File = struct{
     global_declaration: GlobalDeclaration,
     scope: File.Scope,
@@ -3812,7 +3834,7 @@ const File = struct{
         .start = 0,
         .end = 0,
     },
-    state: State = .queued,
+    state: State,
     thread: u32 = 0,
     interested_threads: PinnedArray(u32) = .{},
     interested_files: PinnedArray(*File) = .{},
@@ -3820,6 +3842,15 @@ const File = struct{
     values_per_import: PinnedArray(PinnedArray(*Value)) = .{},
     resolved_import_count: u32 = 0,
     local_lazy_expressions: PinnedArray(*LocalLazyExpression) = .{},
+    timestamp: std.time.Instant,
+    timers: Timers = Timers.initFill(.{ .range = std.mem.zeroes(TimeRange) }),
+    const Timers = std.EnumArray(Timer, TimeUnion);
+    const Timer = enum{
+        queue,
+        read,
+        analysis,
+        wait_for_dependencies,
+    };
 
     pub fn get_index(file: *File) u32 {
         return instance.files.get_index(file);
@@ -3831,7 +3862,10 @@ const File = struct{
 
     const State = enum{
         queued,
+        reading,
         analyzing,
+        waiting_for_dependencies,
+        analyzed,
     };
 
     const Scope = struct {
@@ -3879,6 +3913,8 @@ fn add_file(file_absolute_path: []const u8, interested_threads: []const u32) u32
         },
         .source_code = &.{},
         .path = file_absolute_path,
+        .state = .queued,
+        .timestamp = std.time.Instant.now() catch unreachable,
     };
 
     new_file.interested_threads.append_slice(interested_threads);
@@ -4127,6 +4163,7 @@ fn control_thread(unit: *Unit, lati: u32) void {
 
     assert(objects.length > 0);
 
+    link_start = std.time.Instant.now() catch unreachable;
     link(.{
         .output_file_path = unit.descriptor.executable_path,
         .extra_arguments = &.{},
@@ -4135,7 +4172,11 @@ fn control_thread(unit: *Unit, lati: u32) void {
         .link_libc = true,
         .link_libcpp = false,
     });
+    link_end = std.time.Instant.now() catch unreachable;
 }
+
+var link_start: std.time.Instant = undefined;
+var link_end: std.time.Instant = undefined;
 
 fn command_exe(arguments: []const []const u8) void {
     if (arguments.len == 0) {
@@ -4300,6 +4341,7 @@ fn command_exe(arguments: []const []const u8) void {
 }
 
 pub fn main() void {
+    const program_start = std.time.Instant.now() catch fail();
     instance.arena = library.Arena.init(4 * 1024 * 1024) catch unreachable;
     const executable_path = library.self_exe_path(instance.arena) catch unreachable;
     const executable_directory = std.fs.path.dirname(executable_path).?;
@@ -4351,6 +4393,47 @@ pub fn main() void {
         fail_message("TODO: clang");
     } else {
         fail_message("Unrecognized command");
+    }
+
+    const program_end = std.time.Instant.now() catch unreachable;
+
+    const print_timers = configuration.timers;
+    if (print_timers) {
+        for (instance.files.slice()) |*file| {
+            std.debug.print("File {s}:\n", .{file.path});
+            var it = file.timers.iterator();
+            while (it.next()) |timer_entry| {
+                const ns = switch (timer_entry.value.*) {
+                    .accumulating => |t| t.sum,
+                    .range => |range| range.end.since(range.start),
+                };
+                const ms = @as(f64, @floatFromInt(ns)) / 1000_000.0;
+                std.debug.print("- {s}: {d} ns ({d:.02} ms)\n", .{@tagName(timer_entry.key), ns, ms});
+            }
+        }
+
+        for (instance.threads) |*thread| {
+            std.debug.print("Thread {}:\n", .{thread.get_index()});
+            var it = thread.timers.iterator();
+            while (it.next()) |timer_entry| {
+                const ns = timer_entry.value.end.since(timer_entry.value.start);
+                const ms = @as(f64, @floatFromInt(ns)) / 1000_000.0;
+                std.debug.print("- {s}: {d} ns ({d:.02} ms)\n", .{@tagName(timer_entry.key), ns, ms});
+            }
+        }
+
+        {
+            const ns = link_end.since(link_start);
+            const ms = @as(f64, @floatFromInt(ns)) / 1000_000.0;
+            std.debug.print("Link time: {} ns ({d:.02} ms)\n", .{ns, ms});
+        }
+
+        {
+            const ns = program_end.since(program_start);
+            const ms = @as(f64, @floatFromInt(ns)) / 1000_000.0;
+
+            std.debug.print("Program took {} ns ({d:.02} ms) to execute!\n", .{ns, ms});
+        }
     }
 }
 
@@ -4574,6 +4657,7 @@ fn try_end_analyzing_file(file: *File) void {
 }
 
 fn worker_thread(thread_index: u32, cpu_count: *u32) void {
+    const thread_start = std.time.Instant.now() catch unreachable;
     while (true) {
         const local_cpu_count = cpu_count.*;
         if (local_cpu_count == 0) {
@@ -4596,17 +4680,42 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
     thread.void.sema.thread = @intCast(thread_index);
     thread.noreturn.sema.thread = @intCast(thread_index);
 
+    const thread_setup_end = std.time.Instant.now() catch unreachable;
+    thread.timers.set(.setup, .{ .start = thread_start, .end = thread_setup_end });
+
     while (true) {
         while (thread.get_worker_job()) |job| {
             const c = thread.task_system.job.worker.completed;
             switch (job.id) {
                 .analyze_file => {
-                    thread.assigned_file_count += 1;
+                    const t =  thread.timers.get(.analysis);
+                    if (t.end.order(t.start) == .eq) {
+                        thread.timers.getPtr(.analysis).start = std.time.Instant.now() catch unreachable;
+                    }
                     const file_index = job.offset;
                     const file = &instance.files.slice()[file_index];
-                    file.state = .analyzing;
-                    file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
                     file.thread = thread_index;
+                    thread.assigned_file_count += 1;
+                    const queue_start = file.timestamp;
+                    const queue_end = std.time.Instant.now() catch unreachable;
+                    file.timers.set(.queue, .{
+                        .range = .{
+                            .start = queue_start,
+                            .end = queue_end,
+                        },
+                    });
+                    const read_start = queue_end;
+                    file.state = .reading;
+                    file.source_code = library.read_file(thread.arena, std.fs.cwd(), file.path);
+                    const read_end = std.time.Instant.now() catch unreachable;
+                    file.timers.set(.read, .{
+                        .range = .{
+                            .start = read_start,
+                            .end = read_end,
+                        },
+                    });
+                    file.timestamp = read_end;
+                    file.state = .analyzing;
                     analyze_file(thread, file_index);
                 },
                 .notify_file_resolved => {
@@ -4718,6 +4827,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                 },
                 .llvm_generate_ir => {
                     if (thread.functions.length > 0 or thread.global_variables.length > 0) {
+                        const llvm_start = std.time.Instant.now() catch unreachable;
                         const context = LLVM.Context.create();
                         const module_name: []const u8 = "thread";
                         const module = LLVM.Module.create(module_name.ptr, module_name.len, context);
@@ -5300,7 +5410,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             }
                         }
 
-                        const verify_module = true;
+                        const verify_module = builtin.mode == .Debug;
                         const print_module_at_failure = true;
                         const print_module = false;
 
@@ -5326,20 +5436,35 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             write("\n");
                         }
 
+                        const llvm_end = std.time.Instant.now() catch unreachable;
+
+                        thread.timers.set(.llvm_build_ir, .{
+                            .start = llvm_start,
+                            .end = llvm_end,
+                        });
+
                         thread.add_control_work(.{
                             .id = .llvm_notify_ir_done,
                         });
                     }
                 },
                 .llvm_emit_object => {
+                    const llvm_start = std.time.Instant.now() catch unreachable;
                     const timestamp = std.time.nanoTimestamp();
                     const thread_object = std.fmt.allocPrint(std.heap.page_allocator, "nat/o/{s}_thread{}_{}.o", .{std.fs.path.basename(std.fs.path.dirname(instance.files.get(@enumFromInt(0)).path).?), thread.get_index(), timestamp}) catch unreachable;
                     thread.llvm.object = thread_object;
-                    const disable_verify = false;
+                    const disable_verify = builtin.mode != .Debug;
                     const result = thread.llvm.module.addPassesToEmitFile(thread.llvm.target_machine, thread_object.ptr, thread_object.len, LLVM.CodeGenFileType.object, disable_verify);
                     if (!result) {
                         @panic("can't generate machine code");
                     }
+
+                    const llvm_end = std.time.Instant.now() catch unreachable;
+
+                    thread.timers.set(.llvm_emit_object, .{
+                        .start = llvm_start,
+                        .end = llvm_end,
+                    });
 
                     thread.add_control_work(.{
                         .id = .llvm_notify_object_done,
@@ -8904,11 +9029,30 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 }
 
 fn try_resolve_file(thread: *Thread, file: *File) void {
+    const analysis_end = std.time.Instant.now() catch unreachable;
+    const analysis_start = file.timestamp;
+    file.timestamp = analysis_end;
+    const timer_tag: File.Timer = switch (file.state) {
+        .analyzing => .analysis,
+        .waiting_for_dependencies => .wait_for_dependencies,
+        else => unreachable,
+    };
+
     if (file.imports.length == file.resolved_import_count) {
+        file.timers.set(timer_tag, .{
+            .range = .{
+                .start = analysis_start,
+                .end = analysis_end,
+            },
+        });
+        file.state = .analyzed;
         thread.analyzed_file_count += 1;
 
+        // If the thread has analyzed the same files it has been assigned, tell the control thread
+        // that the thread has finished file analysis so it can proceed to the next step
         if (thread.analyzed_file_count == thread.assigned_file_count) {
             if (@atomicLoad(@TypeOf(thread.task_system.job.queuer.to_do), &thread.task_system.job.queuer.to_do, .seq_cst) == thread.task_system.job.worker.completed + 1) {
+                thread.timers.getPtr(.analysis).end = std.time.Instant.now() catch unreachable;
                 thread.add_control_work(.{
                     .id = .notify_analysis_complete,
                 });
@@ -8923,6 +9067,23 @@ fn try_resolve_file(thread: *Thread, file: *File) void {
                 .offset = file.get_index(),
                 .count = @intCast(ti),
             });
+        }
+    } else {
+        file.state = .waiting_for_dependencies;
+        switch (file.timers.get(timer_tag)) {
+            .range => |range| {
+                const order = range.end.order(range.start);
+                switch (order) {
+                    .eq => file.timers.set(timer_tag, .{
+                        .range = .{
+                            .start = analysis_start,
+                            .end = analysis_end,
+                        },
+                    }),
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            .accumulating => unreachable,
         }
     }
 }
