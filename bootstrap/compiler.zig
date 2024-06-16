@@ -7,8 +7,11 @@ const assert = library.assert;
 const Arena = library.Arena;
 const PinnedArray = library.PinnedArray;
 const PinnedHashMap = library.PinnedHashMap;
-const hash_bytes = library.my_hash;
 const byte_equal = library.byte_equal;
+const first_byte = library.first_byte;
+const hash_bytes = library.my_hash;
+const last_byte = library.last_byte;
+const starts_with_slice = library.starts_with_slice;
 const Atomic = std.atomic.Value;
 
 const weak_memory_model = switch (builtin.cpu.arch) {
@@ -17,19 +20,29 @@ const weak_memory_model = switch (builtin.cpu.arch) {
     else => @compileError("Error: unknown arch"),
 };
 
-fn exit(exit_code: u8) noreturn {
+fn fail() noreturn {
     @setCold(true);
-    if (exit_code != 0) @breakpoint();
-    std.posix.exit(exit_code);
+    @breakpoint();
+    std.posix.exit(1);
+}
+
+fn fail_term(message: []const u8, term: []const u8) noreturn {
+    @setCold(true);
+    write(message);
+    write(": '");
+    write(term);
+    write("'\n");
+    fail();
 }
 
 fn is_space(ch: u8, next_ch: u8) bool {
     const is_comment = ch == '/' and next_ch == '/';
     const is_whitespace = ch == ' ';
-    const is_tab = ch == '\t';
+    const is_vertical_tab = ch == 0x0b;
+    const is_horizontal_tab = ch == '\t';
     const is_line_feed = ch == '\n';
     const is_carry_return = ch == '\r';
-    const result = (is_whitespace or is_tab) or (is_line_feed or is_carry_return) or is_comment;
+    const result = ((is_vertical_tab or is_horizontal_tab) or (is_line_feed or is_carry_return)) or (is_comment or is_whitespace);
     return result;
 }
 
@@ -37,12 +50,12 @@ pub fn write(string: []const u8) void {
     std.io.getStdOut().writeAll(string) catch unreachable;
 }
 
-fn exit_with_error(string: []const u8) noreturn {
+fn fail_message(string: []const u8) noreturn {
     @setCold(true);
     write("error: ");
     write(string);
     write("\n");
-    exit(1);
+    fail();
 }
 
 fn is_lower(ch: u8) bool {
@@ -88,13 +101,10 @@ const GlobalSymbol = struct{
     attributes: Attributes = .{},
     global_declaration: GlobalDeclaration,
     type: *Type,
+    pointer_type: *Type,
     alignment: u32,
     value: Value,
     id: GlobalSymbol.Id,
-
-    pub fn get_type(global_symbol: *GlobalSymbol) *Type {
-        return global_symbol.type;
-    }
 
     const Id = enum{
         function_declaration,
@@ -145,7 +155,7 @@ const ArgumentSymbol = struct {
     attributes: Attributes = .{},
     argument_declaration: ArgumentDeclaration,
     type: *Type,
-    value: Value,
+    pointer_type: *Type,
     instruction: Instruction,
     alignment: u32,
     index: u32,
@@ -161,10 +171,9 @@ const LocalSymbol = struct {
     attributes: Attributes = .{},
     local_declaration: LocalDeclaration,
     type: *Type,
-    appointee_type: ?*Type = null,
+    pointer_type: *Type,
     instruction: Instruction,
     alignment: u32,
-    initial_value: *Value,
 
     const Attributes = struct{
         mutability: Mutability = .@"const",
@@ -225,6 +234,7 @@ const Parser = struct{
                 while (parser.i < file.len) : (parser.i += 1) {
                     const is_line_feed = file[parser.i] == '\n';
                     if (is_line_feed) {
+                        parser.line += 1;
                         break;
                     }
                 }
@@ -266,9 +276,9 @@ const Parser = struct{
         switch (src[parser.i]) {
             ',' => parser.i += 1,
             '=' => {
-                exit_with_error("TODO: field default value");
+                fail_message("TODO: field default value");
             },
-            else => exit(1),
+            else => fail(),
         }
 
         return ParseFieldData{
@@ -277,6 +287,40 @@ const Parser = struct{
             .line = field_line,
             .column = field_column,
         };
+    }
+
+    const ExpectFailureAction = enum{
+        @"unreachable",
+        trap,
+    };
+    fn parse_boolean_expect_intrinsic(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, failure_action: ExpectFailureAction, debug_line: u32, debug_column: u32) void {
+        const condition = parser.parse_condition(analyzer, thread, file);
+        const expect_true_block = create_basic_block(thread);
+        const expect_false_block = create_basic_block(thread);
+        _ = emit_branch(analyzer, thread, .{
+            .condition = condition, 
+            .taken = expect_true_block,
+            .not_taken = expect_false_block,
+            .line = debug_line,
+            .column = debug_column,
+            .scope = analyzer.current_scope,
+        });
+        analyzer.current_basic_block = expect_false_block;
+
+        switch (failure_action) {
+            .@"unreachable" => emit_unreachable(analyzer, thread, .{
+                .line = debug_line,
+                .column = debug_column,
+                .scope = analyzer.current_scope,
+            }),
+            .trap => emit_trap(analyzer, thread, .{
+                .line = debug_line,
+                .column = debug_column,
+                .scope = analyzer.current_scope,
+            }),
+        }
+
+        analyzer.current_basic_block = expect_true_block;
     }
 
     fn parse_intrinsic(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, ty: ?*Type) ?*Value {
@@ -295,30 +339,16 @@ const Parser = struct{
                     break @field(Intrinsic, i_field.name);
                 }
             } else {
-                exit_with_error("Unknown intrinsic");
+                fail_term("Unknown intrinsic", identifier);
             };
 
             switch (intrinsic_id) {
                 .assert => {
-                    const condition = parser.parse_condition(analyzer, thread, file);
-                    const assert_true_block = create_basic_block(thread);
-                    const assert_false_block = create_basic_block(thread);
-                    _ = emit_branch(analyzer, thread, .{
-                        .condition = condition, 
-                        .taken = assert_true_block,
-                        .not_taken = assert_false_block,
-                        .line = debug_line,
-                        .column = debug_column,
-                        .scope = analyzer.current_scope,
-                    });
-                    analyzer.current_basic_block = assert_false_block;
-                    emit_unreachable(analyzer, thread, .{
-                        .line = debug_line,
-                        .column = debug_column,
-                        .scope = analyzer.current_scope,
-                    });
-                    analyzer.current_basic_block = assert_true_block;
-
+                    parser.parse_boolean_expect_intrinsic(analyzer, thread, file, .@"unreachable", debug_line, debug_column);
+                    return null;
+                },
+                .require => {
+                    parser.parse_boolean_expect_intrinsic(analyzer, thread, file, .trap, debug_line, debug_column);
                     return null;
                 },
                 .size => {
@@ -373,7 +403,7 @@ const Parser = struct{
                     return &lz.instruction.value;
                 },
                 .transmute => {
-                    const destination_type = ty orelse exit(1);
+                    const destination_type = ty orelse fail();
                     parser.skip_space(src);
                     parser.expect_character(src, '(');
                     parser.skip_space(src);
@@ -383,7 +413,7 @@ const Parser = struct{
 
                     const source_type = value.get_type();
                     if (destination_type == source_type) {
-                        exit(1);
+                        fail();
                     }
 
                     const cast_id: Cast.Id = switch (destination_type.sema.id) {
@@ -396,7 +426,7 @@ const Parser = struct{
                                     if (source_bitfield.backing_type == destination_type) {
                                         break :block .int_from_bitfield;
                                     } else {
-                                        exit(1);
+                                        fail();
                                     }
                                 },
                                 else => |t| @panic(@tagName(t)),
@@ -407,7 +437,7 @@ const Parser = struct{
                             if (destination_bitfield.backing_type == source_type) {
                                 break :block .int_from_bitfield;
                             } else {
-                                exit(1);
+                                fail();
                             }
                         },
                         else => |t| @panic(@tagName(t)),
@@ -422,6 +452,35 @@ const Parser = struct{
                         .id = cast_id,
                     });
 
+                    return &cast.instruction.value;
+                },
+                .int_from_pointer => {
+                    if (ty) |expected_type| {
+                        _ = expected_type; // autofix
+                        unreachable;
+                    }
+
+                    const expected_type = &thread.integers[63].type;
+
+                    parser.skip_space(src);
+                    parser.expect_character(src, '(');
+                    parser.skip_space(src);
+                    const value = parser.parse_expression(analyzer, thread, file, null, .right);
+                    switch (value.get_type().sema.id) {
+                        .typed_pointer => {},
+                        else => |t| @panic(@tagName(t)),
+                    }
+                    parser.skip_space(src);
+                    parser.expect_character(src, ')');
+
+                    const cast = emit_cast(analyzer, thread, .{
+                        .line = debug_line,
+                        .column = debug_column,
+                        .scope = analyzer.current_scope,
+                        .value = value,
+                        .type = expected_type,
+                        .id = .int_from_pointer,
+                    });
                     return &cast.instruction.value;
                 },
                 else => |t| @panic(@tagName(t)),
@@ -446,7 +505,7 @@ const Parser = struct{
                 if (!is_ident) {
                     if (is_string_literal_identifier) {
                         if (file[parser.i] != '"') {
-                            exit(1);
+                            fail();
                         }
                     }
 
@@ -454,10 +513,10 @@ const Parser = struct{
                     return identifier;
                 }
             } else {
-                exit(1);
+                fail();
             }
         } else {
-            exit(1);
+            fail();
         }
     }
 
@@ -465,10 +524,12 @@ const Parser = struct{
         const identifier = parser.parse_raw_identifier(file);
         const keyword = parse_keyword(identifier);
         if (keyword != ~(@as(u32, 0))) {
-            exit(1);
+            fail();
         }
-        const hash = intern_identifier(&thread.identifiers, identifier);
-        return hash;
+
+        if (byte_equal(identifier, "_")) {
+            return 0;
+        } else return intern_identifier(&thread.identifiers, identifier);
     }
 
     fn parse_non_escaped_string_literal(parser: *Parser, src: []const u8) []const u8 {
@@ -477,11 +538,11 @@ const Parser = struct{
         parser.i += @intFromBool(is_double_quote);
 
         if (!is_double_quote) {
-            exit(1);
+            fail();
         }
 
         while (src[parser.i] != '"') : (parser.i += 1) {
-            if (src[parser.i] == '\\') exit(1);
+            if (src[parser.i] == '\\') fail();
         }
 
         parser.i += 1;
@@ -503,58 +564,49 @@ const Parser = struct{
             const matches = ch == expected;
             parser.i += @intFromBool(matches);
             if (!matches) {
-                exit(1);
+                fail();
             }
         } else {
-            exit(1);
+            fail();
         }
     }
 
     pub fn parse_hex(slice: []const u8) u64 {
-        var i = slice.len;
-        var integer: u64 = 0;
-        var factor: u64 = 1;
-
-        while (i > 0) {
-            i -= 1;
-            const ch = slice[i];
-            switch (ch) {
-                '0'...'9' => {
-                    const int = ch - '0';
-                    const extra = int * factor;
-                    integer += extra;
-                    factor *= 16;
-                },
-                'a'...'f' => {
-                    const int = ch - 'a' + 10;
-                    const extra = int * factor;
-                    integer += extra;
-                    factor *= 16;
-                },
-                'A'...'F' => {
-                    const int = ch - 'A' + 10;
-                    const extra = int * factor;
-                    integer += extra;
-                    factor *= 16;
-                },
-                else => exit(1),
-            }
+        var value: u64 = 0;
+        for (slice) |ch| {
+            const byte = switch (ch) {
+                '0'...'9' => ch - '0',
+                'a'...'f' => ch - 'a' + 10,
+                'A'...'F' => ch - 'A' + 10,
+                else => fail(),
+            };
+            value = (value << 4) | (byte & 0xf);
         }
 
-        return integer;
+        return value;
     }
 
     fn parse_type_expression(parser: *Parser, thread: *Thread, file: *File, current_scope: *Scope) *Type {
         const src = file.source_code;
-        const starting_ch = src[parser.i];
+        const starting_index = parser.i;
+        const starting_ch = src[starting_index];
         const is_array_start = starting_ch == '[';
         const is_start_u = starting_ch == 'u';
         const is_start_s = starting_ch == 's';
         const float_start = starting_ch == 'f';
+        const is_void_start = starting_ch == 'v';
+        const is_pointer_sign_start = starting_ch == '*';
         const integer_start = is_start_s or is_start_u;
         const is_number_type_start = integer_start or float_start;
 
-        if (is_number_type_start) {
+        if (is_void_start) {
+            const id = parser.parse_raw_identifier(src);
+            if (byte_equal(id, "void")) {
+                return &thread.void;
+            } else {
+                parser.i = starting_index;
+            }
+        } else if (is_number_type_start) {
             const expected_digit_start = parser.i + 1;
             var i = expected_digit_start;
             var decimal_digit_count: u32 = 0;
@@ -581,23 +633,31 @@ const Parser = struct{
                         0 => unreachable,
                         1 => src[parser.i] - '0',
                         2 => @as(u32, src[parser.i] - '0') * 10 + (src[parser.i + 1] - '0'),
-                        else => exit(1),
+                        else => fail(),
                     };
                     parser.i += decimal_digit_count;
 
                     const index = bit_count - 1 + @intFromEnum(signedness) * @as(usize, 64);
                     const result = &thread.integers[index];
-                    assert(result.bit_count == bit_count);
+                    assert(result.type.bit_size == bit_count);
                     assert(result.signedness == signedness);
                     return &result.type;
                 } else if (float_start) {
-                    exit(1);
+                    fail();
                 } else {
                     unreachable;
                 }
             } else {
-                exit(1);
+                fail();
             }
+        } else if (is_pointer_sign_start) {
+            parser.i += 1;
+
+            const pointee_type = parser.parse_type_expression(thread, file, current_scope);
+            const typed_pointer = get_typed_pointer(thread, .{
+                .pointee = pointee_type,
+            });
+            return typed_pointer;
         } else if (is_array_start) {
             parser.i += 1;
 
@@ -636,10 +696,9 @@ const Parser = struct{
                 },
                 else => |t| @panic(@tagName(t)),
             }
-            unreachable;
+        } else {
+            fail_term("Unrecognized type expression", thread.identifiers.get(identifier).?);
         }
-
-        exit_with_error("Unrecognized type expression");
     }
 
     fn parse_constant_integer(parser: *Parser, thread: *Thread, file: *File, ty: *Type) *ConstantInt {
@@ -695,7 +754,7 @@ const Parser = struct{
                         unreachable;
                     },
                 }
-                exit(1);
+                fail();
             } else if (is_valid_after_zero) {
                 parser.i += 1;
                 const constant_int = create_constant_int(thread, .{
@@ -704,7 +763,7 @@ const Parser = struct{
                 });
                 return constant_int;
             } else {
-                exit(1);
+                fail();
             }
         }
 
@@ -739,6 +798,8 @@ const Parser = struct{
         value: *Value,
         name: u32,
         index: u32,
+        line: u32,
+        column: u32,
     };
 
     fn parse_field_initialization(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, names_initialized: []const u32, fields: []const *Type.AggregateField) ?ParseFieldInitialization{
@@ -749,11 +810,14 @@ const Parser = struct{
             return null;
         }
 
+        const line = parser.get_debug_line();
+        const column = parser.get_debug_column();
+
         parser.expect_character(src, '.');
         const name = parser.parse_identifier(thread, src);
         for (names_initialized) |initialized_name| {
             if (initialized_name == name) {
-                exit(1);
+                fail();
             }
         }
         const field_index = for (fields) |field| {
@@ -761,7 +825,7 @@ const Parser = struct{
                 break field.index;
             }
         } else {
-            exit(1);
+            fail();
         };
         const field_type = fields[field_index].type;
         parser.skip_space(src);
@@ -775,13 +839,15 @@ const Parser = struct{
         switch (src[parser.i]) {
             brace_close => {},
             ',' => parser.i += 1,
-            else => exit(1),
+            else => fail(),
         }
 
         return ParseFieldInitialization{
             .value = field_value,
             .name = name,
             .index = field_index,
+            .line = line,
+            .column = column,
         };
     }
 
@@ -790,11 +856,16 @@ const Parser = struct{
         const Unary = enum{
             none,
             one_complement,
+            negation,
         };
 
         const unary: Unary = switch (src[parser.i]) {
             'A'...'Z', 'a'...'z', '_' => Unary.none,
             '0'...'9' => Unary.none,
+            '-' => block: {
+                parser.i += 1;
+                break :block .negation;
+            },
             '~' => block: {
                 parser.i += 1;
                 break :block .one_complement;
@@ -808,7 +879,7 @@ const Parser = struct{
                 parser.i += 1;
 
                 // This is a composite initialization
-                const ty = maybe_type orelse exit(1);
+                const ty = maybe_type orelse fail();
                 switch (ty.sema.id) {
                     .@"struct" => {
                         const struct_type = ty.get_payload(.@"struct");
@@ -818,11 +889,13 @@ const Parser = struct{
                         var values = PinnedArray(*Value){};
                         var field_index: u32 = 0;
                         var is_field_ordered = true;
+                        var line_info = PinnedArray(struct{ line: u32, column: u32 }){};
 
                         while (parser.parse_field_initialization(analyzer, thread, file, names_initialized.const_slice(), struct_type.fields)) |field_data| : (field_index += 1) {
                             is_field_ordered = is_field_ordered and field_index == field_data.index;
                             _ = names_initialized.append(field_data.name);
                             _ = values.append(field_data.value);
+                            _ = line_info.append(.{ .line = field_data.line, .column = field_data.column });
                             is_constant = is_constant and field_data.value.is_constant();
                         }
 
@@ -843,10 +916,37 @@ const Parser = struct{
                                 });
                                 return &constant_struct.value;
                             } else {
-                                exit_with_error("TODO: runtime struct initialization");
+                                const undefined_value = thread.undefined_values.append(.{
+                                    .value = .{
+                                        .sema = .{
+                                            .id = .undefined,
+                                            .resolved = true,
+                                            .thread = thread.get_index(),
+                                        },
+                                    },
+                                    .type = ty,
+                                });
+
+                                if (true) unreachable;
+                                var aggregate = &undefined_value.value;
+                                for (values.const_slice(), line_info.const_slice(), 0..) |value, li, index| {
+                                    if (true) unreachable;
+                                    const insert_value = emit_insert_value(thread, analyzer, .{
+                                        .aggregate = aggregate,
+                                        .value = value,
+                                        .index = @intCast(index),
+                                        .line = li.line,
+                                        .column = li.column,
+                                        .scope = analyzer.current_scope,
+                                        .type = ty,
+                                    });
+                                    aggregate = &insert_value.instruction.value;
+                                }
+
+                                return aggregate;
                             }
                         } else {
-                            exit(1);
+                            fail();
                         }
                     },
                     .bitfield => {
@@ -875,12 +975,11 @@ const Parser = struct{
                                     switch (value.sema.id) {
                                         .constant_int => {
                                             const constant_int = value.get_payload(.constant_int);
-                                            const int_ty = constant_int.type.get_payload(.integer);
-                                            const field_bit_count = int_ty.bit_count;
+                                            const field_bit_count = constant_int.type.bit_size;
                                             const field_value = constant_int.n;
                                             const offset_value = field_value << @as(u6, @intCast(bit_offset));
                                             result |= offset_value;
-                                            bit_offset += field_bit_count;
+                                            bit_offset += @intCast(field_bit_count);
                                         },
                                         else => |t| @panic(@tagName(t)),
                                     }
@@ -895,7 +994,7 @@ const Parser = struct{
                                 unreachable;
                             }
                         } else {
-                            exit_with_error("TODO: runtime struct initialization");
+                            fail_message("TODO: runtime struct initialization");
                         }
                     },
                     else => |t| @panic(@tagName(t)),
@@ -905,7 +1004,7 @@ const Parser = struct{
                 // This is an array expression
                 parser.i += 1;
 
-                const ty = maybe_type orelse exit(1);
+                const ty = maybe_type orelse fail();
                 const array_type = ty.get_payload(.array);
                 const element_count = array_type.descriptor.element_count;
                 const element_type = array_type.descriptor.element_type;
@@ -938,7 +1037,7 @@ const Parser = struct{
                 parser.i += 1;
 
                 if (values.length != element_count) {
-                    exit(1);
+                    fail();
                 }
 
                 if (is_constant) {
@@ -969,28 +1068,71 @@ const Parser = struct{
         const debug_column = parser.get_debug_column();
 
         if (is_digit_start) {
-            assert(unary == .none);
-            const ty = maybe_type orelse &thread.integers[63].type;
+            const ty = maybe_type orelse switch (unary) {
+                .none => &thread.integers[63].type,
+                .one_complement => fail(),
+                .negation => fail(),
+            };
+
             switch (ty.sema.id) {
                 .integer => {
                     const constant_int = parser.parse_constant_integer(thread, file, ty);
-                    return &constant_int.value;
+                    switch (unary) {
+                        .none => return &constant_int.value,
+                        .one_complement => unreachable,
+                        .negation => {
+                            const integer_ty = ty.get_payload(.integer);
+                            switch (integer_ty.signedness) {
+                                .signed => {
+                                    var n: i64 = @intCast(constant_int.n);
+                                    n = 0 - n;
+                                    const result = create_constant_int(thread, .{
+                                        .n = @bitCast(n),
+                                        .type = ty,
+                                    });
+                                    return &result.value;
+                                },
+                                .unsigned => fail(),
+                            }
+                        },
+                    }
                 },
                 else => unreachable,
             }
         } else if (is_alpha_start) {
             var resolved = true;
-            const identifier = parser.parse_identifier(thread, src);
+            const name = parser.parse_raw_identifier(src);
+            const keyword = parse_keyword(name);
+            if (keyword != ~(@as(u32, 0))) {
+                switch (@as(Keyword, @enumFromInt(keyword))) {
+                    .undefined => {
+                        const ty = maybe_type orelse fail();
+                        const undef = thread.undefined_values.append(.{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .undefined,
+                                },
+                            },
+                            .type = ty,
+                        });
 
-            var initial_type: *Type = undefined;
-            var appointee_type: ?*Type = null;
+                        return &undef.value;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            }
+
+            const identifier: u32 = if (byte_equal(name, "_")) 0 else intern_identifier(&thread.identifiers, name);
+
+            var initial_type: ?*Type = null;
             const initial_value = if (analyzer.current_scope.get_declaration(identifier)) |lookup_result| blk: {
                 switch (lookup_result.declaration.*.id) {
                     .local => {
                         const local_declaration = lookup_result.declaration.*.get_payload(.local);
                         const local_symbol = local_declaration.to_symbol();
                         initial_type = local_symbol.type;
-                        appointee_type = local_symbol.appointee_type;
                         break :blk &local_symbol.instruction.value;
                     },
                     .global => {
@@ -1038,6 +1180,7 @@ const Parser = struct{
                                             }),
                                             .callable = &lazy_expression.value,
                                             .arguments = &.{},
+                                            .calling_convention = .c,
                                         });
                                         analyzer.append_instruction(&call.instruction);
 
@@ -1079,17 +1222,17 @@ const Parser = struct{
                     return switch (unary) {
                         .none => switch (side) {
                             .right => right: {
-                                if (maybe_type) |ty| {
-                                    switch (typecheck(ty, initial_type)) {
-                                        .success => {},
-                                    }
-                                }
-
-                                assert(initial_value.get_type() != initial_type);
+                                const ty = if (initial_type) |source_ty| if (maybe_type) |destination_ty| blk: {
+                                        switch (typecheck(destination_ty, source_ty)) {
+                                            .success => {},
+                                        }
+                                        break :blk source_ty;
+                                    } else source_ty
+                                else if (maybe_type) |ty| ty else fail();
 
                                 const load = emit_load(analyzer, thread, .{
                                     .value = initial_value,
-                                    .type = initial_type,
+                                    .type = ty,
                                     .line = debug_line,
                                     .column = debug_column,
                                     .scope = analyzer.current_scope,
@@ -1098,23 +1241,54 @@ const Parser = struct{
                             },
                             .left => initial_value,
                         },
-                        .one_complement => oc: {
+                        .negation => neg: {
                             assert(side == .right);
-                            const operand = create_constant_int(thread, .{
-                                .type = initial_type,
-                                .n = std.math.maxInt(u64),
-                            });
                             var r = initial_value;
-                            if (initial_value.get_type() != initial_type) {
+                            if (initial_value.get_type() != initial_type.?) {
                                 const load = emit_load(analyzer, thread, .{
                                     .value = initial_value,
-                                    .type = initial_type,
+                                    .type = initial_type.?,
                                     .line = debug_line,
                                     .column = debug_column,
                                     .scope = analyzer.current_scope,
                                 });
                                 r = &load.instruction.value;
                             }
+
+                            const operand = create_constant_int(thread, .{
+                                .type = initial_type.?,
+                                .n = 0,
+                            });
+
+                            const sub = emit_integer_binary_operation(analyzer, thread, .{
+                                .line = debug_line,
+                                .column = debug_column,
+                                .scope = analyzer.current_scope,
+                                .left = &operand.value,
+                                .right = r,
+                                .id = .sub,
+                                .type = initial_type.?,
+                            });
+                            break :neg &sub.instruction.value;
+                        },
+                        .one_complement => oc: {
+                            assert(side == .right);
+                            var r = initial_value;
+                            if (initial_value.get_type() != initial_type.?) {
+                                const load = emit_load(analyzer, thread, .{
+                                    .value = initial_value,
+                                    .type = initial_type.?,
+                                    .line = debug_line,
+                                    .column = debug_column,
+                                    .scope = analyzer.current_scope,
+                                });
+                                r = &load.instruction.value;
+                            }
+
+                            const operand = create_constant_int(thread, .{
+                                .type = initial_type.?,
+                                .n = std.math.maxInt(u64),
+                            });
 
                             const xor = emit_integer_binary_operation(analyzer, thread, .{
                                 .line = debug_line,
@@ -1123,7 +1297,7 @@ const Parser = struct{
                                 .left = r,
                                 .right = &operand.value,
                                 .id = .xor,
-                                .type = initial_type,
+                                .type = initial_type.?,
                             });
                             break :oc &xor.instruction.value;
                         },
@@ -1143,19 +1317,39 @@ const Parser = struct{
                             const FunctionCallData = struct{
                                 type: *Type.Function,
                                 value: *Value,
+                                calling_convention: CallingConvention,
                             };
-                            const function_call_data: FunctionCallData = switch (initial_type.sema.id) {
+
+                            const function_call_data: FunctionCallData = switch (initial_type.?.sema.id) {
                                 .function => .{
-                                    .type = initial_type.get_payload(.function),
+                                    .type = initial_type.?.get_payload(.function),
                                     .value = initial_value,
+                                    .calling_convention = switch (initial_value.sema.id) {
+                                        .global_symbol => b: {
+                                            const global_symbol = initial_value.get_payload(.global_symbol);
+                                            switch (global_symbol.id) {
+                                                .function_definition => {
+                                                    const function_definition = global_symbol.get_payload(.function_definition);
+                                                    break :b function_definition.declaration.get_function_type().abi.calling_convention;
+                                                },
+                                                .function_declaration => {
+                                                    const function_declaration = global_symbol.get_payload(.function_declaration);
+                                                    break :b function_declaration.get_function_type().abi.calling_convention;
+                                                },
+                                                else => |t| @panic(@tagName(t)),
+                                            }
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    },
                                 },
-                                .pointer => switch (initial_value.sema.id) {
+                                .typed_pointer => switch (initial_value.sema.id) {
                                     .instruction => blk: {
                                         const instruction = initial_value.get_payload(.instruction);
                                         switch (instruction.id) {
                                             .local_symbol => {
                                                 const local_symbol = instruction.get_payload(.local_symbol);
-                                                const function_type = local_symbol.appointee_type.?.get_payload(.function);
+                                                const pointer_type = local_symbol.type.get_payload(.typed_pointer);
+                                                const function_type = pointer_type.descriptor.pointee.get_payload(.function);
 
                                                 const load = emit_load(analyzer, thread, .{
                                                     .value = &local_symbol.instruction.value,
@@ -1167,6 +1361,8 @@ const Parser = struct{
                                                 break :blk .{
                                                     .type = function_type,
                                                     .value = &load.instruction.value,
+                                                    // TODO:
+                                                    .calling_convention = .c,
                                                 };
                                             },
                                             else => |t| @panic(@tagName(t)),
@@ -1179,24 +1375,48 @@ const Parser = struct{
 
                             const function_type = function_call_data.type;
                             const function_value = function_call_data.value;
-                            const declaration_argument_count = function_type.argument_types.len;
 
-                            var argument_values = PinnedArray(*Value){};
+                            var abi_argument_values = PinnedArray(*Value){};
 
+                            const indirect_return_value: ?*Value = switch (function_type.abi.return_type_abi.kind) {
+                                .indirect => |indirect| ind: {
+                                    if (indirect.alignment <= indirect.type.alignment) {
+                                        const return_local = emit_local_symbol(analyzer, thread, .{
+                                            .name = 0,
+                                            .initial_value = null,
+                                            .type = indirect.type,
+                                            .line = 0,
+                                            .column = 0,
+                                        });
+                                        const return_value = &return_local.instruction.value;
+                                        _ = abi_argument_values.append(return_value);
+
+                                        break :ind return_value;
+                                    } else {
+                                        unreachable;
+                                    }
+                                },
+                                else => null,
+                            };
+
+                            var original_argument_i: u32 = 0;
+                            const declaration_argument_count = function_type.abi.original_argument_types.len;
                             while (true) {
                                 parser.skip_space(src);
 
                                 if (src[parser.i] == ')') {
                                     break;
                                 }
-
-                                const argument_index = argument_values.length;
+                                
+                                const argument_index = original_argument_i;
                                 if (argument_index >= declaration_argument_count) {
-                                    exit(1);
+                                    fail();
                                 }
-                                const expected_argument_type = function_type.argument_types[argument_index];
-                                const passed_argument_value = parser.parse_expression(analyzer, thread, file, expected_argument_type, .right);
-                                _ = argument_values.append(passed_argument_value);
+
+                                const argument_abi = function_type.abi.argument_types_abi[argument_index];
+                                const argument_type = function_type.abi.original_argument_types[argument_index];
+                                const argument_value = parser.parse_expression(analyzer, thread, file, argument_type, .right);
+                                const argument_value_type = argument_value.get_type();
 
                                 parser.skip_space(src);
 
@@ -1205,10 +1425,150 @@ const Parser = struct{
                                     ')' => {},
                                     else => unreachable,
                                 }
+
+                                switch (argument_abi.kind) {
+                                    .direct => {
+                                        assert(argument_value_type == argument_type);
+                                        _ = abi_argument_values.append(argument_value);
+                                    },
+                                    .direct_coerce => |coerced_type| {
+                                        const coerced_value = emit_direct_coerce(analyzer, thread, .{
+                                            .original_value = argument_value,
+                                            .coerced_type = coerced_type,
+                                        });
+                                        _ = abi_argument_values.append(coerced_value);
+                                    },
+                                    .indirect => |indirect| {
+                                        assert(argument_type == indirect.type);
+                                        const direct = if (!argument_abi.attributes.by_value) false else switch (argument_type.sema.id) {
+                                            .typed_pointer => unreachable,
+                                            else => false,
+                                        };
+
+                                        if (direct) {
+                                            unreachable;
+                                        } else {
+                                            const indirect_local = emit_local_symbol(analyzer, thread, .{
+                                                .type = argument_type,
+                                                .name = 0,
+                                                .initial_value = argument_value,
+                                                .line = 0,
+                                                .column = 0,
+                                            });
+                                            _ = abi_argument_values.append(&indirect_local.instruction.value);
+                                        }
+                                    },
+                                    .direct_pair => |pair| {
+                                        const pair_struct_type = get_anonymous_two_field_struct(thread, pair);
+                                        const are_similar = b: {
+                                            if (pair_struct_type == argument_type) {
+                                                break :b true;
+                                            } else {
+                                                switch (argument_type.sema.id) {
+                                                    .@"struct" => {
+                                                        const original_struct_type = argument_type.get_payload(.@"struct");
+                                                        if (original_struct_type.fields.len == 2) {
+                                                            for (original_struct_type.fields, pair) |field, pair_type| {
+                                                                if (field.type != pair_type) break :b false;
+                                                            }
+                                                            break :b true;
+                                                        } else break :b false;
+                                                    },
+                                                    else => |t| @panic(@tagName(t)),
+                                                }
+                                            }
+                                        };
+
+                                        if (are_similar) {
+                                            const extract_0 = emit_extract_value(thread, analyzer, .{
+                                                .aggregate = argument_value,
+                                                .index = 0,
+                                                .line = 0,
+                                                .column = 0,
+                                                .scope = analyzer.current_scope,
+                                                .type = pair[0],
+                                            });
+                                            _ = abi_argument_values.append(&extract_0.instruction.value);
+                                            const extract_1 = emit_extract_value(thread, analyzer, .{
+                                                .aggregate = argument_value,
+                                                .index = 1,
+                                                .line = 0,
+                                                .column = 0,
+                                                .scope = analyzer.current_scope,
+                                                .type = pair[1],
+                                            });
+                                            _ = abi_argument_values.append(&extract_1.instruction.value);
+                                        } else {
+                                            const local_value = if (argument_type.alignment < pair_struct_type.alignment) b: {
+                                                const coerced_local = emit_local_symbol(analyzer, thread, .{
+                                                    .type = pair_struct_type,
+                                                    .name = 0,
+                                                    .initial_value = argument_value,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                });
+                                                break :b &coerced_local.instruction.value;
+                                            } else b: {
+                                                const argument_local = emit_local_symbol(analyzer, thread, .{
+                                                    .type = argument_type,
+                                                    .name = 0,
+                                                    .initial_value = argument_value,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                });
+                                                break :b &argument_local.instruction.value;
+                                            };
+                                            const gep0 = emit_gep(thread, analyzer, .{
+                                                .pointer = local_value,
+                                                .type = pair[0],
+                                                .aggregate_type = pair_struct_type,
+                                                .is_struct = true,
+                                                .index = &create_constant_int(thread, .{
+                                                    .n = 0,
+                                                    .type = &thread.integers[31].type,
+                                                }).value,
+                                                .line = 0,
+                                                .column = 0,
+                                                .scope = analyzer.current_scope,
+                                            });
+                                            const load0 = emit_load(analyzer, thread, .{
+                                                .type = pair[0],
+                                                .value = &gep0.instruction.value,
+                                                .scope = analyzer.current_scope,
+                                                .line = 0,
+                                                .column = 0,
+                                            });
+                                            _ = abi_argument_values.append(&load0.instruction.value);
+                                            const gep1 = emit_gep(thread, analyzer, .{
+                                                .pointer = local_value,
+                                                .type = pair[1],
+                                                .aggregate_type = pair_struct_type,
+                                                .is_struct = true,
+                                                .index = &create_constant_int(thread, .{
+                                                    .n = 1,
+                                                    .type = &thread.integers[31].type,
+                                                }).value,
+                                                .line = 0,
+                                                .column = 0,
+                                                .scope = analyzer.current_scope,
+                                            });
+                                            const load1 = emit_load(analyzer, thread, .{
+                                                .type = pair[1],
+                                                .value = &gep1.instruction.value,
+                                                .scope = analyzer.current_scope,
+                                                .line = 0,
+                                                .column = 0,
+                                            });
+                                            _ = abi_argument_values.append(&load1.instruction.value);
+                                        }
+                                    },
+                                    else => |t| @panic(@tagName(t)),
+                                }
+
+                                original_argument_i += 1;
                             }
 
                             parser.i += 1;
-
                             const call = thread.calls.append(.{
                                 .instruction = new_instruction(thread, .{
                                     .id = .call,
@@ -1217,10 +1577,23 @@ const Parser = struct{
                                     .scope = analyzer.current_scope,
                                 }),
                                 .callable = function_value,
-                                .arguments = argument_values.const_slice(),
+                                .arguments = abi_argument_values.const_slice(),
+                                .calling_convention = function_call_data.calling_convention,
                             });
                             analyzer.append_instruction(&call.instruction);
-                            return &call.instruction.value;
+
+                            if (indirect_return_value) |irv| {
+                                const load = emit_load(analyzer, thread, .{
+                                    .value = irv,
+                                    .type = function_type.abi.original_return_type,
+                                    .line = 0,
+                                    .column = 0,
+                                    .scope = analyzer.current_scope,
+                                });
+                                return &load.instruction.value;
+                            } else {
+                                return &call.instruction.value;
+                            }
                         },
                         false => {
                             var argument_values = PinnedArray(*Value){};
@@ -1256,6 +1629,7 @@ const Parser = struct{
                                 }),
                                 .callable = initial_value,
                                 .arguments = argument_values.const_slice(),
+                                .calling_convention = .c,
                             });
                             switch (initial_value.sema.id) {
                                 .local_lazy_expression => {
@@ -1274,9 +1648,9 @@ const Parser = struct{
 
                     parser.skip_space(src);
 
-                    const declaration_element_type = switch (initial_type.sema.id) {
+                    const declaration_element_type = switch (initial_type.?.sema.id) {
                         .array => block: {
-                            const array_type = initial_type.get_payload(.array);
+                            const array_type = initial_type.?.get_payload(.array);
                             break :block array_type.descriptor.element_type;
                         },
                         else => |t| @panic(@tagName(t)),
@@ -1287,20 +1661,16 @@ const Parser = struct{
                     parser.skip_space(src);
 
                     parser.expect_character(src, ']');
-                    const gep = thread.geps.append(.{
-                        .instruction = new_instruction(thread, .{
-                            .id = .get_element_pointer,
-                            .line = debug_line,
-                            .column = debug_column,
-                            .scope = analyzer.current_scope,
-                        }),
+                    const gep = emit_gep(thread, analyzer, .{
                         .pointer = initial_value,
                         .index = index,
                         .type = declaration_element_type,
-                        .aggregate_type = initial_type,
+                        .aggregate_type = initial_type.?,
                         .is_struct = false,
+                        .line = debug_line,
+                        .column = debug_column,
+                        .scope = analyzer.current_scope,
                     });
-                    analyzer.append_instruction(&gep.instruction);
 
                     return switch (side) {
                         .left => &gep.instruction.value,
@@ -1317,17 +1687,17 @@ const Parser = struct{
                     };
                 },
                 '.' => {
-                    const result = parser.parse_field_access(analyzer, thread, file, maybe_type, side, initial_value, initial_type, debug_line, debug_column);
+                    const result = parser.parse_field_access(analyzer, thread, file, maybe_type, side, initial_value, initial_type.?, debug_line, debug_column);
                     return result;
                 },
                 '@' => {
                     parser.i += 1;
 
-                    assert(initial_type.sema.id == .pointer);
+                    assert(initial_type.?.sema.id == .typed_pointer);
 
                     const load = emit_load(analyzer, thread, .{
                         .value = initial_value,
-                        .type = initial_type,
+                        .type = initial_type.?,
                         .line = debug_line,
                         .column = debug_column,
                         .scope = analyzer.current_scope,
@@ -1336,7 +1706,14 @@ const Parser = struct{
                     return switch (side) {
                         .left => &load.instruction.value,
                         .right => block: {
-                            const pointer_load_type = appointee_type orelse exit(1);
+                            const pointer_load_type = switch (initial_type.?.sema.id) {
+                                .typed_pointer => b: {
+                                    const typed_pointer = initial_type.?.get_payload(.typed_pointer);
+                                    break :b typed_pointer.descriptor.pointee;
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            };
+
                             if (maybe_type) |ty| {
                                 switch (typecheck(ty, pointer_load_type)) {
                                     .success => {},
@@ -1358,7 +1735,7 @@ const Parser = struct{
                 else => unreachable,
             }
         } else {
-            exit(1);
+            fail();
         }
     }
 
@@ -1433,27 +1810,23 @@ const Parser = struct{
                     if (field.name == field_name) {
                         break field.index;
                     }
-                } else exit(1);
+                } else fail();
 
                 const index_value = create_constant_int(thread, .{
                     .type = &thread.integers[31].type,
                     .n = field_index,
                 });
 
-                const gep = thread.geps.append(.{
-                    .instruction = new_instruction(thread, .{
-                        .id = .get_element_pointer,
-                        .line = line,
-                        .column = column,
-                        .scope = analyzer.current_scope,
-                    }),
+                const gep = emit_gep(thread, analyzer, .{
+                    .line = line,
+                    .column = column,
+                    .scope = analyzer.current_scope,
                     .pointer = value,
                     .index = &index_value.value,
                     .aggregate_type = ty,
                     .type = struct_type.fields[field_index].type,
                     .is_struct = true,
                 });
-                analyzer.append_instruction(&gep.instruction);
 
                 const result = switch (side) {
                     .right => block: {
@@ -1486,7 +1859,7 @@ const Parser = struct{
                     if (field.name == field_name) {
                         break field.index;
                     }
-                } else exit(1);
+                } else fail();
                 const field = bitfield_type.fields[field_index];
 
                 const load = emit_load(analyzer, thread, .{
@@ -1682,7 +2055,7 @@ const Parser = struct{
                         current_operation = .@"orelse";
                     } else {
                         parser.i = original;
-                        exit(1);
+                        fail();
                     }
 
                     parser.skip_space(src);
@@ -2129,6 +2502,7 @@ const Value = struct {
         global_symbol,
         lazy_expression,
         local_lazy_expression,
+        undefined,
     };
 
     const id_to_value_map = std.EnumArray(Id, type).init(.{
@@ -2142,11 +2516,16 @@ const Value = struct {
         .instruction = Instruction,
         .lazy_expression = LazyExpression,
         .local_lazy_expression = LocalLazyExpression,
+        .undefined = Undefined,
     });
 
     fn is_constant(value: *Value) bool {
         return switch (value.sema.id) {
-            .constant_int => true,
+            .constant_int,
+            .constant_struct,
+            .undefined,
+            => true,
+            .instruction => false,
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -2172,7 +2551,7 @@ const Value = struct {
                     .call => {
                         const call = instruction.get_payload(.call);
                         const function_type = call.get_function_type();
-                        return function_type.return_type;
+                        return function_type.abi.original_return_type;
                     },
                     .integer_compare => {
                         return &instance.threads[value.sema.thread].integers[0].type;
@@ -2185,12 +2564,25 @@ const Value = struct {
                         const lz = instruction.get_payload(.leading_zeroes);
                         return lz.value.get_type();
                     },
-                    .local_symbol, .argument_storage, => {
-                        return &instance.threads[value.sema.thread].pointer;
+                    .local_symbol => {
+                        const local_symbol = instruction.get_payload(.local_symbol);
+                        return local_symbol.pointer_type;
+                    },
+                    .argument_storage => {
+                        const argument_symbol = instruction.get_payload(.argument_storage);
+                        return argument_symbol.pointer_type;
                     },
                     .cast => {
                         const cast = instruction.get_payload(.cast);
                         return cast.type;
+                    },
+                    .insert_value => {
+                        const insert_value = instruction.get_payload(.insert_value);
+                        return insert_value.type;
+                    },
+                    .phi => {
+                        const phi = instruction.get_payload(.phi);
+                        return phi.type;
                     },
                     else => |t| @panic(@tagName(t)),
                 };
@@ -2200,11 +2592,12 @@ const Value = struct {
                 return constant_int.type;
             },
             .global_symbol => {
-                return &instance.threads[value.sema.thread].pointer;
+                const global_symbol = value.get_payload(.global_symbol);
+                return global_symbol.pointer_type;
             },
-            // This must not be reached at all
-            .argument => {
-                unreachable;
+            .constant_struct => {
+                const constant_struct = value.get_payload(.constant_struct);
+                return constant_struct.type;
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -2222,23 +2615,26 @@ const Type = struct {
         reserved: u7 = 0,
     },
     size: u64,
+    bit_size: u64,
     alignment: u32,
 
     const Id = enum(u8){
         unresolved,
         void,
+        noreturn,
         integer,
         array,
-        pointer,
+        opaque_pointer,
+        typed_pointer,
         function,
         @"struct",
         bitfield,
+        anonymous_struct,
     };
 
     const Integer = struct {
         type: Type,
         signedness: Signedness,
-        bit_count: u16,
 
         const Signedness = enum(u1){
             unsigned,
@@ -2258,13 +2654,17 @@ const Type = struct {
 
     const Function = struct{
         type: Type,
-        argument_types: []const *Type,
-        return_type: *Type,
+        abi: compiler.Function.Abi,
     };
 
     const Struct = struct {
         type: Type,
         declaration: Declaration,
+        fields: []const *AggregateField,
+    };
+
+    const AnonymousStruct = struct{
+        type: Type,
         fields: []const *AggregateField,
     };
 
@@ -2285,15 +2685,27 @@ const Type = struct {
         column: u32,
     };
 
+    const TypedPointer = struct{
+        type: Type,
+        descriptor: Descriptor,
+
+        const Descriptor = struct{
+            pointee: *Type,
+        };
+    };
+
     const id_to_type_map = std.EnumArray(Id, type).init(.{
         .unresolved = void,
         .void = void,
+        .noreturn = void,
         .integer = Integer,
         .array = Array,
-        .pointer = void,
+        .opaque_pointer = void,
         .function = Type.Function,
         .@"struct" = Type.Struct,
         .bitfield = Type.Bitfield,
+        .typed_pointer = TypedPointer,
+        .anonymous_struct = AnonymousStruct,
     });
 
     fn get_payload(ty: *Type, comptime id: Id) *id_to_type_map.get(id) {
@@ -2301,55 +2713,159 @@ const Type = struct {
         return @fieldParentPtr("type", ty);
     }
 
-    fn get_bit_count(ty: *Type) u32 {
+    fn clone(ty: *Type, args: struct{
+        destination_thread: *Thread,
+        source_thread_index: u16,
+    }) *Type {
+        assert(args.destination_thread.get_index() == 0);
+        const result: *Type = if (args.destination_thread.cloned_types.get(ty)) |result| blk: {
+            assert(result.sema.thread == args.destination_thread.get_index());
+            break :blk result;
+        } else blk: {
+            assert(ty.sema.resolved);
+            assert(ty.sema.thread == args.source_thread_index);
+
+            const result: *Type = switch (ty.sema.id) {
+                .integer => {
+                    const source_thread = &instance.threads[args.source_thread_index];
+                    const source_integer_type = ty.get_payload(.integer);
+                    const index = @divExact(@intFromPtr(source_integer_type) - @intFromPtr(&source_thread.integers), @sizeOf(Type.Integer));
+                    break :blk &args.destination_thread.integers[index].type;
+                },
+                .function => block: {
+                    const source_function_type = ty.get_payload(.function);
+                    const original_return_type = source_function_type.abi.original_return_type.clone(.{
+                        .destination_thread = args.destination_thread,
+                        .source_thread_index = args.source_thread_index,
+                    });
+                    const abi_return_type = source_function_type.abi.abi_return_type.clone(.{
+                        .destination_thread = args.destination_thread,
+                        .source_thread_index = args.source_thread_index,
+                    });
+                    const return_type_abi = source_function_type.abi.return_type_abi.clone(.{
+                        .destination_thread = args.destination_thread,
+                        .source_thread_index = args.source_thread_index,
+                    });
+
+                    var original_argument_types = PinnedArray(*Type){};
+                    for (source_function_type.abi.original_argument_types) |original_argument_type| {
+                        const new = original_argument_type.clone(.{
+                            .destination_thread = args.destination_thread,
+                            .source_thread_index = args.source_thread_index,
+                        });
+                        _ = original_argument_types.append(new);
+                    }
+                    var abi_argument_types = PinnedArray(*Type){};
+                    for (source_function_type.abi.original_argument_types) |abi_argument_type| {
+                        const new = abi_argument_type.clone(.{
+                            .destination_thread = args.destination_thread,
+                            .source_thread_index = args.source_thread_index,
+                        });
+                        _ = abi_argument_types.append(new);
+                    }
+
+                    var argument_type_abis = PinnedArray(compiler.Function.Abi.Information){};
+                    for (source_function_type.abi.argument_types_abi) |argument_type_abi| {
+                        const new = argument_type_abi.clone(.{
+                            .destination_thread = args.destination_thread,
+                            .source_thread_index = args.source_thread_index,
+                        });
+                        _ = argument_type_abis.append(new);
+                    }
+
+                    const function_type = args.destination_thread.function_types.append(.{
+                        .type = source_function_type.type,
+                        .abi = .{
+                            .return_type_abi = return_type_abi,
+                            .original_argument_types = original_argument_types.const_slice(),
+                            .original_return_type = original_return_type,
+                            .abi_return_type = abi_return_type,
+                            .abi_argument_types = abi_argument_types.const_slice(),
+                            .argument_types_abi = argument_type_abis.const_slice(),
+                            .calling_convention = source_function_type.abi.calling_convention,
+                        },
+                    });
+                    break :block &function_type.type;
+                },
+                else => |t| @panic(@tagName(t)),
+            };
+
+            result.llvm = null;
+            result.sema.thread = args.destination_thread.get_index();
+
+            args.destination_thread.cloned_types.put_no_clobber(ty, result);
+
+            break :blk result;
+        };
+
+        assert(result.llvm == null);
+        assert(result.sema.thread == args.destination_thread.get_index());
+        return result;
+    }
+
+    fn is_aggregate(ty: *Type) bool {
+        return switch (ty.sema.id) {
+            .unresolved => unreachable,
+            .array => unreachable,
+            .function => unreachable,
+            .void,
+            .noreturn, 
+            .integer,
+            .opaque_pointer,
+            .typed_pointer,
+            .bitfield,
+            =>
+            false,
+            .@"struct", .anonymous_struct => true,
+        };
+    }
+
+    fn returns_nothing(ty: *Type) bool {
+        return switch (ty.sema.id) {
+            .void, .noreturn => true,
+            else => false,
+        };
+    }
+
+    const HomogeneousAggregate = struct{
+        type: *Type,
+        count: u32,
+    };
+
+    fn get_homogeneous_aggregate(ty: *Type) ?HomogeneousAggregate {
         switch (ty.sema.id) {
+            .@"struct" => {
+                const struct_type = ty.get_payload(.@"struct");
+                for (struct_type.fields) |field| {
+                    while (field.type.sema.id == .array) {
+                        unreachable;
+                    }
+
+                    if (field.type.get_homogeneous_aggregate()) |homogeneous_aggregate| {
+                        _ = homogeneous_aggregate; // autofix
+                        unreachable;
+                    } else {
+                        return null;
+                    }
+
+                    unreachable;
+                }
+
+                unreachable;
+            },
             .integer => {
-                const integer_type = ty.get_payload(.integer);
-                return integer_type.bit_count;
+                return null;
             },
             else => |t| @panic(@tagName(t)),
         }
     }
 
-    fn clone(ty: *Type, args: struct{
-        destination_thread: *Thread,
-        source_thread_index: u16,
-    }) *Type {
-        assert(ty.sema.resolved);
-        assert(ty.sema.thread == args.source_thread_index);
-
-        switch (ty.sema.id) {
-            .function => {
-                const source_function_type = ty.get_payload(.function);
-                const return_type = source_function_type.return_type.clone(.{
-                    .destination_thread = args.destination_thread,
-                    .source_thread_index = args.source_thread_index,
-                });
-                var argument_types = PinnedArray(*Type){};
-                for (source_function_type.argument_types) |argument_type| {
-                    const new = argument_type.clone(.{
-                        .destination_thread = args.destination_thread,
-                        .source_thread_index = args.source_thread_index,
-                    });
-                    _ = argument_types.append(new);
-                }
-                const function_type = args.destination_thread.function_types.append(.{
-                    .type = source_function_type.type,
-                    .argument_types = argument_types.const_slice(),
-                    .return_type = return_type,
-                });
-                function_type.type.llvm = null;
-                function_type.type.sema.thread = args.destination_thread.get_index();
-                return &function_type.type;
-            },
-            .integer => {
-                const source_thread = &instance.threads[args.source_thread_index];
-                const source_integer_type = ty.get_payload(.integer);
-                const index = @divExact(@intFromPtr(source_integer_type) - @intFromPtr(&source_thread.integers), @sizeOf(Type.Integer));
-                return &args.destination_thread.integers[index].type;
-            },
-            else => |t| @panic(@tagName(t)),
-        }
+    fn get_integer_index(ty: *Type) usize {
+        assert(ty.sema.id == .integer);
+        const thread = &instance.threads[ty.sema.thread];
+        comptime assert(@offsetOf(Type.Integer, "type") == 0);
+        const index = @divExact(@intFromPtr(ty) - @intFromPtr(&thread.integers[0]), @sizeOf(Type.Integer));
+        return index;
     }
 };
 
@@ -2360,11 +2876,14 @@ const Keyword = enum{
     @"if",
     @"loop",
     @"orelse",
+    @"undefined",
 };
 
 const Intrinsic = enum{
     assert,
+    int_from_pointer,
     leading_zeroes,
+    require,
     size,
     trailing_zeroes,
     trap,
@@ -2544,7 +3063,6 @@ const Function = struct{
     arguments: PinnedArray(*ArgumentSymbol) = .{},
 
     const Attributes = struct{
-        calling_convention: CallingConvention = .custom,
     };
 
     const Attribute = enum{
@@ -2553,11 +3071,69 @@ const Function = struct{
         pub const Mask = std.EnumSet(Function.Attribute);
     };
 
+    const Abi = struct{
+        original_return_type: *Type,
+        original_argument_types: []const *Type,
+        abi_return_type: *Type,
+        abi_argument_types: []const *Type,
+        return_type_abi: Function.Abi.Information,
+        argument_types_abi: []const Function.Abi.Information,
+        calling_convention: CallingConvention,
+
+        const Kind = union(enum) {
+            ignore,
+            direct,
+            direct_pair: [2]*Type,
+            direct_coerce: *Type,
+            direct_coerce_int,
+            direct_split_struct_i32,
+            expand_coerce,
+            indirect: struct {
+                type: *Type,
+                alignment: u32,
+            },
+            expand,
+        };
+ 
+        const Attributes = struct {
+            by_reg: bool = false,
+            zero_extend: bool = false,
+            sign_extend: bool = false,
+            realign: bool = false,
+            by_value: bool = false,
+        };
+
+        const Information = struct{
+            kind: Kind = .direct,
+            indices: [2]u16 = .{0, 0},
+            attributes: Function.Abi.Attributes = .{},
+
+            fn clone(abi_info: *const Information, args: struct{
+                destination_thread: *Thread,
+                source_thread_index: u16,
+            }) Information {
+                _ = args;
+                const kind: Kind = switch (abi_info.kind) {
+                    .direct => .direct,
+                    else => |t| @panic(@tagName(t)),
+                };
+                const indices = abi_info.indices;
+                const attributes = abi_info.attributes;
+                return .{
+                    .kind = kind,
+                    .indices = indices,
+                    .attributes = attributes,
+                };
+            }
+        };
+    };
+    
     const Declaration = struct {
         attributes: Attributes = .{},
         global_symbol: GlobalSymbol,
 
-        fn get_type(declaration: *Function.Declaration) *Type.Function {
+
+        fn get_function_type(declaration: *Function.Declaration) *Type.Function {
             const ty = declaration.global_symbol.type;
             const function_type = ty.get_payload(.function);
             return function_type;
@@ -2570,11 +3146,17 @@ const Function = struct{
             const source_thread = &instance.threads[source_thread_index];
             assert(source_thread != destination_thread);
 
+            const type_cloned = declaration.global_symbol.type.clone(.{
+                .destination_thread = destination_thread,
+                .source_thread_index = source_thread_index,
+            });
+            assert(type_cloned.sema.thread == destination_thread.get_index());
+
             const result = destination_thread.external_functions.append(.{
                 .global_symbol = .{
-                    .type = declaration.global_symbol.type.clone(.{
-                        .destination_thread = destination_thread,
-                        .source_thread_index = source_thread_index,
+                    .type = type_cloned,
+                    .pointer_type = get_typed_pointer(destination_thread, .{
+                        .pointee = type_cloned,
                     }),
                     .attributes = declaration.global_symbol.attributes,
                     .global_declaration = declaration.global_symbol.global_declaration,
@@ -2583,6 +3165,7 @@ const Function = struct{
                     .id = declaration.global_symbol.id,
                 },
             });
+
             result.global_symbol.attributes.@"export" = false;
             result.global_symbol.attributes.@"extern" = true;
             result.global_symbol.value.sema.thread = destination_thread.get_index();
@@ -2620,6 +3203,11 @@ const ConstantStruct = struct{
     type: *Type,
 };
 
+const Undefined = struct{
+    value: Value,
+    type: *Type,
+};
+
 const ConstantBitfield = struct{
     value: Value,
     n: u64,
@@ -2635,53 +3223,85 @@ const Instruction = struct{
     id: Id,
 
     const Id = enum{
+        abi_argument,
+        abi_indirect_argument,
         argument_storage,
         branch,
         call,
         cast,
         debug_argument,
         debug_local,
+        extract_value,
         get_element_pointer,
+        insert_value,
         integer_binary_operation,
         integer_compare,
         jump,
         leading_zeroes,
         load,
         local_symbol,
+        memcpy,
         phi,
         ret,
         ret_void,
         store,
         trailing_zeroes,
+        trap,
         @"unreachable",
     };
 
     const id_to_instruction_map = std.EnumArray(Id, type).init(.{
+        .abi_argument = AbiArgument,
+        .abi_indirect_argument = ArgumentSymbol,
         .argument_storage = ArgumentSymbol,
         .branch = Branch,
         .call = Call,
         .cast = Cast,
         .debug_argument = DebugArgument,
         .debug_local = DebugLocal,
+        .extract_value = ExtractValue,
         .get_element_pointer = GEP,
+        .insert_value = InsertValue,
         .integer_binary_operation = IntegerBinaryOperation,
         .integer_compare = IntegerCompare,
         .jump = Jump,
         .leading_zeroes = LeadingZeroes,
         .local_symbol = LocalSymbol,
         .load = Load,
+        .memcpy = Memcpy,
         .phi = Phi,
         .ret = Return,
-        .ret_void = void,
+        .ret_void = Instruction,
         .store = Store,
         .trailing_zeroes = TrailingZeroes,
-        .@"unreachable" = Unreachable,
+        .trap = Instruction,
+        .@"unreachable" = Instruction,
     });
 
     fn get_payload(instruction: *Instruction, comptime id: Id) *id_to_instruction_map.get(id) {
         assert(instruction.id == id);
         return @fieldParentPtr("instruction", instruction);
     }
+};
+
+const AbiArgument = struct{
+    instruction: Instruction,
+    index: u32,
+};
+
+const ExtractValue = struct{
+    instruction: Instruction,
+    aggregate: *Value,
+    index: u32,
+    type: *Type,
+};
+
+const InsertValue = struct{
+    instruction: Instruction,
+    aggregate: *Value,
+    value: *Value,
+    index: u32,
+    type: *Type,
 };
 
 const GEP = struct {
@@ -2752,15 +3372,16 @@ const Call = struct{
     instruction: Instruction,
     callable: *Value,
     arguments: []const *Value,
+    calling_convention: CallingConvention,
 
     fn get_function_type(call: *Call) *Type.Function{
         switch (call.callable.sema.id) {
             .global_symbol => {
                 const global_symbol = call.callable.get_payload(.global_symbol);
                 switch (global_symbol.id) {
-                    .function_definition => {
+                    .function_definition, .function_declaration => {
                         const function_declaration = global_symbol.get_payload(.function_declaration);
-                        const function_type = function_declaration.get_type();
+                        const function_type = function_declaration.get_function_type();
                         return function_type;
                     },
                     else => |t| @panic(@tagName(t)),
@@ -2768,27 +3389,15 @@ const Call = struct{
             },
             .instruction => {
                 const callable_instruction = call.callable.get_payload(.instruction);
-                switch (callable_instruction.id) {
-                    .load => {
-                        const load = callable_instruction.get_payload(.load);
-                        switch (load.value.sema.id) {
-                            .instruction => {
-                                const load_instruction = load.value.get_payload(.instruction);
-                                switch (load_instruction.id) {
-                                    .local_symbol => {
-                                        const local_symbol = load_instruction.get_payload(.local_symbol);
-                                        assert(local_symbol.type.sema.id == .pointer);
-                                        const app =  local_symbol.appointee_type.?;
-                                        switch (app.sema.id) {
-                                            .function => {
-                                                const function_type = app.get_payload(.function);
-                                                return function_type;
-                                            },
-                                            else => |t| @panic(@tagName(t)),
-                                        }
-                                    },
-                                    else => |t| @panic(@tagName(t)),
-                                }
+                _ = callable_instruction; // autofix
+                const callable_type = call.callable.get_type();
+                switch (callable_type.sema.id) {
+                    .typed_pointer => {
+                        const typed_pointer = callable_type.get_payload(.typed_pointer);
+                        switch (typed_pointer.descriptor.pointee.sema.id) {
+                            .function => {
+                                const function_type = typed_pointer.descriptor.pointee.get_payload(.function);
+                                return function_type;
                             },
                             else => |t| @panic(@tagName(t)),
                         }
@@ -2808,8 +3417,9 @@ const Cast = struct{
     id: Id,
 
     const Id = enum{
-        int_from_bitfield,
         bitfield_from_int,
+        int_from_bitfield,
+        int_from_pointer,
         truncate,
     };
 };
@@ -2844,10 +3454,6 @@ const Phi = struct {
 const Return = struct{
     instruction: Instruction,
     value: *Value,
-};
-
-const Unreachable = struct{
-    instruction: Instruction,
 };
 
 const Import = struct {
@@ -2920,18 +3526,28 @@ const Thread = struct{
     local_symbols: PinnedArray(LocalSymbol) = .{},
     argument_symbols: PinnedArray(ArgumentSymbol) = .{},
     global_variables: PinnedArray(GlobalVariable) = .{},
-    unreachables: PinnedArray(Unreachable) = .{},
+    abi_arguments: PinnedArray(AbiArgument) = .{},
+    standalone_instructions: PinnedArray(Instruction) = .{},
     leading_zeroes: PinnedArray(LeadingZeroes) = .{},
     trailing_zeroes: PinnedArray(TrailingZeroes) = .{},
     casts: PinnedArray(Cast) = .{},
+    memcopies: PinnedArray(Memcpy) = .{},
+    undefined_values: PinnedArray(Undefined) = .{},
+    insert_values: PinnedArray(InsertValue) = .{},
+    extract_values: PinnedArray(ExtractValue) = .{},
     debug_arguments: PinnedArray(DebugArgument) = .{},
     debug_locals: PinnedArray(DebugLocal) = .{},
     function_types: PinnedArray(Type.Function) = .{},
     array_type_map: PinnedHashMap(Type.Array.Descriptor, *Type) = .{},
+    typed_pointer_type_map: PinnedHashMap(Type.TypedPointer.Descriptor, *Type) = .{},
     array_types: PinnedArray(Type.Array) = .{},
+    typed_pointer_types: PinnedArray(Type.TypedPointer) = .{},
     structs: PinnedArray(Type.Struct) = .{},
+    anonymous_structs: PinnedArray(Type.AnonymousStruct) = .{},
+    two_struct_map: PinnedHashMap([2]*Type, *Type) = .{},
     fields: PinnedArray(Type.AggregateField) = .{},
     bitfields: PinnedArray(Type.Bitfield) = .{},
+    cloned_types: PinnedHashMap(*Type, *Type) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -2941,6 +3557,7 @@ const Thread = struct{
         target_machine: *LLVM.Target.Machine,
         object: ?[]const u8 = null,
         intrinsic_ids: std.EnumArray(LLVMIntrinsic, LLVM.Value.IntrinsicID),
+        fixed_intrinsic_functions: std.EnumArray(LLVMFixedIntrinsic, *LLVM.Value.Constant.Function),
         intrinsic_id_map: PinnedHashMap([]const u8, LLVM.Value.IntrinsicID) = .{},
         intrinsic_function_map: PinnedHashMap(LLVMIntrinsic.Parameters, *LLVM.Value.Constant.Function) = .{},
     } = undefined,
@@ -2958,9 +3575,9 @@ const Thread = struct{
                             .resolved = true,
                         },
                         .size = byte_count,
+                        .bit_size = bit_count,
                         .alignment = byte_count,
                     },
-                    .bit_count = bit_count,
                     .signedness = signedness,
                 };
             }
@@ -2974,17 +3591,30 @@ const Thread = struct{
             .resolved = true,
         },
         .size = 0,
+        .bit_size = 0,
         .alignment = 0,
     },
-    pointer: Type = .{
+    noreturn: Type = .{
         .sema = .{
             .thread = undefined,
-            .id = .pointer,
+            .id = .noreturn,
             .resolved = true,
         },
+        .size = 0,
+        .bit_size = 0,
+        .alignment = 0,
+    },
+    opaque_pointer: Type = .{
+        .sema = .{
+            .thread = undefined,
+            .id = .opaque_pointer,
+            .resolved = true,
+        },
+        .bit_size = 64,
         .size = 8,
         .alignment = 8,
     },
+    discard_count: u64 = 0,
     handle: std.Thread = undefined,
     generate_debug_information: bool = true,
 
@@ -3022,6 +3652,9 @@ const Thread = struct{
     }
 };
 
+const LLVMFixedIntrinsic = enum{
+    trap,
+};
 const LLVMIntrinsic = enum{
     leading_zeroes,
     trailing_zeroes,
@@ -3064,6 +3697,8 @@ const TaskSystem = struct{
 
     const ProgramState = enum{
         none,
+        c_source_file,
+        c_source_file_done,
         analysis,
         analysis_resolution,
         llvm_generate_ir,
@@ -3283,7 +3918,7 @@ fn error_insufficient_arguments_command(command: []const u8) noreturn {
     write("Command '");
     write(command);
     write("' requires at least one argument\n");
-    exit(1);
+    fail();
 }
 
 fn error_unterminated_argument(argument: []const u8) noreturn {
@@ -3291,7 +3926,7 @@ fn error_unterminated_argument(argument: []const u8) noreturn {
     write("Argument '");
     write(argument);
     write("' must be terminated\n");
-    exit(1);
+    fail();
 }
 
 const Target = struct {
@@ -3308,6 +3943,7 @@ const Unit = struct {
         executable_path: []const u8,
         object_path: []const u8,
         c_source_files: []const []const u8,
+        c_object_files: []const []const u8,
         target: Target,
         optimization: Optimization,
         generate_debug_information: bool,
@@ -3337,9 +3973,20 @@ const Unit = struct {
             }
         }
 
+        var last_assigned_thread_index: u32 = 0;
+        var c_objects = PinnedArray([]const u8){};
+
+        for (descriptor.c_source_files) |source_file| {
+            const extension_start = last_byte(source_file, '.') orelse fail();
+            const name = std.fs.path.basename(source_file[0..extension_start]);
+            const object_path = instance.arena.join(&.{"nat/o/", name, ".o"}) catch unreachable;
+            _ = c_objects.append(object_path);
+        }
+
+        unit.descriptor.c_object_files = c_objects.slice();
+
         const main_source_file_absolute = instance.path_from_cwd(instance.arena, unit.descriptor.main_source_file_path);
         const new_file_index = add_file(main_source_file_absolute, &.{});
-        var last_assigned_thread_index: u32 = 0;
         instance.threads[last_assigned_thread_index].task_system.program_state = .analysis;
         instance.threads[last_assigned_thread_index].add_thread_work(Job{
             .offset = new_file_index,
@@ -3350,7 +3997,9 @@ const Unit = struct {
 
         for (descriptor.c_source_files, 0..) |_, index| {
             const thread_index = last_assigned_thread_index % instance.threads.len;
-            instance.threads[thread_index].add_thread_work(Job{
+            const thread = &instance.threads[thread_index];
+            thread.task_system.program_state = .analysis;
+            thread.add_thread_work(Job{
                 .offset = @intCast(index),
                 .count = 1,
                 .id = .compile_c_source_file,
@@ -3376,9 +4025,11 @@ fn control_thread(unit: *Unit, lati: u32) void {
         var task_done_this_iteration: u32 = 0;
 
         for (instance.threads, 0..) |*thread, i| {
+            const completed = @atomicLoad(u64, &thread.task_system.job.worker.completed, .seq_cst);
             // INFO: No need to do an atomic load here since it's only this thread writing to the value
             const program_state = thread.task_system.program_state;
-            total_is_done = total_is_done and if (@intFromEnum(program_state) >= @intFromEnum(TaskSystem.ProgramState.analysis)) program_state == .llvm_finished_object else true;
+            const to_do = thread.task_system.job.queuer.to_do;
+            total_is_done = total_is_done and completed == to_do and if (@intFromEnum(program_state) >= @intFromEnum(TaskSystem.ProgramState.analysis) and (thread.functions.length > 0 or thread.global_variables.length > 0)) program_state == .llvm_finished_object else true;
 
             var previous_job: Job = undefined;
             while (thread.get_control_job()) |job| {
@@ -3392,7 +4043,7 @@ fn control_thread(unit: *Unit, lati: u32) void {
 
                         for (instance.file_paths.slice()) |file_path_hash| {
                             if (analyze_file_path_hash == file_path_hash) {
-                                exit(1);
+                                fail();
                             }
                         } else {
                             const thread_index = last_assigned_thread_index % instance.threads.len;
@@ -3447,6 +4098,7 @@ fn control_thread(unit: *Unit, lati: u32) void {
             }
         }
 
+        total_is_done = total_is_done and task_done_this_iteration == 0;
         iterations_without_work_done += @intFromBool(task_done_this_iteration == 0);
 
         if (configuration.sleep_on_thread_hot_loops) {
@@ -3463,6 +4115,10 @@ fn control_thread(unit: *Unit, lati: u32) void {
         if (thread.llvm.object) |object| {
             _ = objects.append(object);
         }
+    }
+
+    for (unit.descriptor.c_object_files) |object_path| {
+        _ = objects.append(object_path);
     }
 
     // for (instance.threads) |*thread| {
@@ -3587,13 +4243,29 @@ fn command_exe(arguments: []const []const u8) void {
             } else {
                 error_unterminated_argument(current_argument);
             }
+        } else if (byte_equal(current_argument, "-c_source_files_start")) {
+            i += 1;
+            var sentinel = false;
+            while (i < arguments.len) : (i += 1) {
+                const arg = arguments[i];
+                if (byte_equal(arg, "-c_source_files_end")) {
+                    sentinel = true;
+                    break;
+                }
+
+                _ = c_source_files.append(arg);
+            }
+
+            if (!sentinel) {
+                fail_message("No sentinel for C source files arguments");
+            }
         } else {
             @panic(current_argument);
             // std.debug.panic("Unrecognized argument: {s}", .{current_argument});
         }
     }
 
-    const main_source_file_path = maybe_main_source_file_path orelse exit_with_error("Main source file must be specified with -main_source_file");
+    const main_source_file_path = maybe_main_source_file_path orelse fail_message("Main source file must be specified with -main_source_file");
     // TODO: undo this incongruency
     const executable_name = if (maybe_executable_name) |executable_name| executable_name else std.fs.path.basename(main_source_file_path[0..main_source_file_path.len - "/main.nat".len]);
     const executable_path = maybe_executable_path orelse blk: {
@@ -3615,7 +4287,8 @@ fn command_exe(arguments: []const []const u8) void {
         .main_source_file_path = main_source_file_path,
         .object_path = object_path,
         .executable_path = executable_path,
-        .c_source_files = &.{},
+        .c_source_files = c_source_files.slice(),
+        .c_object_files = &.{},
         .optimization = optimization,
         .generate_debug_information = generate_debug_information,
         .codegen_backend = .{
@@ -3662,7 +4335,7 @@ pub fn main() void {
 
     const arguments = argument_buffer.const_slice();
     if (arguments.len < 2) {
-        exit_with_error("Insufficient number of arguments");
+        fail_message("Insufficient number of arguments");
     }
 
     const command = arguments[1];
@@ -3671,13 +4344,13 @@ pub fn main() void {
     if (byte_equal(command, "exe")) {
         command_exe(command_arguments);
     } else if (byte_equal(command, "clang") or byte_equal(command, "-cc1") or byte_equal(command, "-cc1as")) {
-        exit_with_error("TODO: clang");
+        fail_message("TODO: clang");
     } else if (byte_equal(command, "cc")) {
-        exit_with_error("TODO: clang");
+        fail_message("TODO: clang");
     } else if (byte_equal(command, "c++")) {
-        exit_with_error("TODO: clang");
+        fail_message("TODO: clang");
     } else {
-        exit_with_error("Unrecognized command");
+        fail_message("Unrecognized command");
     }
 }
 
@@ -3867,6 +4540,7 @@ const Analyzer = struct{
     loops: PinnedArray(LoopData) = .{},
     return_block: ?*BasicBlock = null,
     return_phi: ?*Phi = null,
+    return_pointer: ?*Instruction = null,
 
     fn append_instruction(analyzer: *Analyzer, instruction: *Instruction) void {
         assert(!analyzer.current_basic_block.is_terminated);
@@ -3918,8 +4592,9 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
     for (&thread.integers) |*integer| {
         integer.type.sema.thread = @intCast(thread_index);
     }
-    thread.pointer.sema.thread = @intCast(thread_index);
+    thread.opaque_pointer.sema.thread = @intCast(thread_index);
     thread.void.sema.thread = @intCast(thread_index);
+    thread.noreturn.sema.thread = @intCast(thread_index);
 
     while (true) {
         while (thread.get_worker_job()) |job| {
@@ -3939,7 +4614,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                     const file = &instance.files.pointer[file_index];
 
                     if (thread == &instance.threads[file.thread]) {
-                        exit_with_error("Threads match!");
+                        fail_message("Threads match!");
                     } else {
                         const file_path_hash = job.offset;
                         for (file.interested_files.slice()) |interested_file| {
@@ -4053,6 +4728,8 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             .nounwind = context.getAttributeFromEnum(.NoUnwind, 0),
                             .inreg = context.getAttributeFromEnum(.InReg, 0),
                             .@"noalias" = context.getAttributeFromEnum(.NoAlias, 0),
+                            .sign_extend = context.getAttributeFromEnum(.SExt, 0),
+                            .zero_extend = context.getAttributeFromEnum(.ZExt, 0),
                         };
 
                         const target_triple = switch (builtin.os.tag) {
@@ -4098,7 +4775,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
 
                             const optional_target = LLVM.bindings.NativityLLVMGetTarget(target_triple.ptr, target_triple.len, &error_message, &error_message_len);
                             const target = optional_target orelse {
-                                exit_with_error(error_message[0..error_message_len]);
+                                fail_message(error_message[0..error_message_len]);
                             };
                             break :blk target;
                         };
@@ -4119,6 +4796,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         module.setTargetMachineDataLayout(target_machine);
                         module.setTargetTriple(target_triple.ptr, target_triple.len);
 
+
                         thread.llvm = .{
                             .context = context,
                             .module = module,
@@ -4127,6 +4805,12 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                             .intrinsic_ids = @TypeOf(thread.llvm.intrinsic_ids).init(.{
                                 .leading_zeroes = llvm_get_intrinsic_id("llvm.ctlz"),
                                 .trailing_zeroes = llvm_get_intrinsic_id("llvm.cttz"),
+                            }),
+                            .fixed_intrinsic_functions = @TypeOf(thread.llvm.fixed_intrinsic_functions).init(.{
+                                .trap = llvm_get_intrinsic_function(thread, .{
+                                    .id = llvm_get_intrinsic_id("llvm.trap"),
+                                    .types = &.{},
+                                }),
                             }),
                         };
 
@@ -4163,7 +4847,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 const file = file_struct.file;
                                 const scope = file.toScope();
 
-                                const debug_type = llvm_get_debug_type(thread, file_struct.builder, nat_global.global_symbol.type, null);
+                                const debug_type = llvm_get_debug_type(thread, file_struct.builder, nat_global.global_symbol.type);
                                 const is_local_to_unit = !nat_global.global_symbol.attributes.@"export";
                                 const is_defined = !nat_global.global_symbol.attributes.@"extern";
                                 const expression = null;
@@ -4203,11 +4887,19 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 var last_block = basic_block_node;
 
                                 if (emit_allocas) {
-                                    for (nat_function.arguments.slice(), 0..) |argument, argument_index| {
-                                        const alloca_type = llvm_get_type(thread, argument.type);
-                                        argument.instruction.value.llvm = builder.createAlloca(alloca_type, address_space, null, "", "".len, argument.alignment).toValue();
-                                        const llvm_argument = function.getArgument(@intCast(argument_index));
-                                        argument.value.llvm = llvm_argument.toValue();
+                                    for (nat_function.arguments.slice(), nat_function.declaration.get_function_type().abi.argument_types_abi) |argument, abi| {
+                                        _ = abi; // autofix
+                                        switch (argument.instruction.id) {
+                                            .argument_storage => {
+                                                const alloca_type = llvm_get_type(thread, argument.type);
+                                                argument.instruction.value.llvm = builder.createAlloca(alloca_type, address_space, null, "", "".len, argument.alignment).toValue();
+                                            },
+                                            .abi_indirect_argument => {
+                                                const llvm_argument = function.getArgument(argument.index);
+                                                argument.instruction.value.llvm = llvm_argument.toValue();
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        }
                                     }
 
                                     for (nat_function.stack_slots.slice()) |local_slot| {
@@ -4229,14 +4921,22 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                     }
 
                                     const value: *LLVM.Value = switch (instruction.id) {
+                                        .abi_argument => block: {
+                                            const abi_argument = instruction.get_payload(.abi_argument);
+                                            const llvm_argument = function.getArgument(abi_argument.index);
+                                            break :block llvm_argument.toValue();
+                                        },
                                         .debug_argument => block: {
                                             assert(thread.generate_debug_information);
                                             const debug_argument = instruction.get_payload(.debug_argument);
                                             const argument_symbol = debug_argument.argument;
+                                            const name_hash = argument_symbol.argument_declaration.declaration.name;
+                                            assert(name_hash != 0);
+                                            const name = thread.identifiers.get(name_hash).?;
                                             const file_struct = llvm_get_file(thread, file_index);
                                             const scope = llvm_get_scope(thread, instruction.scope);
 
-                                            const debug_declaration_type = llvm_get_debug_type(thread, file_struct.builder, argument_symbol.type, null);
+                                            const debug_declaration_type = llvm_get_debug_type(thread, file_struct.builder, argument_symbol.type);
                                             const always_preserve = true;
                                             const flags = LLVM.DebugInfo.Node.Flags{
                                                 .visibility = .none,
@@ -4268,7 +4968,6 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                 .all_calls_described = false,
                                             };
                                             const argument_index = argument_symbol.index + 1;
-                                            const name = thread.identifiers.get(argument_symbol.argument_declaration.declaration.name).?;
                                             const line = argument_symbol.argument_declaration.declaration.line;
                                             const column = argument_symbol.argument_declaration.declaration.column;
                                             const debug_parameter_variable = file_struct.builder.createParameterVariable(scope, name.ptr, name.len, argument_index, file_struct.file, line, debug_declaration_type, always_preserve, flags);
@@ -4282,7 +4981,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const file = llvm_get_file(thread, file_index);
                                             const debug_local = instruction.get_payload(.debug_local);
                                             const local_symbol = debug_local.local;
-                                            const debug_declaration_type = llvm_get_debug_type(thread, file.builder, local_symbol.type, local_symbol.appointee_type);
+                                            const debug_declaration_type = llvm_get_debug_type(thread, file.builder, local_symbol.type);
                                             const always_preserve = true;
                                             const flags = LLVM.DebugInfo.Node.Flags{
                                                 .visibility = .none,
@@ -4347,6 +5046,10 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const ret = builder.createRet(return_value);
                                             break :block ret.toValue();
                                         },
+                                        .ret_void => block: {
+                                            const ret = builder.createRet(null);
+                                            break :block ret.toValue();
+                                        },
                                         .integer_binary_operation => block: {
                                             const integer_binary_operation = instruction.get_payload(.integer_binary_operation);
                                             const left = llvm_get_value(thread, integer_binary_operation.left);
@@ -4372,7 +5075,8 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                         },
                                         .call => block: {
                                             const call = instruction.get_payload(.call);
-                                            const function_type = llvm_get_type(thread, &call.get_function_type().type);
+                                            const nat_function_type = call.get_function_type();
+                                            const function_type = llvm_get_type(thread, &nat_function_type.type);
                                             const callee = llvm_get_value(thread, call.callable);
 
                                             var arguments = std.BoundedArray(*LLVM.Value, 512){};
@@ -4381,9 +5085,17 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                                 _ = arguments.appendAssumeCapacity(llvm_argument);
                                             }
 
-                                            const args = arguments.constSlice();
 
+                                            const args = arguments.constSlice();
                                             const call_i = builder.createCall(function_type.toFunction() orelse unreachable, callee, args.ptr, args.len, "", "".len, null);
+
+                                            var parameter_attribute_sets = std.BoundedArray(*const LLVM.Attribute.Set, 512){};
+                                            const function_attributes = llvm_emit_function_attributes(thread, nat_function_type, &parameter_attribute_sets);
+                                            call_i.setAttributes(thread.llvm.context, function_attributes.function_attributes, function_attributes.return_attribute_set, function_attributes.parameter_attribute_sets.ptr, function_attributes.parameter_attribute_sets.len);
+
+                                            const calling_convention = calling_convention_map.get(nat_function_type.abi.calling_convention);
+                                            call_i.setCallingConvention(calling_convention);
+
                                             break :block call_i.toValue();
                                         },
                                         .integer_compare => block: {
@@ -4463,6 +5175,12 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const ur = builder.createUnreachable();
                                             break :block ur.toValue();
                                         },
+                                        .trap => block: {
+                                            const args: []const *LLVM.Value = &.{};
+                                            const intrinsic = thread.llvm.fixed_intrinsic_functions.get(.trap);
+                                            const call_i = builder.createCall(intrinsic.getType(), intrinsic.toValue(), args.ptr, args.len, "", "".len, null);
+                                            break :block call_i.toValue();
+                                        },
                                         .leading_zeroes => block: {
                                             const leading_zeroes = instruction.get_payload(.leading_zeroes);
                                             const v = llvm_get_value(thread, leading_zeroes.value);
@@ -4512,14 +5230,32 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const cast_value = llvm_get_value(thread, cast.value);
                                             const v = switch (cast.id) {
                                                 .int_from_bitfield => cast_value,
-                                                .truncate => b: {
+                                                .truncate, .int_from_pointer => |cast_id| b: {
                                                     const cast_type = llvm_get_type(thread, cast.type);
-                                                    const cast_i = builder.createCast(.truncate, cast_value, cast_type, "", "".len);
+                                                    const cast_i = builder.createCast(switch (cast_id) {
+                                                        .truncate => .truncate,
+                                                        .int_from_pointer => .pointer_to_int,
+                                                        else => |t| @panic(@tagName(t)),
+                                                    }, cast_value, cast_type, "", "".len);
                                                     break :b cast_i;
                                                 },
                                                 else => |t| @panic(@tagName(t)),
                                             };
                                             break :block v;
+                                        },
+                                        .memcpy => block: {
+                                            const memcpy = instruction.get_payload(.memcpy);
+                                            const destination = llvm_get_value(thread, memcpy.destination);
+                                            const source = llvm_get_value(thread, memcpy.source);
+                                            const memcopy = builder.createMemcpy(destination, memcpy.destination_alignment, source, memcpy.source_alignment, memcpy.size, memcpy.is_volatile);
+                                            break :block memcopy.toValue();
+                                        },
+                                        .extract_value => block: {
+                                            const extract_value = instruction.get_payload(.extract_value);
+                                            const aggregate = llvm_get_value(thread, extract_value.aggregate);
+                                            const indices = [1]c_uint{extract_value.index};
+                                            const i = builder.createExtractValue(aggregate, &indices, indices.len, "", "".len);
+                                            break :block i;
                                         },
                                         else => |t| @panic(@tagName(t)),
                                     };
@@ -4553,7 +5289,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                     function.toString(&function_msg.ptr, &function_msg.len);
                                     write(function_msg);
                                     write("\n");
-                                    exit_with_error(message);
+                                    fail_message(message);
                                 }
                             }
                         }
@@ -4579,7 +5315,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                     write("\n");
                                 }
 
-                                exit_with_error(verification_message);
+                                fail_message(verification_message);
                             }
                         }
 
@@ -4610,6 +5346,14 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                     });
                     // std.debug.print("Thread #{} emitted object and notified\n", .{thread_index});
                 },
+                .compile_c_source_file => {
+                    // TODO: FIXME
+                    const unit = instance.units.get_unchecked(0);
+                    const c_source_file_index = job.offset;
+                    const source_file = unit.descriptor.c_source_files[c_source_file_index];
+                    const object_path = unit.descriptor.c_object_files[c_source_file_index];
+                    compile_c_source_files(thread, &.{ "-c", source_file, "-o", object_path, "-std=c99"});
+                },
                 else => |t| @panic(@tagName(t)),
             }
 
@@ -4625,18 +5369,611 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
     }
 }
 
+const CSourceFileCompilationInvoker = enum{
+    nat,
+    external,
+};
+
+fn compile_c_source_files(thread: *Thread, arguments: []const []const u8) void {
+    var argument_index: usize = 0;
+    _ = &argument_index;
+    const Mode = enum {
+        object,
+        link,
+    };
+    var out_path: ?[]const u8 = null;
+    var out_mode: ?Mode = null;
+    const Extension = enum {
+        c,
+        cpp,
+        assembly,
+        object,
+        static_library,
+        shared_library,
+    };
+    const CSourceFile = struct {
+        path: []const u8,
+        extension: Extension,
+    };
+    const DebugInfo = enum {
+        yes,
+        no,
+    };
+    const LinkArch = enum {
+        arm64,
+    };
+    var debug_info: ?DebugInfo = null;
+    var stack_protector: ?bool = null;
+    var link_arch: ?LinkArch = null;
+
+    var cc_argv = std.BoundedArray([]const u8, 4096){};
+    var ld_argv = std.BoundedArray([]const u8, 4096){};
+    var c_source_files = std.BoundedArray(CSourceFile, 4096){};
+    var link_objects = std.BoundedArray([]const u8, 4096){};
+    var link_libraries = std.BoundedArray([]const u8, 4096){};
+
+    while (argument_index < arguments.len) {
+        const argument = arguments[argument_index];
+
+        if (argument[0] != '-') {
+            if (last_byte(argument, '.')) |dot_index| {
+                const extension_string = argument[dot_index..];
+                const extension: Extension =
+                    if (byte_equal(extension_string, ".c")) .c else if (byte_equal(extension_string, ".cpp") or byte_equal(extension_string, ".cxx") or byte_equal(extension_string, ".cc")) .cpp else if (byte_equal(extension_string, ".S")) .assembly else if (byte_equal(extension_string, ".o")) .object else if (byte_equal(extension_string, ".a")) .static_library else if (byte_equal(extension_string, ".so") or
+                    byte_equal(extension_string, ".dll") or
+                    byte_equal(extension_string, ".dylib") or
+                    byte_equal(extension_string, ".tbd")) .shared_library else {
+                    write(argument);
+                    write("\n");
+                    @panic("Unable to recognize extension for the file above");
+                };
+                switch (extension) {
+                    .c, .cpp, .assembly => {
+                        c_source_files.appendAssumeCapacity(.{
+                            .path = argument,
+                            .extension = extension,
+                        });
+                    },
+                    .object, .static_library, .shared_library => {
+                        link_objects.appendAssumeCapacity(argument);
+                    },
+                }
+            } else {
+                write(argument);
+                write("\n");
+                @panic("Positional argument without extension");
+            }
+        } else if (byte_equal(argument, "-c")) {
+            out_mode = .object;
+        } else if (byte_equal(argument, "-o")) {
+            argument_index += 1;
+            out_path = arguments[argument_index];
+        } else if (byte_equal(argument, "-g")) {
+            debug_info = .yes;
+        } else if (byte_equal(argument, "-fno-stack-protector")) {
+            stack_protector = false;
+        } else if (byte_equal(argument, "-arch")) {
+            argument_index += 1;
+            const arch_argument = arguments[argument_index];
+            if (byte_equal(arch_argument, "arm64")) {
+                link_arch = .arm64;
+                cc_argv.appendAssumeCapacity("-arch");
+                cc_argv.appendAssumeCapacity("arm64");
+            } else {
+                unreachable;
+            }
+        } else if (byte_equal(argument, "-bundle")) {
+            ld_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-pthread")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-fPIC")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-MD")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-MT")) {
+            cc_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            cc_argv.appendAssumeCapacity(arg);
+        } else if (byte_equal(argument, "-MF")) {
+            cc_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            cc_argv.appendAssumeCapacity(arg);
+        } else if (byte_equal(argument, "-isysroot")) {
+            cc_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            cc_argv.appendAssumeCapacity(arg);
+        } else if (byte_equal(argument, "-isystem")) {
+            cc_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            cc_argv.appendAssumeCapacity(arg);
+        } else if (byte_equal(argument, "-h")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-framework")) {
+            ld_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const framework = arguments[argument_index];
+            ld_argv.appendAssumeCapacity(framework);
+        } else if (byte_equal(argument, "--coverage")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-pedantic")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-pedantic-errors")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-?")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-v")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-V")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "--version")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-version")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-qversion")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-print-resource-dir")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-shared")) {
+            ld_argv.appendAssumeCapacity(argument);
+        } else if (byte_equal(argument, "-compatibility_version")) {
+            ld_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            ld_argv.appendAssumeCapacity(arg);
+        } else if (byte_equal(argument, "-current_version")) {
+            ld_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            ld_argv.appendAssumeCapacity(arg);
+        } else if (byte_equal(argument, "-install_name")) {
+            ld_argv.appendAssumeCapacity(argument);
+            argument_index += 1;
+            const arg = arguments[argument_index];
+            ld_argv.appendAssumeCapacity(arg);
+        } else if (starts_with_slice(argument, "-f")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-wd")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-D")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-I")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-W")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-l")) {
+            link_libraries.appendAssumeCapacity(argument[2..]);
+        } else if (starts_with_slice(argument, "-O")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-std=")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else if (starts_with_slice(argument, "-rdynamic")) {
+            ld_argv.appendAssumeCapacity("-export_dynamic");
+        } else if (starts_with_slice(argument, "-dynamiclib")) {
+            ld_argv.appendAssumeCapacity("-dylib");
+        } else if (starts_with_slice(argument, "-Wl,")) {
+            const wl_arg = argument["-Wl,".len..];
+            if (first_byte(wl_arg, ',')) |comma_index| {
+                const key = wl_arg[0..comma_index];
+                const value = wl_arg[comma_index + 1 ..];
+                ld_argv.appendAssumeCapacity(key);
+                ld_argv.appendAssumeCapacity(value);
+            } else {
+                ld_argv.appendAssumeCapacity(wl_arg);
+            }
+        } else if (starts_with_slice(argument, "-m")) {
+            cc_argv.appendAssumeCapacity(argument);
+        } else {
+            fail_term("Unhandled argument", argument);
+        }
+
+        argument_index += 1;
+    }
+
+    const link_libcpp = true;
+    const mode = out_mode orelse .link;
+
+    var argv = std.BoundedArray([]const u8, 4096){};
+    if (c_source_files.len > 0) {
+        for (c_source_files.slice()) |c_source_file| {
+            argv.appendAssumeCapacity(instance.paths.executable);
+            argv.appendAssumeCapacity("clang");
+            argv.appendAssumeCapacity("--no-default-config");
+
+            argv.appendAssumeCapacity(c_source_file.path);
+
+            if (c_source_file.extension == .cpp) {
+                argv.appendAssumeCapacity("-nostdinc++");
+            }
+
+            const caret = true;
+            if (!caret) {
+                argv.appendAssumeCapacity("-fno-caret-diagnostics");
+            }
+
+            const function_sections = false;
+            if (function_sections) {
+                argv.appendAssumeCapacity("-ffunction-sections");
+            }
+
+            const data_sections = false;
+            if (data_sections) {
+                argv.appendAssumeCapacity("-fdata-sections");
+            }
+
+            const use_builtin = true;
+            if (!use_builtin) {
+                argv.appendAssumeCapacity("-fno-builtin");
+            }
+
+            if (link_libcpp) {
+                // include paths
+
+            }
+
+            const link_libc = c_source_file.extension == .c;
+            if (link_libc) {}
+
+            const link_libunwind = false;
+            if (link_libunwind) {
+                unreachable;
+            }
+
+            var target_triple_buffer = std.BoundedArray(u8, 512){};
+            const target_triple = blk: {
+                // Emit target
+                switch (@import("builtin").target.cpu.arch) {
+                    .x86_64 => {
+                        target_triple_buffer.appendSliceAssumeCapacity("x86_64-");
+                    },
+                    .aarch64 => {
+                        target_triple_buffer.appendSliceAssumeCapacity("aarch64-");
+                    },
+                    else => @compileError("Architecture not supported"),
+                }
+
+                if (@import("builtin").target.cpu.arch == .aarch64 and @import("builtin").target.os.tag == .macos) {
+                    target_triple_buffer.appendSliceAssumeCapacity("apple-");
+                } else {
+                    target_triple_buffer.appendSliceAssumeCapacity("pc-");
+                }
+
+                switch (@import("builtin").target.os.tag) {
+                    .linux => {
+                        target_triple_buffer.appendSliceAssumeCapacity("linux-");
+                    },
+                    .macos => {
+                        target_triple_buffer.appendSliceAssumeCapacity("macos-");
+                    },
+                    .windows => {
+                        target_triple_buffer.appendSliceAssumeCapacity("windows-");
+                    },
+                    else => @compileError("OS not supported"),
+                }
+
+                switch (@import("builtin").target.abi) {
+                    .musl => {
+                        target_triple_buffer.appendSliceAssumeCapacity("musl");
+                    },
+                    .gnu => {
+                        target_triple_buffer.appendSliceAssumeCapacity("gnu");
+                    },
+                    .none => {
+                        target_triple_buffer.appendSliceAssumeCapacity("unknown");
+                    },
+                    else => @compileError("OS not supported"),
+                }
+
+                break :blk target_triple_buffer.slice();
+            };
+            argv.appendSliceAssumeCapacity(&.{ "-target", target_triple });
+
+            const object_path = switch (mode) {
+                .object => out_path.?,
+                .link => thread.arena.join(&.{ if (out_path) |op| op else "a.o", ".o" }) catch unreachable,
+            };
+
+            link_objects.appendAssumeCapacity(object_path);
+
+            switch (c_source_file.extension) {
+                .c, .cpp => {
+                    argv.appendAssumeCapacity("-nostdinc");
+                    argv.appendAssumeCapacity("-fno-spell-checking");
+
+                    const lto = false;
+                    if (lto) {
+                        argv.appendAssumeCapacity("-flto");
+                    }
+
+                    const mm = false;
+                    if (mm) {
+                        argv.appendAssumeCapacity("-ObjC++");
+                    }
+
+                    const libc_framework_dirs: []const []const u8 = switch (@import("builtin").os.tag) {
+                        .macos => &.{"/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks"},
+                        else => &.{},
+                    };
+                    for (libc_framework_dirs) |framework_dir| {
+                        argv.appendSliceAssumeCapacity(&.{ "-iframework", framework_dir });
+                    }
+
+                    const framework_dirs = &[_][]const u8{};
+                    for (framework_dirs) |framework_dir| {
+                        argv.appendSliceAssumeCapacity(&.{ "-F", framework_dir });
+                    }
+
+                    // TODO: c headers dir
+
+                    const libc_include_dirs: []const []const u8 = switch (@import("builtin").os.tag) {
+                        .macos => &.{
+                            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1",
+                            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/15.0.0/include",
+                            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
+                        },
+                        .linux => configuration.include_paths,
+                        //     .gnu => if (@import("configuration").ci) &.{
+                        //         "/usr/include/c++/11",
+                        //         "/usr/include/x86_64-linux-gnu/c++/11",
+                        //         "/usr/lib/clang/17/include",
+                        //         "/usr/include",
+                        //         "/usr/include/x86_64-linux-gnu",
+                        //     } else switch (@import("builtin").cpu.arch) {
+                        //         .x86_64 => &.{
+                        //             "/usr/include/c++/14",
+                        //             "/usr/include/c++/14/x86_64-pc-linux-gnu",
+                        //             "/usr/lib/clang/17/include",
+                        //             "/usr/include",
+                        //             "/usr/include/linux",
+                        //         },
+                        //         .aarch64 => &.{
+                        //             "/usr/include/c++/14",
+                        //             "/usr/include/c++/14/aarch64-redhat-linux",
+                        //             "/usr/lib/clang/18/include",
+                        //             "/usr/include",
+                        //             "/usr/include/linux",
+                        //         },
+                        //         else => unreachable,
+                        //     },
+                        //     else => unreachable, //@compileError("ABI not supported"),
+                        // },
+                        .windows => &.{},
+                        else => @compileError("OS not supported"),
+                    };
+
+                    for (libc_include_dirs) |include_dir| {
+                        std.debug.print("Include path: {s}\n", .{include_dir});
+                        argv.appendSliceAssumeCapacity(&.{ "-isystem", include_dir });
+                    }
+
+                    // TODO: cpu model
+                    // TODO: cpu features
+                    // TODO: code model
+                    // TODO: OS-specific flags
+                    // TODO: sanitize flags
+                    // const red_zone = true;
+                    // if (red_zone) {
+                    //     argv.appendAssumeCapacity("-mred-zone");
+                    // } else {
+                    //     unreachable;
+                    // }
+
+                    const omit_frame_pointer = false;
+                    if (omit_frame_pointer) {
+                        argv.appendAssumeCapacity("-fomit-frame-pointer");
+                    } else {
+                        argv.appendAssumeCapacity("-fno-omit-frame-pointer");
+                    }
+
+                    if (stack_protector orelse false) {
+                        argv.appendAssumeCapacity("-fstack-protector-strong");
+                    } else {
+                        argv.appendAssumeCapacity("-fno-stack-protector");
+                    }
+
+                    const is_debug = true;
+                    if (is_debug) {
+                        argv.appendAssumeCapacity("-D_DEBUG");
+                        argv.appendAssumeCapacity("-O0");
+                    } else {
+                        unreachable;
+                    }
+
+                    const pic = false;
+                    if (pic) {
+                        argv.appendAssumeCapacity("-fPIC");
+                    }
+
+                    const unwind_tables = false;
+                    if (unwind_tables) {
+                        argv.appendAssumeCapacity("-funwind-tables");
+                    } else {
+                        argv.appendAssumeCapacity("-fno-unwind-tables");
+                    }
+                },
+                .assembly => {
+                    // TODO:
+                },
+                .object, .static_library, .shared_library => unreachable,
+            }
+
+            const has_debug_info = true;
+            if (has_debug_info) {
+                argv.appendAssumeCapacity("-g");
+            } else {
+                unreachable;
+            }
+
+            // TODO: machine ABI
+            const freestanding = false;
+            if (freestanding) {
+                argv.appendAssumeCapacity("-ffrestanding");
+            }
+
+            // TODO: native system include paths
+            // TODO: global cc argv
+
+            argv.appendSliceAssumeCapacity(cc_argv.slice());
+
+            // TODO: extra flags
+            // TODO: cache exempt flags
+            argv.appendSliceAssumeCapacity(&.{ "-c", "-o", object_path });
+            // TODO: emit ASM/LLVM IR
+
+            const debug_clang_args = false;
+            if (debug_clang_args) {
+                std.debug.print("Argv: {s}\n", .{argv.slice()});
+            }
+
+            clang_main(thread.arena, argv.slice());
+        }
+    } else if (link_objects.len == 0) {
+        unreachable;
+        // argv.appendAssumeCapacity(context.executable_absolute_path);
+        // argv.appendAssumeCapacity("clang");
+        // argv.appendAssumeCapacity("--no-default-config");
+        // argv.appendSliceAssumeCapacity(cc_argv.slice());
+        // const result = try clangMain(context.arena, argv.slice());
+        // if (result != 0) {
+        //     unreachable;
+        // }
+        // return;
+    }
+
+    // if (mode == .link) {
+    //     unreachable;
+    //     // assert(link_objects.len > 0);
+    //     // try linker.link(context, .{
+    //     //     .backend = .lld,
+    //     //     .output_file_path = out_path orelse "a.out",
+    //     //     .objects = link_objects.slice(),
+    //     //     .libraries = link_libraries.slice(),
+    //     //     .extra_arguments = ld_argv.slice(),
+    //     //     .link_libc = true,
+    //     //     .link_libcpp = link_libcpp,
+    //     // });
+    // }
+}
+
+extern "c" fn nat_clang_main(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
+fn clang_main(arena: *Arena, arguments: []const []const u8) void {
+    const argv = library.argument_copy_zero_terminated(arena, arguments) catch unreachable;
+    const exit_code = nat_clang_main(@as(c_int, @intCast(arguments.len)), argv.ptr);
+    if (exit_code != 0) {
+        @breakpoint();
+        std.posix.exit(@intCast(exit_code));
+    }
+}
+
+fn llvm_emit_parameter_attributes(thread: *Thread, abi: Function.Abi.Information, is_return: bool) *const LLVM.Attribute.Set{
+    var attributes = std.BoundedArray(*LLVM.Attribute, 64){};
+    if (abi.attributes.zero_extend) {
+        attributes.appendAssumeCapacity(thread.llvm.attributes.zero_extend);
+    }
+    if (abi.attributes.sign_extend) {
+        attributes.appendAssumeCapacity(thread.llvm.attributes.sign_extend);
+    }
+    if (abi.attributes.by_reg) {
+        attributes.appendAssumeCapacity(thread.llvm.attributes.inreg);
+    }
+
+    switch (abi.kind) {
+        .ignore => {
+            assert(is_return);
+        },
+        .direct, .direct_pair, .direct_coerce => {},
+        .indirect => |indirect| {
+            const indirect_type = llvm_get_type(thread, indirect.type);
+            if (is_return) {
+                const sret = thread.llvm.context.getAttributeFromType(.StructRet, indirect_type);
+                attributes.appendAssumeCapacity(sret);
+                attributes.appendAssumeCapacity(thread.llvm.attributes.@"noalias");
+                // TODO: alignment
+            } else {
+                if (abi.attributes.by_value) {
+                    const byval = thread.llvm.context.getAttributeFromType(.ByVal, indirect_type);
+                    attributes.appendAssumeCapacity(byval);
+                }
+                //TODO: alignment
+            }
+        },
+        else => |t| @panic(@tagName(t)),
+    }
+
+    const attribute_set = thread.llvm.context.getAttributeSet(&attributes.buffer, attributes.len);
+    return attribute_set;
+}
+
+const LLVMFunctionAttributes = struct {
+    function_attributes: *const LLVM.Attribute.Set,
+    return_attribute_set: *const LLVM.Attribute.Set,
+    parameter_attribute_sets: []const *const LLVM.Attribute.Set,
+};
+
+fn llvm_emit_function_attributes(thread: *Thread, function_type: *Type.Function, parameter_attribute_sets: *std.BoundedArray(*const LLVM.Attribute.Set, 512)) LLVMFunctionAttributes {
+    const function_attributes = blk: {
+        var function_attributes = std.BoundedArray(*LLVM.Attribute, 256){};
+        function_attributes.appendAssumeCapacity(thread.llvm.attributes.nounwind);
+
+        switch (function_type.abi.original_return_type.sema.id) {
+            .noreturn => {
+                function_attributes.appendAssumeCapacity(thread.llvm.attributes.noreturn);
+            },
+            else => {},
+        }
+
+        // const naked = false;
+        // if (naked) {
+        //     function_attributes.appendAssumeCapacity(thread.llvm.attributes.naked);
+        // }
+
+        const function_attribute_set = thread.llvm.context.getAttributeSet(&function_attributes.buffer, function_attributes.len);
+        break :blk function_attribute_set;
+    };
+
+    const return_attribute_set = blk: {
+        const attribute_set = llvm_emit_parameter_attributes(thread, function_type.abi.return_type_abi, true);
+        break :blk switch (function_type.abi.return_type_abi.kind) {
+            .indirect => b: {
+                parameter_attribute_sets.appendAssumeCapacity(attribute_set);
+                break :b thread.llvm.context.getAttributeSet(null, 0);
+            },
+            else => attribute_set,
+        };
+    };
+
+    for (function_type.abi.argument_types_abi) |abi| {
+        const attribute_set = llvm_emit_parameter_attributes(thread, abi, false);
+        parameter_attribute_sets.appendAssumeCapacity(attribute_set);
+    }
+
+    return .{
+        .function_attributes = function_attributes,
+        .return_attribute_set = return_attribute_set,
+        .parameter_attribute_sets = parameter_attribute_sets.constSlice(),
+    };
+}
+
 fn llvm_get_intrinsic_id(intrinsic: []const u8) LLVM.Value.IntrinsicID{
     const intrinsic_id = LLVM.lookupIntrinsic(intrinsic.ptr, intrinsic.len);
     assert(intrinsic_id != .none);
     return intrinsic_id;
 }
 
-fn llvm_get_intrinsic_function(thread: *Thread, parameters: LLVMIntrinsic.Parameters) *LLVM.Value.Constant.Function{
+fn llvm_get_intrinsic_function_from_map(thread: *Thread, parameters: LLVMIntrinsic.Parameters) *LLVM.Value.Constant.Function{
     if (thread.llvm.intrinsic_function_map.get(parameters)) |llvm| return llvm else {
-        const intrinsic_function = thread.llvm.module.getIntrinsicDeclaration(parameters.id, parameters.types.ptr, parameters.types.len);
+        const intrinsic_function = llvm_get_intrinsic_function(thread, parameters);
         thread.llvm.intrinsic_function_map.put_no_clobber(parameters, intrinsic_function);
         return intrinsic_function;
     }
+}
+
+fn llvm_get_intrinsic_function(thread: *Thread, parameters: LLVMIntrinsic.Parameters) *LLVM.Value.Constant.Function{
+    const intrinsic_function = thread.llvm.module.getIntrinsicDeclaration(parameters.id, parameters.types.ptr, parameters.types.len);
+    return intrinsic_function;
 }
 
 fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
@@ -4672,7 +6009,7 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
                     },
                     else => |t| @panic(@tagName(t)),
                 };
-                const result = thread.llvm.context.getConstantInt(integer_type.bit_count, constant_int.n, @intFromEnum(integer_type.signedness) != 0);
+                const result = thread.llvm.context.getConstantInt(@intCast(integer_type.type.bit_size), constant_int.n, @intFromEnum(integer_type.signedness) != 0);
                 break :b result.toValue();
             },
             .constant_array => b: {
@@ -4701,8 +6038,14 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
                 const constant_bitfield = value.get_payload(.constant_bitfield);
                 const bitfield_type = constant_bitfield.type.get_payload(.bitfield);
                 const bitfield_backing_type = bitfield_type.backing_type.get_payload(.integer);
-                const result = thread.llvm.context.getConstantInt(bitfield_backing_type.bit_count, constant_bitfield.n, @intFromEnum(bitfield_backing_type.signedness) != 0);
+                const result = thread.llvm.context.getConstantInt(@intCast(bitfield_backing_type.type.bit_size), constant_bitfield.n, @intFromEnum(bitfield_backing_type.signedness) != 0);
                 break :b result.toValue();
+            },
+            .undefined => b: {
+                const undef = value.get_payload(.undefined);
+                const ty = llvm_get_type(thread, undef.type);
+                const poison = ty.getPoison();
+                break :b poison.toValue();
             },
             else => |t| @panic(@tagName(t)),
         };
@@ -4713,7 +6056,7 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
     }
 }
 
-fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *Type, appointee_type: ?*Type) *LLVM.DebugInfo.Type {
+fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *Type) *LLVM.DebugInfo.Type {
     if (ty.llvm_debug) |llvm| return llvm else {
         const llvm_debug_type = switch (ty.sema.id) {
             .integer => block: {
@@ -4752,7 +6095,7 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                     .all_calls_described = false,
                 };
                 var buffer: [65]u8 = undefined;
-                const format = library.format_int(&buffer, integer.bit_count, 10, false);
+                const format = library.format_int(&buffer, integer.type.bit_size, 10, false);
                 const slice_ptr = format.ptr - 1;
                 const slice = slice_ptr[0 .. format.len + 1];
                 slice[0] = switch (integer.signedness) {
@@ -4761,21 +6104,23 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                 };
 
                 const name = thread.arena.duplicate_bytes(slice) catch unreachable;
-                const integer_type = builder.createBasicType(name.ptr, name.len, integer.bit_count, dwarf_encoding, flags);
+                const integer_type = builder.createBasicType(name.ptr, name.len, integer.type.bit_size, dwarf_encoding, flags);
                 break :block integer_type;
             },
             .array => block: {
                 const array = ty.get_payload(.array);
                 const bitsize = array.type.size * 8;
-                const element_type = llvm_get_debug_type(thread, builder, array.descriptor.element_type, null);
+                const element_type = llvm_get_debug_type(thread, builder, array.descriptor.element_type);
                 const array_type = builder.createArrayType(bitsize, array.type.alignment * 8, element_type, array.descriptor.element_count);
                 break :block array_type.toType();
             },
-            .pointer => block: {
-                const element_type = llvm_get_debug_type(thread, builder, appointee_type.?, null);
-                const pointer_width = @bitSizeOf(usize);
+            .typed_pointer => block: {
+                const typed_pointer = ty.get_payload(.typed_pointer);
+                const element_type = llvm_get_debug_type(thread, builder, typed_pointer.descriptor.pointee);
                 const alignment = 3;
-                const pointer_type = builder.createPointerType(element_type, pointer_width, alignment, "*dummyptr", "*dummyptr".len);
+                const pointer_width = @bitSizeOf(usize);
+                // TODO:
+                const pointer_type = builder.createPointerType(element_type, pointer_width, alignment, "ptr", "ptr".len);
                 break :block pointer_type.toType();
             },
             .@"struct" => block: {
@@ -4822,7 +6167,7 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                 ty.llvm_debug = struct_type.toType();
 
                 for (nat_struct_type.fields) |field| {
-                    const field_type = llvm_get_debug_type(thread, builder, field.type, null);
+                    const field_type = llvm_get_debug_type(thread, builder, field.type);
                     const field_name = thread.identifiers.get(field.name).?;
                     const field_bitsize = field.type.size * 8;
                     const field_alignment = field.type.alignment * 8;
@@ -4877,12 +6222,12 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                 const struct_type = builder.createStructType(file.toScope(), name.ptr, name.len, file, line, bitsize, alignment, flags, null, member_types.pointer, member_types.length, null);
                 ty.llvm_debug = struct_type.toType();
 
-                const nat_backing_type = &thread.integers[nat_bitfield_type.backing_type.get_payload(.integer).bit_count - 1];
-                const backing_type = llvm_get_debug_type(thread, builder, &nat_backing_type.type, null);
+                const nat_backing_type = &thread.integers[nat_bitfield_type.type.bit_size - 1];
+                const backing_type = llvm_get_debug_type(thread, builder, &nat_backing_type.type);
 
                 for (nat_bitfield_type.fields) |field| {
                     const field_name = thread.identifiers.get(field.name).?;
-                    const field_bitsize = field.type.get_bit_count();
+                    const field_bitsize = field.type.bit_size;
                     const field_offset = field.member_offset;
                     const member_flags = LLVM.DebugInfo.Node.Flags{
                         .visibility = .none,
@@ -4936,9 +6281,12 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
         return llvm;
     } else {
         const llvm_type: *LLVM.Type = switch (ty.sema.id) {
+            .void => b: {
+                const void_type = thread.llvm.context.getVoidType();
+                break :b void_type;
+            },
             .integer => b: {
-                const int_ty = ty.get_payload(.integer);
-                const integer_type = thread.llvm.context.getIntegerType(int_ty.bit_count);
+                const integer_type = thread.llvm.context.getIntegerType(@intCast(ty.bit_size));
                 break :b integer_type.toType();
             },
             .array => b: {
@@ -4947,16 +6295,16 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
                 const array_type = LLVM.Type.Array.get(element_type, array_ty.descriptor.element_count);
                 break :b array_type.toType();
             },
-            .pointer => b: {
-                const pointer_type = thread.llvm.context.getPointerType(0);
+            .opaque_pointer, .typed_pointer => b: {
+                const pointer_type = thread.llvm.context.getPointerType(address_space);
                 break :b pointer_type.toType();
             },
             .function => b: {
                 const nat_function_type = ty.get_payload(.function);
-                const return_type = llvm_get_type(thread, nat_function_type.return_type);
+                const return_type = llvm_get_type(thread, nat_function_type.abi.abi_return_type);
                 var argument_types = PinnedArray(*LLVM.Type){};
                 _ = &argument_types;
-                for (nat_function_type.argument_types) |argument_type| {
+                for (nat_function_type.abi.abi_argument_types) |argument_type| {
                     const llvm_arg_type = llvm_get_type(thread, argument_type);
                     _ = argument_types.append(llvm_arg_type);
                 }
@@ -4976,6 +6324,19 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
                 const is_packed = false;
                 const name = thread.identifiers.get(nat_struct_type.declaration.name).?;
                 const struct_type = thread.llvm.context.createStructType(types.ptr, types.len, name.ptr, name.len, is_packed);
+                break :b struct_type.toType();
+            },
+            .anonymous_struct => b: {
+                const nat_struct_type = ty.get_payload(.anonymous_struct);
+                var struct_types = PinnedArray(*LLVM.Type){};
+                for (nat_struct_type.fields) |field| {
+                    const field_type = llvm_get_type(thread, field.type);
+                    _ = struct_types.append(field_type);
+                }
+
+                const types = struct_types.const_slice();
+                const is_packed = false;
+                const struct_type = thread.llvm.context.getStructType(types.ptr, types.len, is_packed);
                 break :b struct_type.toType();
             },
             .bitfield => b: {
@@ -5046,10 +6407,15 @@ fn llvm_get_scope(thread: *Thread, scope: *Scope) *LLVM.DebugInfo.Scope {
     }
 }
 
+const calling_convention_map = std.EnumArray(CallingConvention, LLVM.Value.Constant.Function.CallingConvention).init(.{
+    .c = .C,
+    .custom = .Fast,
+});
+
 fn llvm_emit_function_declaration(thread: *Thread, nat_function: *Function.Declaration) void {
     assert(nat_function.global_symbol.value.llvm == null);
     const function_name = thread.identifiers.get(nat_function.global_symbol.global_declaration.declaration.name) orelse unreachable;
-    const nat_function_type = nat_function.get_type();
+    const nat_function_type = nat_function.get_function_type();
     const function_type = llvm_get_type(thread, &nat_function_type.type);
     const is_extern_function = nat_function.global_symbol.attributes.@"extern";
     const export_or_extern = nat_function.global_symbol.attributes.@"export" or is_extern_function; 
@@ -5059,12 +6425,20 @@ fn llvm_emit_function_declaration(thread: *Thread, nat_function: *Function.Decla
     };
     const function = thread.llvm.module.createFunction(function_type.toFunction() orelse unreachable, linkage, address_space, function_name.ptr, function_name.len);
 
+    var parameter_attribute_sets = std.BoundedArray(*const LLVM.Attribute.Set, 512){};
+    const function_attributes = llvm_emit_function_attributes(thread, nat_function_type, &parameter_attribute_sets);
+    function.setAttributes(thread.llvm.context, function_attributes.function_attributes, function_attributes.return_attribute_set, function_attributes.parameter_attribute_sets.ptr, function_attributes.parameter_attribute_sets.len);
+
+    const calling_convention = calling_convention_map.get(nat_function_type.abi.calling_convention);
+    function.setCallingConvention(calling_convention);
+
     if (thread.generate_debug_information) {
         const file_index = nat_function.global_symbol.global_declaration.declaration.scope.file;
         const llvm_file = llvm_get_file(thread, file_index);
+        // TODO: emit original arguments
         var debug_argument_types = PinnedArray(*LLVM.DebugInfo.Type){};
-        for (nat_function.get_type().argument_types) |argument_type| {
-            const arg_type = llvm_get_debug_type(thread, llvm_file.builder, argument_type, null);
+        for (nat_function.get_function_type().abi.original_argument_types) |argument_type| {
+            const arg_type = llvm_get_debug_type(thread, llvm_file.builder, argument_type);
             _ = debug_argument_types.append(arg_type);
         }
 
@@ -5161,12 +6535,251 @@ fn create_basic_block(thread: *Thread) *BasicBlock {
     return block;
 }
 
-fn build_return(thread: *Thread, analyzer: *Analyzer, args: struct {
+fn emit_gep(thread: *Thread, analyzer: *Analyzer, args: struct{
+    pointer: *Value,
+    index: *Value,
+    type: *Type,
+    aggregate_type: *Type,
+    is_struct: bool,
+    line: u32,
+    column: u32,
+    scope: *Scope,
+}) *GEP{
+    const gep = thread.geps.append(.{
+        .instruction = new_instruction(thread, .{
+            .scope = args.scope,
+            .line = args.line,
+            .column = args.column,
+            .id = .get_element_pointer,
+        }),
+        .pointer = args.pointer,
+        .index = args.index,
+        .type = args.type,
+        .aggregate_type = args.aggregate_type,
+        .is_struct = args.is_struct,
+    });
+    analyzer.append_instruction(&gep.instruction);
+    return gep;
+}
+
+fn emit_extract_value(thread: *Thread, analyzer: *Analyzer, args: struct{
+    aggregate: *Value,
+    index: u32,
+    type: *Type,
+    line: u32,
+    column: u32,
+    scope: *Scope,
+}) *ExtractValue{
+    const extract_value = thread.extract_values.append(.{
+        .instruction = new_instruction(thread, .{
+            .scope = args.scope,
+            .line = args.line,
+            .column = args.column,
+            .id = .extract_value,
+        }),
+        .aggregate = args.aggregate,
+        .index = args.index,
+        .type = args.type,
+    });
+    analyzer.append_instruction(&extract_value.instruction);
+    return extract_value;
+}
+
+fn emit_insert_value(thread: *Thread, analyzer: *Analyzer, args: struct{
+    aggregate: *Value,
+    value: *Value,
+    index: u32,
+    type: *Type,
+    line: u32,
+    column: u32,
+    scope: *Scope,
+}) *InsertValue{
+    const insert_value = thread.insert_values.append(.{
+        .instruction = new_instruction(thread, .{
+            .scope = args.scope,
+            .line = args.line,
+            .column = args.column,
+            .id = .insert_value,
+        }),
+        .value = args.value,
+        .aggregate = args.aggregate,
+        .index = args.index,
+        .type = args.type,
+    });
+    analyzer.append_instruction(&insert_value.instruction);
+    return insert_value;
+}
+
+fn emit_ret_void(thread: *Thread, analyzer: *Analyzer, args: RawEmitArgs) void {
+    const return_expression = thread.standalone_instructions.append(new_instruction(thread, .{
+        .id = .ret_void,
+        .line = args.line,
+        .column = args.column,
+        .scope = args.scope,
+    }));
+
+    analyzer.append_instruction(return_expression);
+    analyzer.current_basic_block.is_terminated = true;
+}
+
+fn emit_direct_coerce(analyzer: *Analyzer, thread: *Thread, args: struct{
+    coerced_type: *Type,
+    original_value: *Value,
+}) *Value {
+    const source_type = args.original_value.get_type();
+    const local = emit_local_symbol(analyzer, thread, .{
+        .type = source_type,
+        .name = 0,
+        .initial_value = args.original_value,
+        .line = 0,
+        .column = 0,
+    });
+
+    const target_type = args.coerced_type;
+    const target_size = args.coerced_type.size;
+    const target_alignment = args.coerced_type.alignment;
+    const source_size = source_type.size;
+    const source_alignment = source_type.alignment;
+    const target_is_scalable_vector_type = false;
+    const source_is_scalable_vector_type = false;
+    if (source_size >= target_size and !source_is_scalable_vector_type and !target_is_scalable_vector_type) {
+        const load = emit_load(analyzer, thread, .{
+            .value = &local.instruction.value,
+            .type = target_type,
+            .scope = analyzer.current_scope,
+            .line = 0,
+            .column = 0,
+        });
+        return &load.instruction.value;
+    } else {
+        const alignment = @max(target_alignment, source_alignment);
+        const temporal = emit_local_symbol(analyzer, thread, .{
+            .name = 0,
+            .initial_value = null,
+            .type = args.coerced_type,
+            .line = 0,
+            .column = 0,
+        });
+        emit_memcpy(analyzer, thread, .{
+            .destination = &temporal.instruction.value,
+            .source = &local.instruction.value,
+            .destination_alignment = .{
+                .alignment = alignment,
+            },
+            .source_alignment = .{
+                .alignment = source_alignment,
+            },
+            .size = source_size,
+            .line = 0,
+            .column = 0,
+            .scope = analyzer.current_scope,
+        });
+
+        const load = emit_load(analyzer, thread, .{
+            .value = &temporal.instruction.value,
+            .type = args.coerced_type,
+            .line = 0,
+            .column = 0,
+            .scope = analyzer.current_scope,
+        });
+        return &load.instruction.value;
+    }
+}
+
+fn emit_return(thread: *Thread, analyzer: *Analyzer, args: struct {
     return_value: *Value,
     scope: *Scope,
     line: u32,
     column: u32,
 }) void {
+    const function = analyzer.current_function;
+    const function_type = function.declaration.get_function_type();
+    const abi_value: *Value = switch (function_type.abi.return_type_abi.kind) {
+        .ignore => unreachable,
+        .direct => args.return_value,
+        // TODO: 
+        .direct_coerce => |coerced_type| emit_direct_coerce(analyzer, thread, .{
+            .original_value = args.return_value,
+            .coerced_type = coerced_type,
+        }),
+        .direct_pair => |pair| b: {
+            const pair_struct_type = get_anonymous_two_field_struct(thread, pair);
+            assert(pair_struct_type == function_type.abi.abi_return_type);
+
+            const return_value_type = args.return_value.get_type();
+            if (pair_struct_type == return_value_type) {
+                unreachable;
+            } else {
+                const local = emit_local_symbol(analyzer, thread, .{
+                    .type = return_value_type,
+                    .name = 0,
+                    .initial_value = args.return_value,
+                    .line = 0,
+                    .column = 0,
+                });
+                const source_is_scalable_vector_type = false;
+                const target_is_scalable_vector_type = false;
+                if (return_value_type.size >= pair_struct_type.size and !source_is_scalable_vector_type and !target_is_scalable_vector_type) {
+                    const load = emit_load(analyzer, thread, .{
+                        .value = &local.instruction.value,
+                        .type = pair_struct_type,
+                        .line = 0,
+                        .column = 0,
+                        .scope = analyzer.current_scope,
+                    });
+                    break :b &load.instruction.value;
+                } else {
+                    const alignment = @max(return_value_type.alignment, pair_struct_type.alignment);
+                    const temporal = emit_local_symbol(analyzer, thread, .{
+                        .name = 0,
+                        .initial_value = null,
+                        .type = pair_struct_type,
+                        .alignment = alignment,
+                        .line = 0,
+                        .column = 0,
+                    });
+                    emit_memcpy(analyzer, thread, .{
+                        .destination = &temporal.instruction.value,
+                        .destination_alignment = .{ .alignment = alignment },
+                        .source = &local.instruction.value,
+                        .source_alignment = .{ .alignment = local.alignment },
+                        .size = local.type.size,
+                        .line = 0,
+                        .column = 0,
+                        .scope = analyzer.current_scope,
+                    });
+
+                    const load = emit_load(analyzer, thread, .{
+                        .value = &temporal.instruction.value,
+                        .type = pair_struct_type,
+                        .line = 0,
+                        .column = 0,
+                        .scope = analyzer.current_scope,
+                    });
+                    break :b &load.instruction.value;
+                }
+            }
+        },
+        .indirect => {
+            const return_pointer = analyzer.return_pointer orelse unreachable;
+            emit_store(analyzer, thread, .{
+                .destination = &return_pointer.value,
+                .source = args.return_value,
+                .alignment = function_type.abi.original_return_type.alignment,
+                .line = args.line,
+                .column = args.column,
+                .scope = args.scope,
+            });
+            emit_ret_void(thread, analyzer, .{
+                .line = args.line,
+                .column = args.column,
+                .scope = args.scope,
+            });
+            return;
+        },
+        else => |t| @panic(@tagName(t)),
+    };
+
     const return_expression = thread.returns.append(.{
         .instruction = new_instruction(thread, .{
             .id = .ret,
@@ -5174,9 +6787,8 @@ fn build_return(thread: *Thread, analyzer: *Analyzer, args: struct {
             .column = args.column,
             .scope = args.scope,
         }),
-        .value = args.return_value,
+        .value = abi_value,
     });
-
     analyzer.append_instruction(&return_expression.instruction);
     analyzer.current_basic_block.is_terminated = true;
 }
@@ -5222,14 +6834,14 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                 const local_name = parser.parse_identifier(thread, src);
                 if (analyzer.current_scope.get_declaration(local_name)) |lookup_result| {
                     _ = lookup_result;
-                    exit_with_error("Existing declaration with the same name");
+                    fail_message("Existing declaration with the same name");
                 }
 
                 const has_local_attributes = src[parser.i] == '[';
                 parser.i += @intFromBool(has_local_attributes);
 
                 if (has_local_attributes) {
-                    exit_with_error("TODO: local attributes");
+                    fail_message("TODO: local attributes");
                 }
 
                 parser.skip_space(src);
@@ -5273,73 +6885,20 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                             .type = local_type,
                         };
                     },
-                    else => exit(1),
+                    else => fail(),
                 };
 
                 parser.skip_space(src);
 
                 parser.expect_character(src, ';');
 
-                const local_symbol = thread.local_symbols.append(.{
-                    .local_declaration = .{
-                        .declaration = .{
-                            .id = .local,
-                            .name = local_name,
-                            .line = debug_line,
-                            .column = debug_column,
-                            .scope = analyzer.current_scope,
-                        },
-                    },
-                    .type = result.type,
-                    .instruction = new_instruction(thread, .{
-                        .resolved = result.type.sema.resolved and result.initial_value.sema.resolved,
-                        .id = .local_symbol,
-                        .line = debug_line,
-                        .column = debug_column,
-                        .scope = analyzer.current_scope,
-                    }),
-                    .alignment = result.type.alignment,
+                _ = emit_local_symbol(analyzer, thread, .{
+                    .name = local_name,
                     .initial_value = result.initial_value,
-                });
-
-                if (local_symbol.type.sema.id == .pointer) {
-                    switch (result.initial_value.sema.id) {
-                        .instruction => {
-                            const instruction = result.initial_value.get_payload(.instruction);
-                            switch (instruction.id) {
-                                .local_symbol => {
-                                    const right_local_symbol = instruction.get_payload(.local_symbol);
-                                    local_symbol.appointee_type = right_local_symbol.type;
-                                },
-                                else => |t| @panic(@tagName(t)),
-                            }
-                        },
-                        .global_symbol => {
-                            const global_symbol = result.initial_value.get_payload(.global_symbol);
-                            local_symbol.appointee_type = global_symbol.type;
-                        },
-                        else => |t| @panic(@tagName(t)),
-                    }
-                }
-
-                _ = analyzer.current_function.stack_slots.append(local_symbol);
-
-                if (thread.generate_debug_information) {
-                    emit_debug_local(analyzer, thread, .{
-                        .local_symbol = local_symbol,
-                    });
-                }
-
-                emit_store(analyzer, thread, .{
-                    .destination = &local_symbol.instruction.value,
-                    .source = result.initial_value,
-                    .alignment = local_symbol.alignment,
+                    .type = result.type,
                     .line = debug_line,
                     .column = debug_column,
-                    .scope = analyzer.current_scope,
                 });
-
-                analyzer.current_scope.declarations.put_no_clobber(local_name, &local_symbol.local_declaration.declaration);
             },
             'b' => {
                 const identifier = parser.parse_raw_identifier(src);
@@ -5350,7 +6909,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     parser.expect_character(src, ';');
 
                     if (analyzer.loops.length == 0) {
-                        exit_with_error("break when no loop");
+                        fail_message("break when no loop");
                     }
 
                     const inner_loop = analyzer.loops.const_slice()[analyzer.loops.length - 1];
@@ -5374,7 +6933,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                     parser.expect_character(src, ';');
 
                     if (analyzer.loops.length == 0) {
-                        exit_with_error("continue when no loop");
+                        fail_message("continue when no loop");
                     }
 
                     const inner_loop = analyzer.loops.const_slice()[analyzer.loops.length - 1];
@@ -5468,62 +7027,60 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                 if (byte_equal(identifier, "return")) {
                     parser.skip_space(src);
 
-                    const function_type = function.declaration.get_type();
-                    if (function_type.return_type.sema.id != .unresolved) {
-                        const return_type = function_type.return_type;
-                        const return_value = parser.parse_expression(analyzer, thread, file, return_type, .right);
-                        parser.expect_character(src, ';');
-
-                        if (analyzer.return_block) |return_block| {
-                            const return_phi = analyzer.return_phi.?;
-                            _ = return_phi.nodes.append(.{
-                                .value = return_value,
-                                .basic_block = analyzer.current_basic_block,
-                            });
-                            assert(analyzer.current_basic_block != return_block);
-
-                            _ = emit_jump(analyzer, thread, .{
-                                .basic_block = return_block,
-                                .line = debug_line,
-                                .column = debug_column,
-                                .scope = analyzer.current_scope,
-                            });
-                        } else if (analyzer.exit_blocks.length > 0) {
-                            const return_phi = thread.phis.append(.{
-                                .instruction = new_instruction(thread, .{
-                                    .id = .phi,
-                                    .line = debug_line,
-                                    .column = debug_column,
-                                    .scope = analyzer.current_scope,
-                                }),
-                                .type = return_type,
-                            });
-                            analyzer.return_phi = return_phi;
-                            const return_block = create_basic_block(thread);
-                            analyzer.return_block = return_block;
-                            _ = return_phi.nodes.append(.{
-                                .value = return_value,
-                                .basic_block = analyzer.current_basic_block,
-                            });
-
-                            _ = emit_jump(analyzer, thread, .{
-                                .basic_block = return_block,
-                                .line = debug_line,
-                                .column = debug_column,
-                                .scope = analyzer.current_scope,
-                            });
-                        } else {
-                            build_return(thread, analyzer, .{
-                                .return_value = return_value,
-                                .line = debug_line,
-                                .column = debug_column,
-                                .scope = analyzer.current_scope,
-                            });
-                        }
-                        local_block.terminated = true;
-                    } else  {
-                        exit(1);
+                    const function_type = function.declaration.get_function_type();
+                    if (!function_type.abi.original_return_type.sema.resolved) {
+                        fail_message("Return type not resolved");
                     }
+                    const return_value = parser.parse_expression(analyzer, thread, file, function_type.abi.original_return_type, .right);
+                    parser.expect_character(src, ';');
+
+                    if (analyzer.return_block) |return_block| {
+                        const return_phi = analyzer.return_phi.?;
+                        _ = return_phi.nodes.append(.{
+                            .value = return_value,
+                            .basic_block = analyzer.current_basic_block,
+                        });
+                        assert(analyzer.current_basic_block != return_block);
+
+                        _ = emit_jump(analyzer, thread, .{
+                            .basic_block = return_block,
+                            .line = debug_line,
+                            .column = debug_column,
+                            .scope = analyzer.current_scope,
+                        });
+                    } else if (analyzer.exit_blocks.length > 0) {
+                        const return_phi = thread.phis.append(.{
+                            .instruction = new_instruction(thread, .{
+                                .id = .phi,
+                                .line = debug_line,
+                                .column = debug_column,
+                                .scope = analyzer.current_scope,
+                            }),
+                            .type = function_type.abi.original_return_type,
+                        });
+                        analyzer.return_phi = return_phi;
+                        const return_block = create_basic_block(thread);
+                        analyzer.return_block = return_block;
+                        _ = return_phi.nodes.append(.{
+                            .value = return_value,
+                            .basic_block = analyzer.current_basic_block,
+                        });
+
+                        _ = emit_jump(analyzer, thread, .{
+                            .basic_block = return_block,
+                            .line = debug_line,
+                            .column = debug_column,
+                            .scope = analyzer.current_scope,
+                        });
+                    } else {
+                        emit_return(thread, analyzer, .{
+                            .return_value = return_value,
+                            .line = debug_line,
+                            .column = debug_column,
+                            .scope = analyzer.current_scope,
+                        });
+                    }
+                        local_block.terminated = true;
                 } else {
                     parser.i = statement_start_ch_index;
                 }
@@ -5572,8 +7129,11 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                             switch (load_instruction.id) {
                                                 .local_symbol => {
                                                     const local_symbol = load_instruction.get_payload(.local_symbol);
-                                                    if (local_symbol.type.sema.id == .pointer) {
-                                                        break :b local_symbol.appointee_type.?;
+                                                    if (local_symbol.type.sema.id == .typed_pointer) {
+                                                        const pointer_type = local_symbol.type.get_payload(.typed_pointer);
+                                                        break :b pointer_type.descriptor.pointee;
+                                                    } else if (local_symbol.type.sema.id == .opaque_pointer) {
+                                                        unreachable;
                                                     } else {
                                                         break :b local_symbol.type;
                                                     }
@@ -5586,7 +7146,6 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                                 },
                                 .local_symbol => {
                                     const local_symbol = instruction.get_payload(.local_symbol);
-                                    assert(local_symbol.appointee_type == null);
                                     break :b local_symbol.type;
                                 },
                                 else => |t| @panic(@tagName(t)),
@@ -5594,7 +7153,7 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                         },
                         .global_symbol => b: {
                             const global_symbol = left.get_payload(.global_symbol);
-                            const global_type = global_symbol.get_type();
+                            const global_type = global_symbol.type;
                             break :b global_type;
                         },
                         else => |t| @panic(@tagName(t)),
@@ -5641,6 +7200,18 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
                         .scope = analyzer.current_scope,
                     });
                 },
+                ';' => {
+                    switch (left.sema.id) {
+                        .instruction => {
+                            const instruction = left.get_payload(.instruction);
+                            switch (instruction.id) {
+                                .call => parser.i += 1,
+                                else => |t| @panic(@tagName(t)),
+                            }
+                        },
+                        else => |t| @panic(@tagName(t)),
+                    }
+                },
                 else => @panic((src.ptr + parser.i)[0..1]),
             }
         }
@@ -5652,6 +7223,334 @@ pub fn analyze_local_block(thread: *Thread, analyzer: *Analyzer, parser: *Parser
 
     return local_block;
 }
+
+const Aarch64 = struct{
+};
+
+const SystemV = struct{
+    const RegisterCount = struct{
+        gp_registers: u32,
+        sse_registers: u32,
+    };
+    const Class = enum {
+        no_class,
+        memory,
+        integer,
+        sse,
+        sseup,
+
+        fn merge(accumulator: Class, field: Class) Class {
+            assert(accumulator != .memory);
+            if (accumulator == field) {
+                return accumulator;
+            } else {
+                var a = accumulator;
+                var f = field;
+                if (@intFromEnum(accumulator) > @intFromEnum(field)) {
+                    a = field;
+                    f = accumulator;
+                }
+
+                return switch (a) {
+                    .no_class => f,
+                    .memory => .memory,
+                    .integer => .integer,
+                    .sse, .sseup => .sse,
+                };
+            }
+        }
+    };
+
+    fn classify(ty: *Type, base_offset: u64) [2]Class {
+        var result: [2]Class = undefined;
+        const is_memory = base_offset >= 8;
+        const current_index = @intFromBool(is_memory);
+        const not_current_index = @intFromBool(!is_memory);
+        assert(current_index != not_current_index);
+        result[current_index] = .memory;
+        result[not_current_index] = .no_class;
+
+        switch (ty.sema.id) {
+            .void, .noreturn => result[current_index] = .no_class,
+            .bitfield => result[current_index] = .integer,
+            .integer => {
+                const integer_index = ty.get_integer_index();
+                switch (integer_index) {
+                    8 - 1, 16 - 1, 32 - 1, 64 - 1,
+                    64 + 8 - 1, 64 + 16 - 1, 64 + 32 - 1, 64 + 64 - 1,
+                    => result[current_index] = .integer,
+                    else => unreachable,
+                }
+            },
+            .typed_pointer => result[current_index] = .integer,
+            .@"struct" => {
+                if (ty.size <= 64) {
+                    const has_variable_array = false;
+                    if (!has_variable_array) {
+                        const struct_type = ty.get_payload(.@"struct");
+                        result[current_index] = .no_class;
+                        const is_union = false;
+                        var member_offset: u32 = 0;
+                        for (struct_type.fields) |field| {
+                            const offset = base_offset + member_offset;
+                            const member_size = field.type.size;
+                            const member_alignment = field.type.alignment;
+                            member_offset = @intCast(library.align_forward(member_offset + member_size, ty.alignment));
+                            const native_vector_size = 16;
+                            if (ty.size > 16 and ((!is_union and ty.size != member_size) or ty.size > native_vector_size)) {
+                                result[0] = .memory;
+                                const r = classify_post_merge(ty.size, result);
+                                return r;
+                            }
+
+                            if (offset % member_alignment != 0) {
+                                result[0] = .memory;
+                                const r = classify_post_merge(ty.size, result);
+                                return r;
+                            }
+
+                            const member_classes = classify(field.type, offset);
+                            for (&result, member_classes) |*r, m| {
+                                const merge_result = r.merge(m);
+                                r.* = merge_result;
+                            }
+
+                            if (result[0] == .memory or result[1] == .memory) break;
+                        }
+
+                        const final = classify_post_merge(ty.size, result);
+                        result = final;
+                    }
+                }
+            },
+            .array => {
+                if (ty.size <= 64) {
+                    if (base_offset % ty.alignment == 0) {
+                        const array_type = ty.get_payload(.array);
+                        result[current_index] = .no_class;
+
+                        const vector_size = 16;
+                        if (ty.size > 16 and (ty.size != array_type.descriptor.element_type.size or ty.size > vector_size)) {
+                            unreachable;
+                        } else {
+                            var offset = base_offset;
+
+                            for (0..array_type.descriptor.element_count) |_| {
+                                const element_classes = classify(array_type.descriptor.element_type, offset);
+                                offset += array_type.descriptor.element_type.size;
+                                const merge_result = [2]Class{ result[0].merge(element_classes[0]), result[1].merge(element_classes[1]) };
+                                result = merge_result;
+                                if (result[0] == .memory or result[1] == .memory) {
+                                    break;
+                                }
+                            }
+
+                            const final_result = classify_post_merge(ty.size, result);
+                            assert(final_result[1] != .sseup or final_result[0] != .sse);
+                            result = final_result;
+                        }
+                    }
+                }
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+
+        return result;
+    }
+
+    fn classify_post_merge(size: u64, classes: [2]Class) [2]Class{
+        if (classes[1] == .memory) {
+            return .{ .memory, .memory };
+        } else if (size > 16 and (classes[0] != .sse or classes[1] != .sseup)) {
+            return .{ .memory, classes[1] };
+        } else if (classes[1] == .sseup and classes[0] != .sse and classes[0] != .sseup) {
+            return .{ classes[0], .sse };
+        } else {
+            return classes;
+        }
+    }
+
+    fn get_int_type_at_offset(ty: *Type, offset: u32, source_type: *Type, source_offset: u32) *Type {
+        switch (ty.sema.id) {
+            .bitfield => {
+                const bitfield = ty.get_payload(.bitfield);
+                return get_int_type_at_offset(bitfield.backing_type, offset, if (source_type == ty) bitfield.backing_type else source_type, source_offset);
+            },
+            .integer => {
+                const integer_index = ty.get_integer_index();
+                switch (integer_index) {
+                    64 - 1, 64 + 64 - 1 => return ty,
+                    8 - 1, 16 - 1, 32 - 1, 64 + 8 - 1, 64 + 16 - 1, 64 + 32 - 1 => {
+                        if (offset != 0) unreachable;
+                        const start = source_offset + ty.size;
+                        const end = source_offset + 8;
+                        if (contains_no_user_data(source_type, start, end)) {
+                            return ty;
+                        }
+                    },
+                    else => unreachable,
+                }
+            },
+            .typed_pointer => return if (offset == 0) ty else unreachable,
+            .@"struct" => {
+                if (get_member_at_offset(ty, offset)) |field| {
+                    return get_int_type_at_offset(field.type, @intCast(offset - field.member_offset), source_type, source_offset);
+                }
+                unreachable;
+            },
+            .array => {
+                const array_type = ty.get_payload(.array);
+                const element_type = array_type.descriptor.element_type;
+                const element_size = element_type.size;
+                const element_offset = (offset / element_size) * element_size;
+                return get_int_type_at_offset(element_type, @intCast(offset - element_offset), source_type, source_offset);
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+
+
+        if (source_type.size - source_offset > 8) {
+            return &instance.threads[ty.sema.thread].integers[63].type;
+        } else {
+            const byte_count =  source_type.size - source_offset;
+            const bit_count = byte_count * 8;
+            return &instance.threads[ty.sema.thread].integers[bit_count - 1].type;
+        }
+
+        unreachable;
+    }
+
+    fn get_member_at_offset(ty: *Type, offset: u32) ?*Type.AggregateField{
+        if (ty.size <= offset) {
+            return null;
+        }
+
+        var offset_it: u32 = 0;
+        var last_match: ?*Type.AggregateField = null;
+
+        const struct_type = ty.get_payload(.@"struct");
+        for (struct_type.fields) |field| {
+            if (offset_it > offset) {
+                break;
+            }
+
+            last_match = field;
+            offset_it = @intCast(library.align_forward(offset_it + field.type.size, ty.alignment));
+        }
+
+        assert(last_match != null);
+        return last_match;
+    }
+
+    fn contains_no_user_data(ty: *Type, start: u64, end: u64) bool {
+        if (ty.size <= start) {
+            return true;
+        }
+
+        switch (ty.sema.id) {
+            .@"struct" => {
+                const struct_type = ty.get_payload(.@"struct");
+                var offset: u64 = 0;
+
+                for (struct_type.fields) |field| {
+                    if (offset >= end) break;
+                    const field_start = if (offset < start) start - offset else 0;
+                    if (!contains_no_user_data(field.type, field_start, end - offset)) return false;
+                    offset += field.type.size;
+                }
+
+                return true;
+            },
+            .array => {
+                const array_type = ty.get_payload(.array);
+                for (0..array_type.descriptor.element_count) |i| {
+                    const offset = i * array_type.descriptor.element_type.size;
+                    if (offset >= end) break;
+                    const element_start = if (offset < start) start - offset else 0;
+                    if (!contains_no_user_data(array_type.descriptor.element_type, element_start, end - offset)) return false;
+                }
+
+                return true;
+            },
+            .anonymous_struct => unreachable,
+            else => return false,
+        }
+    }
+
+    fn get_argument_pair(types: [2]*Type) Function.Abi.Information{
+        const low_size = types[0].size;
+        const high_alignment = types[1].alignment;
+        const high_start = library.align_forward(low_size, high_alignment);
+        assert(high_start == 8);
+        return .{
+            .kind = .{
+                .direct_pair = types,
+            },
+        };
+    }
+
+    fn indirect_argument(ty: *Type, free_integer_registers: u32) Function.Abi.Information{
+        const is_illegal_vector = false;
+        if (!ty.is_aggregate() and !is_illegal_vector) {
+            if (ty.sema.id == .integer and ty.bit_size < 32) {
+                unreachable;
+            } else {
+                return .{
+                    .kind = .direct,
+                };
+            }
+        } else {
+            if (free_integer_registers == 0) {
+                if (ty.alignment <= 8 and ty.size <= 8) {
+                    unreachable;
+                }
+            }
+
+            if (ty.alignment < 8) {
+                return .{
+                    .kind = .{
+                        .indirect = .{
+                            .type = ty,
+                            .alignment = 8,
+                        },
+                    },
+                    .attributes = .{
+                        .realign = true,
+                        .by_value = true,
+                    },
+                };
+            } else {
+                return .{
+                    .kind = .{
+                        .indirect = .{
+                            .type = ty,
+                            .alignment = ty.alignment,
+                        },
+                    },
+                    .attributes = .{
+                        .by_value = true,
+                    },
+                };
+            }
+        }
+        unreachable;
+    }
+
+    fn indirect_return(ty: *Type) Function.Abi.Information{
+        if (ty.is_aggregate()) {
+            return .{
+                .kind = .{
+                    .indirect = .{
+                        .type = ty,
+                        .alignment = ty.alignment,
+                    },
+                },
+            };
+        } else {
+            unreachable;
+        }
+    }
+};
 
 fn get_declaration_value(analyzer: *Analyzer, thread: *Thread, declaration: *Declaration, maybe_type: ?*Type, side: Side) *Value {
     var declaration_type: *Type = undefined;
@@ -5700,7 +7599,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
     const src = file.source_code;
 
     if (src.len > std.math.maxInt(u32)) {
-        exit_with_error("File too big");
+        fail_message("File too big");
     }
 
     file.functions.start = @intCast(thread.functions.length);
@@ -5723,13 +7622,15 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
             '>' => {
                 parser.i += 1;
                 parser.skip_space(src);
-                const symbol_identifier_start = parser.i;
-                _ = symbol_identifier_start; // autofix
                 const global_name = parser.parse_identifier(thread, src);
+
+                if (global_name == 0) {
+                    fail_message("discard identifier '_' cannot be used as a global variable name");
+                }
 
                 if (file.scope.scope.get_global_declaration(global_name)) |existing_global| {
                     _ = existing_global; // autofix
-                    exit(1);
+                    fail();
                 }
 
                 parser.skip_space(src);
@@ -5772,6 +7673,9 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         .alignment = global_type.alignment,
                         .id = .global_variable,
                         .type = global_type,
+                        .pointer_type = get_typed_pointer(thread, .{
+                            .pointee = global_type,
+                        }),
                     },
                     .initial_value = global_initial_value,
                 });
@@ -5787,13 +7691,12 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     switch (backing_type.sema.id) {
                         .integer => {
-                            const integer_ty = backing_type.get_payload(.integer);
-                            if (integer_ty.bit_count > 64) {
-                                exit(1);
+                            if (backing_type.bit_size > 64) {
+                                fail();
                             }
 
-                            if (integer_ty.bit_count % 8 != 0) {
-                                exit(1);
+                            if (backing_type.bit_size % 8 != 0) {
+                                fail();
                             }
 
                             parser.skip_space(src);
@@ -5808,6 +7711,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                     },
                                     .size = backing_type.size,
                                     .alignment = backing_type.alignment,
+                                    .bit_size = backing_type.bit_size,
                                 },
                                 .declaration = .{
                                     .name = bitfield_name,
@@ -5826,16 +7730,19 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             parser.expect_character(src, brace_open);
 
                             var fields = PinnedArray(*Type.AggregateField){};
-                            var total_bit_count: u32 = 0;
+                            var total_bit_count: u64 = 0;
                             while (parser.parse_field(thread, file)) |field_data| {
                                 const field_bit_offset = total_bit_count;
-                                const field_bit_count = field_data.type.get_bit_count();
+                                const field_bit_count = field_data.type.bit_size;
+                                if (field_bit_count == 0) {
+                                    fail();
+                                }
                                 total_bit_count += field_bit_count;
                                 const field = thread.fields.append(.{
                                     .type = field_data.type,
                                     .parent = &bitfield_type.type,
                                     .name = field_data.name,
-                                    .index = thread.fields.length,
+                                    .index = fields.length,
                                     .line = field_data.line,
                                     .column = field_data.column,
                                     .member_offset = field_bit_offset,
@@ -5845,8 +7752,8 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                             parser.i += 1;
 
-                            if (total_bit_count != integer_ty.bit_count) {
-                                exit(1);
+                            if (total_bit_count != backing_type.bit_size) {
+                                fail();
                             }
 
                             bitfield_type.fields = fields.const_slice();
@@ -5854,7 +7761,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         else => |t| @panic(@tagName(t)),
                     }
                 } else {
-                    exit(1);
+                    fail();
                 }
             },
             'f' => {
@@ -5862,53 +7769,40 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     parser.i += 2;
                     parser.skip_space(src);
 
-                    const function = thread.functions.add_one();
-                    const entry_block = create_basic_block(thread);
-                    function.* = .{
-                        .declaration = .{
-                            .global_symbol = .{
-                                .global_declaration = .{
-                                    .declaration = .{
-                                        .name = std.math.maxInt(u32),
-                                        .id = .global,
-                                        .line = declaration_line,
-                                        .column = declaration_column,
-                                        .scope = &file.scope.scope,
-                                    },
+                    // This variable lives in the stack as mere data collector,
+                    // so it will be consumed by other data structure later when
+                    // it is certain if this declaration is an external function or
+                    // a function definition
+                    var function_declaration_data = Function.Declaration{
+                        .global_symbol = .{
+                            .global_declaration = .{
+                                .declaration = .{
+                                    .name = std.math.maxInt(u32),
+                                    .id = .global,
+                                    .line = declaration_line,
+                                    .column = declaration_column,
+                                    .scope = &file.scope.scope,
+                                },
+                                .id = .global_symbol,
+                            },
+                            .alignment = 1,
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true, // TODO: is this correct?
                                     .id = .global_symbol,
                                 },
-                                .alignment = 1,
-                                .value = .{
-                                    .sema = .{
-                                        .thread = thread.get_index(),
-                                        .resolved = true, // TODO: is this correct?
-                                        .id = .global_symbol,
-                                    },
                                 },
-                                .id = .function_definition,
-                                .type = undefined,
-                            },
+                            .id = .function_definition,
+                            .type = undefined,
+                            .pointer_type = undefined,
                         },
-                        .scope = .{
-                            .scope = .{
-                                .id = .function,
-                                .parent = &file.scope.scope,
-                                .line = declaration_line + 1,
-                                .column = declaration_column + 1,
-                                .file = file_index,
-                            },
-                        },
-                        .entry_block = entry_block,
-                    };
-
-                    var analyzer = Analyzer{
-                        .current_function = function,
-                        .current_basic_block = entry_block,
-                        .current_scope = &function.scope.scope,
                     };
 
                     const has_function_attributes = src[parser.i] == '[';
                     parser.i += @intFromBool(has_function_attributes);
+
+                    var calling_convention = CallingConvention.custom;
 
                     if (has_function_attributes) {
                         var attribute_mask = Function.Attribute.Mask.initEmpty();
@@ -5923,7 +7817,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 if (byte_equal(fa_field.name, attribute_identifier)) {
                                     const function_attribute = @field(Function.Attribute, fa_field.name);
                                     if (attribute_mask.contains(function_attribute)) {
-                                        exit(1);
+                                        fail();
                                     }
 
                                     attribute_mask.setPresent(function_attribute, true);
@@ -5946,18 +7840,17 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                                             inline for (@typeInfo(CallingConvention).Enum.fields) |cc_field| {
                                                 if (byte_equal(cc_field.name, cc_identifier)) {
-                                                    const calling_convention = @field(CallingConvention, cc_field.name);
-                                                    function.declaration.attributes.calling_convention = calling_convention;
+                                                    calling_convention = @field(CallingConvention, cc_field.name);
                                                     break :b;
                                                 }
                                             } else {
-                                                exit(1);
+                                                fail();
                                             }
                                         },
                                     }
                                 }
                             } else {
-                                exit(1);
+                                fail();
                             }
 
                             parser.skip_space(src);
@@ -5974,7 +7867,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         parser.skip_space(src);
                     }
 
-                    function.declaration.global_symbol.global_declaration.declaration.name = parser.parse_identifier(thread, src);
+                    function_declaration_data.global_symbol.global_declaration.declaration.name = parser.parse_identifier(thread, src);
 
                     parser.skip_space(src);
 
@@ -5994,14 +7887,18 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 if (byte_equal(fa_field.name, attribute_identifier)) {
                                     const global_attribute = @field(GlobalSymbol.Attribute, fa_field.name);
                                     if (attribute_mask.contains(global_attribute)) {
-                                        exit(1);
+                                        fail();
                                     }
 
                                     attribute_mask.setPresent(global_attribute, true);
 
                                     switch (global_attribute) {
-                                        .@"export" => {},
-                                        .@"extern" => {},
+                                        .@"export" => {
+                                            function_declaration_data.global_symbol.attributes.@"export" = true;
+                                        },
+                                        .@"extern" => {
+                                            function_declaration_data.global_symbol.attributes.@"extern" = true;
+                                        },
                                     }
 
                                     const after_ch =src[parser.i];
@@ -6013,7 +7910,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                     break;
                                 }
                             } else {
-                                exit(1);
+                                fail();
                             }
 
                             parser.skip_space(src);
@@ -6030,11 +7927,13 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         parser.skip_space(src);
                     }
 
-                    file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
+                    if (function_declaration_data.global_symbol.attributes.@"export" and function_declaration_data.global_symbol.attributes.@"extern") {
+                        fail();
+                    }
 
                     const split_modules = true;
-                    if (split_modules) {
-                        function.declaration.global_symbol.attributes.@"export" = true;
+                    if (split_modules and !function_declaration_data.global_symbol.attributes.@"extern") {
+                        function_declaration_data.global_symbol.attributes.@"export" = true;
                     }
 
                     parser.expect_character(src, '(');
@@ -6045,8 +7944,11 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         line: u32,
                         column: u32,
                     };
-                    var arguments = PinnedArray(ArgumentData){};
-                    var argument_types = PinnedArray(*Type){};
+
+                    var original_arguments = PinnedArray(ArgumentData){};
+                    var original_argument_types = PinnedArray(*Type){};
+                    var fully_resolved = true;
+
                     while (true) {
                         parser.skip_space(src);
 
@@ -6063,21 +7965,22 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                         parser.skip_space(src);
                         
-                        const argument_type = parser.parse_type_expression(thread, file, analyzer.current_scope);
-                        _ = arguments.append(.{
+                        const argument_type = parser.parse_type_expression(thread, file, &file.scope.scope);
+                        fully_resolved = fully_resolved and argument_type.sema.resolved;
+                        _ = original_arguments.append(.{
                             .type = argument_type,
                             .name = argument_name,
                             .line = argument_line,
                             .column = argument_column,
                         });
-                        _ = argument_types.append(argument_type);
+                        _ = original_argument_types.append(argument_type);
 
                         parser.skip_space(src);
 
                         switch (src[parser.i]) {
                             ',' => parser.i += 1,
                             ')' => {},
-                            else => exit(1),
+                            else => fail(),
                         }
                     }
 
@@ -6085,7 +7988,440 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     parser.skip_space(src);
 
-                    const return_type = parser.parse_type_expression(thread, file, analyzer.current_scope);
+                    const original_return_type = parser.parse_type_expression(thread, file, &file.scope.scope);
+                    fully_resolved = fully_resolved and original_return_type.sema.resolved;
+
+                    const function_abi: Function.Abi = if (fully_resolved) switch (calling_convention) {
+                        .c => abi: {
+                            var argument_type_abis = PinnedArray(Function.Abi.Information){};
+                            const return_type_abi: Function.Abi.Information = switch (builtin.cpu.arch) {
+                                .x86_64 => block: {
+                                    switch (builtin.os.tag) {
+                                        .linux => {
+                                            const return_type_abi: Function.Abi.Information = rta: {
+                                                const type_classes = SystemV.classify(original_return_type, 0);
+                                                assert(type_classes[1] != .memory or type_classes[0] == .memory);
+                                                assert(type_classes[1] != .sseup or type_classes[0] == .sse);
+
+                                                const result_type = switch (type_classes[0]) {
+                                                    .no_class => switch (type_classes[1]) {
+                                                        .no_class => break :rta .{
+                                                            .kind = .ignore,
+                                                        },
+                                                        else => |t| @panic(@tagName(t)),
+                                                    },
+                                                    .integer => b: {
+                                                        const result_type = SystemV.get_int_type_at_offset(original_return_type, 0, original_return_type, 0);
+                                                        if (type_classes[1] == .no_class and original_return_type.bit_size < 32) {
+                                                            const signed = switch (original_return_type.sema.id) {
+                                                                .integer => @intFromEnum(original_return_type.get_payload(.integer).signedness) != 0,
+                                                                .bitfield => false,
+                                                                else => |t| @panic(@tagName(t)),
+                                                            };
+
+                                                            break :rta .{
+                                                                .kind = .{
+                                                                    .direct_coerce = original_return_type,
+                                                                },
+                                                                .attributes = .{
+                                                                    .sign_extend = signed,
+                                                                    .zero_extend = !signed,
+                                                                },
+                                                            };
+                                                        }
+                                                        break :b result_type;
+                                                    },
+                                                    .memory => break :rta SystemV.indirect_return(original_return_type),
+                                                    else => |t| @panic(@tagName(t)),
+                                                };
+                                                const high_part: ?*Type = switch (type_classes[1]) {
+                                                    .no_class, .memory => null,
+                                                    .integer => b: {
+                                                        assert(type_classes[0] != .no_class);
+                                                        const high_part = SystemV.get_int_type_at_offset(original_return_type, 8, original_return_type, 8);
+                                                        break :b high_part;
+                                                    },
+                                                    else => |t| @panic(@tagName(t)),
+                                                };
+
+                                                if (high_part) |hp| {
+                                                    break :rta SystemV.get_argument_pair(.{ result_type, hp });
+                                                } else {
+                                                    // TODO
+                                                    const is_type = true;
+                                                    if (is_type) {
+                                                        if (result_type == original_return_type) {
+                                                            break :rta Function.Abi.Information{
+                                                                .kind = .direct,
+                                                            };
+                                                        } else {
+                                                            break :rta Function.Abi.Information{
+                                                                .kind = .{
+                                                                    .direct_coerce = result_type,
+                                                                },
+                                                            };
+                                                        }
+                                                    } else {
+                                                        unreachable;
+                                                    }
+                                                }
+                                            };
+                                            var available_registers = SystemV.RegisterCount{
+                                                .gp_registers = 6,
+                                                .sse_registers = 8,
+                                            };
+
+                                            if (return_type_abi.kind == .indirect) {
+                                                available_registers.gp_registers -= 1;
+                                            }
+
+                                            const return_by_reference = false;
+                                            if (return_by_reference) {
+                                                unreachable;
+                                            }
+
+                                            for (original_argument_types.const_slice()) |original_argument_type| {
+                                                var needed_registers = SystemV.RegisterCount{
+                                                    .gp_registers = 0,
+                                                    .sse_registers = 0,
+                                                };
+                                                const argument_type_abi_classification: Function.Abi.Information = ata: {
+                                                    const type_classes = SystemV.classify(original_argument_type, 0);
+                                                    assert(type_classes[1] != .memory or type_classes[0] == .memory);
+                                                    assert(type_classes[1] != .sseup or type_classes[0] == .sse);
+
+                                                    _ = &needed_registers; // autofix
+
+                                                    const result_type = switch (type_classes[0]) {
+                                                        .integer => b: {
+                                                            needed_registers.gp_registers += 1;
+                                                            const result_type = SystemV.get_int_type_at_offset(original_argument_type, 0, original_argument_type, 0);
+                                                            if (type_classes[1] == .no_class and original_argument_type.bit_size < 32) {
+                                                                const signed = switch (original_argument_type.sema.id) {
+                                                                    .integer => @intFromEnum(original_argument_type.get_payload(.integer).signedness) != 0,
+                                                                    .bitfield => false,
+                                                                    else => |t| @panic(@tagName(t)),
+                                                                };
+
+                                                                break :ata .{
+                                                                    .kind = .{
+                                                                        .direct_coerce = original_argument_type,
+                                                                    },
+                                                                    .attributes = .{
+                                                                        .sign_extend = signed,
+                                                                        .zero_extend = !signed,
+                                                                    },
+                                                                };
+                                                            }
+                                                            break :b result_type;
+                                                        },
+                                                        .memory => break :ata SystemV.indirect_argument(original_argument_type, available_registers.gp_registers),
+                                                        else => |t| @panic(@tagName(t)),
+                                                    };
+                                                    const high_part: ?*Type = switch (type_classes[1]) {
+                                                        .no_class, .memory => null,
+                                                        .integer => b: {
+                                                            assert(type_classes[0] != .no_class);
+                                                            needed_registers.gp_registers += 1;
+                                                            const high_part = SystemV.get_int_type_at_offset(original_argument_type, 8, original_argument_type, 8);
+                                                            break :b high_part;
+                                                        },
+                                                        else => |t| @panic(@tagName(t)),
+                                                    };
+
+                                                    if (high_part) |hp| {
+                                                        break :ata SystemV.get_argument_pair(.{ result_type, hp });
+                                                    } else {
+                                                        // TODO
+                                                        const is_type = true;
+                                                        if (is_type) {
+                                                            if (result_type == original_argument_type) {
+                                                                break :ata Function.Abi.Information{
+                                                                    .kind = .direct,
+                                                                };
+                                                            } else if (result_type.sema.id == .integer and original_argument_type.sema.id == .integer and original_argument_type.size == result_type.size) {
+                                                                unreachable;
+                                                            } else {
+                                                                break :ata Function.Abi.Information{
+                                                                    .kind = .{
+                                                                        .direct_coerce = result_type,
+                                                                    },
+                                                                };
+                                                            }
+                                                        }
+                                                        unreachable;
+                                                    }
+                                                };
+                                                const argument_type_abi = if (available_registers.sse_registers < needed_registers.sse_registers or available_registers.gp_registers < needed_registers.gp_registers) b: {
+                                                    break :b SystemV.indirect_argument(original_argument_type, available_registers.gp_registers);
+                                                } else b: {
+                                                    available_registers.gp_registers -= needed_registers.gp_registers;
+                                                    available_registers.sse_registers -= needed_registers.sse_registers;
+                                                    break :b argument_type_abi_classification;
+                                                };
+
+                                                _ = argument_type_abis.append(argument_type_abi);
+                                            }
+
+                                            break :block return_type_abi;
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+                                },
+                                .aarch64 => block: {
+                                    const return_type_abi: Function.Abi.Information = blk: {
+                                        if (original_return_type.returns_nothing()) {
+                                            break :blk .{
+                                                .kind = .ignore,
+                                            };
+                                        }
+
+                                        const size = original_return_type.size;
+                                        const alignment = original_return_type.alignment;
+
+                                        const is_vector = false;
+                                        if (is_vector and size > 16) {
+                                            unreachable;
+                                        }
+
+                                        if (!original_return_type.is_aggregate()) {
+                                            const extend = builtin.os.tag.isDarwin() and switch (original_return_type.sema.id) {
+                                                .integer => original_return_type.bit_size < 32,
+                                                .bitfield => original_return_type.bit_size < 32,
+                                                else => |t| @panic(@tagName(t)),
+                                            };
+
+                                            if (extend) {
+                                                const signed = switch (original_return_type.sema.id) {
+                                                    else => |t| @panic(@tagName(t)),
+                                                    .bitfield => @intFromEnum(original_return_type.get_payload(.bitfield).backing_type.get_payload(.integer).signedness) != 0,
+                                                    .integer => @intFromEnum(original_return_type.get_payload(.integer).signedness) != 0,
+                                                    .typed_pointer => false,
+                                                };
+
+                                                break :blk Function.Abi.Information{
+                                                    .kind = .direct,
+                                                    .attributes = .{
+                                                        .zero_extend = !signed,
+                                                        .sign_extend = signed,
+                                                    },
+                                                };
+                                            } else break :blk .{
+                                                .kind = .direct,
+                                            };
+                                        } else {
+                                            assert(size > 0);
+                                            const is_variadic = false;
+                                            const is_aarch64_32 = false;
+                                            const maybe_homogeneous_aggregate = original_return_type.get_homogeneous_aggregate();
+                                            if (maybe_homogeneous_aggregate != null and !(is_aarch64_32 and is_variadic)) {
+                                                unreachable;
+                                            } else if (size <= 16) {
+                                                if (size <= 8 and builtin.cpu.arch.endian() == .little) {
+                                                    break :blk .{
+                                                        .kind = .{
+                                                            .direct_coerce = &thread.integers[size * 8 - 1].type,
+                                                        },
+                                                    };
+                                                } else {
+                                                    const aligned_size = library.align_forward(size, 8);
+                                                    if (alignment < 16 and aligned_size == 16) {
+                                                        break :blk .{
+                                                            .kind = .{
+                                                                .direct_coerce = get_array_type(thread, .{
+                                                                    .element_type = &thread.integers[63].type,
+                                                                    .element_count = 2,
+                                                                }),
+                                                            },
+                                                        };
+                                                    } else {
+                                                        unreachable;
+                                                    }
+                                                    unreachable;
+                                                }
+                                            } else {
+                                                assert(alignment > 0);
+                                                break :blk .{
+                                                    .kind = .{
+                                                        .indirect = .{
+                                                            .type = original_return_type,
+                                                            .alignment = alignment,
+                                                        },
+                                                    },
+                                                    .attributes = .{
+                                                        .by_value = true,
+                                                    },
+                                                };
+                                            }
+                                        }
+                                    };
+
+                                    for (original_argument_types.const_slice()) |argument_type| {
+                                        const argument_type_abi: Function.Abi.Information = blk: {
+                                            if (argument_type.returns_nothing()) {
+                                                break :blk .{
+                                                    .kind = .ignore,
+                                                };
+                                            }
+
+                                            // TODO:
+                                            const is_illegal_vector = false;
+                                            if (is_illegal_vector) {
+                                                unreachable;
+                                            }
+
+                                            if (!argument_type.is_aggregate()) {
+                                                const extend = builtin.os.tag.isDarwin() and switch (argument_type.sema.id) {
+                                                    else => |t| @panic(@tagName(t)),
+                                                    .bitfield => argument_type.bit_size < 32,
+                                                    .integer => argument_type.bit_size < 32,
+                                                    .typed_pointer => false,
+                                                };
+
+                                                if (extend) {
+                                                    const signed = switch (argument_type.sema.id) {
+                                                        else => |t| @panic(@tagName(t)),
+                                                        .bitfield => @intFromEnum(argument_type.get_payload(.bitfield).backing_type.get_payload(.integer).signedness) != 0,
+                                                        .integer => @intFromEnum(argument_type.get_payload(.integer).signedness) != 0,
+                                                        .typed_pointer => false,
+                                                    };
+
+                                                    break :blk Function.Abi.Information{
+                                                        .kind = .direct,
+                                                        .attributes = .{
+                                                            .zero_extend = !signed,
+                                                            .sign_extend = signed,
+                                                        },
+                                                    };
+                                                } else break :blk .{
+                                                    .kind = .direct,
+                                                };
+                                            } else {
+                                                assert(argument_type.size > 0);
+
+                                                if (argument_type.get_homogeneous_aggregate()) |homogeneous_aggregate| {
+                                                    _ = homogeneous_aggregate; // autofix
+                                                    unreachable;
+                                                } else if (argument_type.size <= 16) {
+                                                    const base_alignment = argument_type.alignment;
+                                                    const is_aapcs = false;
+                                                    const alignment = switch (is_aapcs) {
+                                                        true => if (base_alignment < 16) 8 else 16,
+                                                        false => @max(base_alignment, 8),
+                                                    };
+                                                    assert(alignment == 8 or alignment == 16);
+                                                    const aligned_size = library.align_forward(argument_type.size, alignment);
+                                                    if (alignment == 16) {
+                                                        unreachable;
+                                                    } else {
+                                                        const element_count = @divExact(aligned_size, alignment);
+                                                        if (element_count > 1) {
+                                                            break :blk .{
+                                                                .kind = .{
+                                                                    .direct_coerce = get_array_type(thread, .{
+                                                                        .element_type = &thread.integers[63].type,
+                                                                        .element_count = element_count,
+                                                                    }),
+                                                                }
+                                                            };
+                                                        } else break :blk .{
+                                                            .kind = .{
+                                                                .direct_coerce = &thread.integers[63].type,
+                                                            },
+                                                        };
+                                                    }
+                                                } else {
+                                                    const alignment = argument_type.alignment;
+                                                    assert(alignment > 0);
+
+                                                    break :blk .{
+                                                        .kind = .{
+                                                            .indirect = .{
+                                                                .type = argument_type,
+                                                                .alignment = alignment,
+                                                            },
+                                                        },
+                                                    };
+                                                }
+                                            }
+                                        };
+                                        _ = argument_type_abis.append(argument_type_abi);
+                                    }
+
+                                    break :block return_type_abi;
+                                },
+                                else => fail_message("ABI not supported"),
+                            };
+
+                            var abi_argument_types = PinnedArray(*Type){};
+                            const abi_return_type = switch (return_type_abi.kind) {
+                                .ignore, .direct => original_return_type,
+                                .direct_coerce => |coerced_type| coerced_type,
+                                .indirect => |indirect| b: {
+                                    _ = abi_argument_types.append(get_typed_pointer(thread, .{
+                                        .pointee = indirect.type,
+                                    }));
+                                    break :b &thread.void;
+                                },
+                                .direct_pair => |pair| get_anonymous_two_field_struct(thread, pair),
+                                else => |t| @panic(@tagName(t)),
+                            };
+
+                            for (argument_type_abis.slice(), original_argument_types.const_slice()) |*argument_abi, original_argument_type| {
+                                const start: u16 = @intCast(abi_argument_types.length);
+                                switch (argument_abi.kind) {
+                                    .direct => _ = abi_argument_types.append(original_argument_type),
+                                    .direct_coerce => |coerced_type| _ = abi_argument_types.append(coerced_type),
+                                    .direct_pair => |pair| {
+                                        _ = abi_argument_types.append(pair[0]);
+                                        _ = abi_argument_types.append(pair[1]);
+                                    },
+                                    .indirect => |indirect| _ = abi_argument_types.append(get_typed_pointer(thread, .{
+                                        .pointee = indirect.type,
+                                    })),
+                                    else => |t| @panic(@tagName(t)),
+                                }
+
+                                const end: u16 = @intCast(abi_argument_types.length);
+                                argument_abi.indices = .{start, end};
+                            }
+
+                            break :abi Function.Abi{
+                                .original_return_type = original_return_type,
+                                .original_argument_types = original_argument_types.const_slice(),
+                                .abi_return_type = abi_return_type,
+                                .abi_argument_types = abi_argument_types.const_slice(),
+                                .return_type_abi = return_type_abi,
+                                .argument_types_abi = argument_type_abis.const_slice(),
+                                .calling_convention = calling_convention,
+                            };
+                        },
+                        .custom => custom: {
+                            break :custom Function.Abi{
+                                .original_return_type = original_return_type,
+                                .original_argument_types = original_argument_types.const_slice(),
+                                .abi_return_type = original_return_type,
+                                .abi_argument_types = original_argument_types.const_slice(),
+                                .return_type_abi = .{
+                                    .kind = .direct,
+                                },
+                                .argument_types_abi = blk: {
+                                    var argument_abis = PinnedArray(Function.Abi.Information){};
+                                    for (0..original_argument_types.length) |i| {
+                                        _ = argument_abis.append(.{
+                                            .indices = .{@intCast(i), @intCast(i + 1) },
+                                            .kind = .direct,
+                                        });
+                                    }
+
+                                    break :blk argument_abis.const_slice();
+                                },
+                                .calling_convention = calling_convention,
+                            };
+                        },
+                        } else {
+                            unreachable;
+                    };
 
                     const function_type = thread.function_types.append(.{
                         .type = .{
@@ -6096,69 +8432,263 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             },
                             .size = 0,
                             .alignment = 0,
+                            .bit_size = 0,
                         },
-                        .argument_types = argument_types.const_slice(),
-                        .return_type = return_type,
+                        .abi = function_abi,
                     });
 
-                    function.declaration.global_symbol.type = &function_type.type;
+                    function_declaration_data.global_symbol.type = &function_type.type;
+                    function_declaration_data.global_symbol.pointer_type = get_typed_pointer(thread, .{
+                        .pointee = function_declaration_data.global_symbol.type,
+                    });
 
                     parser.skip_space(src);
 
                     switch (src[parser.i]) {
                         brace_open => {
+                            if (function_declaration_data.global_symbol.attributes.@"extern") {
+                                fail();
+                            }
+                            
+
+                            const function = thread.functions.add_one();
+                            const entry_block = create_basic_block(thread);
+                            function.* = .{
+                                .declaration = function_declaration_data,
+                                .scope = .{
+                                    .scope = .{
+                                        .id = .function,
+                                        .parent = &file.scope.scope,
+                                        .line = declaration_line + 1,
+                                        .column = declaration_column + 1,
+                                        .file = file_index,
+                                    },
+                                },
+                                .entry_block = entry_block,
+                            };
+                            file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
+                            var analyzer = Analyzer{
+                                .current_function = function,
+                                .current_basic_block = entry_block,
+                                .current_scope = &function.scope.scope,
+                            };
                             analyzer.current_scope = &analyzer.current_function.scope.scope;
 
-                            for (arguments.const_slice(), 0..) |argument, i| {
-                                if (analyzer.current_scope.declarations.get(argument.name) != null)  {
-                                    exit_with_error("A declaration already exists with such name");
-                                }
+                            switch (function_type.abi.return_type_abi.kind) {
+                                .indirect => |indirect| {
+                                    _ = indirect; // autofix
+                                    const abi_argument = thread.abi_arguments.append(.{
+                                        .instruction = new_instruction(thread, .{
+                                            .scope = analyzer.current_scope,
+                                            .line = 0,
+                                            .column = 0,
+                                            .id = .abi_argument,
+                                        }),
+                                        .index = 0,
+                                    });
 
-                                const argument_symbol = thread.argument_symbols.append(.{
-                                    .argument_declaration = .{
-                                        .declaration = .{
-                                            .id = .argument,
+                                    analyzer.append_instruction(&abi_argument.instruction);
+                                    analyzer.return_pointer = &abi_argument.instruction;
+                                },
+                                else => {},
+                            }
+
+                            if (original_arguments.length > 0) {
+                                // var runtime_parameter_count: u64 = 0;
+                                for (original_arguments.const_slice(), function_abi.argument_types_abi, 0..) |argument, argument_abi, argument_index| {
+                                    if (analyzer.current_scope.declarations.get(argument.name) != null)  {
+                                        fail_message("A declaration already exists with such name");
+                                    }
+
+                                    var argument_abi_instructions = std.BoundedArray(*Instruction, 12){};
+
+                                    const argument_abi_count = argument_abi.indices[1] - argument_abi.indices[0];
+                                    const argument_symbol = if (argument_abi.kind == .indirect) blk: {
+                                        assert(argument_abi_count == 1);
+                                        const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                            .type = argument.type,
                                             .name = argument.name,
                                             .line = argument.line,
                                             .column = argument.column,
-                                            .scope = analyzer.current_scope,
-                                        },
-                                    },
-                                    .type = argument.type,
-                                    .alignment = argument.type.alignment,
-                                    .value = .{
-                                        .sema = .{
-                                            .id = .argument,
-                                            .resolved = true,
-                                            .thread = thread.get_index(),
-                                        },
-                                    },
-                                    .index = @intCast(i),
-                                    .instruction = new_instruction(thread, .{
-                                        .scope = analyzer.current_scope,
-                                        .id = .argument_storage,
-                                        .line = argument.line,
-                                        .column = argument.column,
-                                    }),
-                                });
-                                _ = analyzer.current_function.arguments.append(argument_symbol);
+                                            .index = @intCast(argument_index),
+                                            .indirect_argument = argument_abi.indices[0],
+                                        });
+                                        argument_symbol.instruction.id = .abi_indirect_argument;
+                                        break :blk argument_symbol;
+                                    } else blk: {
+                                        for (0..argument_abi_count) |abi_argument_index| {
+                                            const abi_argument = thread.abi_arguments.append(.{
+                                                .instruction = new_instruction(thread, .{
+                                                    .scope = analyzer.current_scope,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                    .id = .abi_argument,
+                                                }),
+                                                .index = @intCast(abi_argument_index + argument_abi.indices[0]),
+                                            });
+                                            analyzer.append_instruction(&abi_argument.instruction);
+                                            argument_abi_instructions.appendAssumeCapacity(&abi_argument.instruction);
+                                        }
+                                        const LowerKind = union(enum) {
+                                            direct,
+                                            direct_pair: [2]*Type,
+                                            direct_coerce: *Type,
+                                            indirect,
+                                        };
+                                        const lower_kind: LowerKind = switch (argument_abi.kind) {
+                                            .direct => .direct,
+                                            .direct_coerce => |coerced_type| if (argument.type == coerced_type) .direct else .{ .direct_coerce = coerced_type },
+                                            .direct_pair => |pair| .{ .direct_pair = pair },
+                                            .indirect => .indirect,
+                                            else => |t| @panic(@tagName(t)),
+                                        };
 
-                                analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
+                                        const argument_symbol = switch (lower_kind) {
+                                            .indirect => unreachable,
+                                            .direct => block: {
+                                                assert(argument_abi_count == 1);
+                                                const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                    .type = argument.type,
+                                                    .name = argument.name,
+                                                    .line = argument.line,
+                                                    .column = argument.column,
+                                                    .index = @intCast(argument_index),
+                                                });
+                                                _ = emit_store(&analyzer, thread, .{
+                                                    .destination = &argument_symbol.instruction.value,
+                                                    .source = &argument_abi_instructions.slice()[0].value,
+                                                    .alignment = argument.type.alignment,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                    .scope = analyzer.current_scope,
+                                                });
+                                                break :block argument_symbol;
+                                            },
+                                            .direct_coerce => |coerced_type| block: {
+                                                assert(coerced_type != argument.type);
+                                                assert(argument_abi_count == 1);
+                                                const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                    .type = argument.type,
+                                                    .name = argument.name,
+                                                    .line = argument.line,
+                                                    .column = argument.column,
+                                                    .index = @intCast(argument_index),
+                                                });
 
-                                emit_store(&analyzer, thread, .{
-                                    .destination = &argument_symbol.instruction.value,
-                                    .source = &argument_symbol.value,
-                                    .alignment = argument.type.alignment,
-                                    .line = 0,
-                                    .column = 0,
-                                    .scope = analyzer.current_scope,
-                                });
+                                                switch (argument.type.sema.id) {
+                                                    .@"struct" => {
+                                                        // TODO:
+                                                        const is_vector = false;
 
-                                emit_debug_argument(&analyzer, thread, .{
-                                    .argument_symbol = argument_symbol,
-                                });
+                                                        if (coerced_type.size <= argument.type.size and !is_vector) {
+                                                            _ = emit_store(&analyzer, thread, .{
+                                                                .destination = &argument_symbol.instruction.value,
+                                                                .source = &argument_abi_instructions.slice()[0].value,
+                                                                .alignment = coerced_type.alignment,
+                                                                .line = 0,
+                                                                .column = 0,
+                                                                .scope = analyzer.current_scope,
+                                                            });
+                                                        }  else {
+                                                            const temporal = emit_local_symbol(&analyzer, thread, .{
+                                                                .name = 0,
+                                                                .initial_value = &argument_abi_instructions.slice()[0].value,
+                                                                .type = coerced_type,
+                                                                .line = 0,
+                                                                .column = 0,
+                                                            });
+                                                            emit_memcpy(&analyzer, thread, .{
+                                                                .destination = &argument_symbol.instruction.value,
+                                                                .source = &temporal.instruction.value,
+                                                                .destination_alignment = .{
+                                                                    .type = argument_symbol.type,
+                                                                },
+                                                                .source_alignment = .{
+                                                                    .type = temporal.type,
+                                                                },
+                                                                .size = argument.type.size,
+                                                                .line = 0,
+                                                                .column = 0,
+                                                                .scope = analyzer.current_scope,
+                                                            });
+                                                        }
+
+                                                        break :block argument_symbol;
+                                                    },
+                                                    else => |t| @panic(@tagName(t)),
+                                                }
+                                                unreachable;
+                                            },
+                                            .direct_pair => |pair| b: {
+                                                assert(argument_abi_count == 2);
+                                                assert(argument_abi_instructions.len == 2);
+                                                assert(pair[0].sema.id == .integer);
+                                                assert(pair[1].sema.id == .integer);
+                                                const alignments = [2]u32{ pair[0].alignment, pair[1].alignment };
+                                                const sizes = [2]u64{ pair[0].size, pair[1].size };
+                                                const alignment = @max(alignments[0], alignments[1]);
+                                                _ = alignment; // autofix
+                                                const high_aligned_size: u32 = @intCast(library.align_forward(sizes[1], alignments[1]));
+                                                _ = high_aligned_size; // autofix
+                                                const high_offset: u32 = @intCast(library.align_forward(sizes[0], alignments[1]));
+                                                assert(high_offset + sizes[1] <= argument.type.size);
+                                                const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                    .type = argument.type,
+                                                    .name = argument.name,
+                                                    .line = argument.line,
+                                                    .column = argument.column,
+                                                    .index = @intCast(argument_index),
+                                                });
+
+                                                _ = emit_store(&analyzer, thread, .{
+                                                    .destination = &argument_symbol.instruction.value,
+                                                    .source = &argument_abi_instructions.slice()[0].value,
+                                                    .alignment = pair[0].alignment,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                    .scope = analyzer.current_scope,
+                                                });
+
+                                                const gep = emit_gep(thread, &analyzer, .{
+                                                    .pointer = &argument_symbol.instruction.value,
+                                                    .type = pair[1],
+                                                    .aggregate_type = pair[0],
+                                                    .index = &create_constant_int(thread, .{
+                                                        .n = 1,
+                                                        .type = &thread.integers[31].type,
+                                                    }).value,
+                                                    .is_struct = false,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                    .scope = analyzer.current_scope,
+                                                });
+
+                                                _ = emit_store(&analyzer, thread, .{
+                                                    .destination = &gep.instruction.value,
+                                                    .source = &argument_abi_instructions.slice()[1].value,
+                                                    .alignment = pair[1].alignment,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                    .scope = analyzer.current_scope,
+                                                });
+                                                break :b argument_symbol;
+                                            },
+                                        };
+
+                                        break :blk argument_symbol;
+                                    };
+
+                                    if (argument.name != 0) {
+                                        analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
+                                        if (thread.generate_debug_information) {
+                                            emit_debug_argument(&analyzer, thread, .{
+                                                .argument_symbol = argument_symbol,
+                                            });
+                                        }
+                                    }
+                                }
                             }
-
+                            
                             const result = analyze_local_block(thread, &analyzer, &parser, file);
                             _ = result;
 
@@ -6166,7 +8696,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             if (analyzer.return_phi) |return_phi| {
                                 analyzer.current_basic_block = analyzer.return_block.?;
                                 analyzer.append_instruction(&return_phi.instruction);
-                                build_return(thread, &analyzer, .{
+                                emit_return(thread, &analyzer, .{
                                     .return_value = &return_phi.instruction.value,
                                     .line = parser.get_debug_line(),
                                     .column = parser.get_debug_column(),
@@ -6176,16 +8706,37 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             }
                             
                             if (!current_basic_block.is_terminated and (current_basic_block.instructions.length > 0 or current_basic_block.predecessors.length > 0)) {
-                                unreachable;
+                                if (analyzer.return_block == null) {
+                                    switch (original_return_type.sema.id) {
+                                        .void => {
+                                            emit_ret_void(thread, &analyzer, .{
+                                                .line = parser.get_debug_line(),
+                                                .column = parser.get_debug_column(),
+                                                .scope = analyzer.current_scope,
+                                            });
+                                        },
+                                        else => |t| @panic(@tagName(t)),
+                                    }
+                                } else {
+                                    unreachable;
+                                }
                             }
                         },
                         ';' => {
-                            unreachable;
+                            parser.i += 1;
+
+                            if (!function_declaration_data.global_symbol.attributes.@"extern") {
+                                fail();
+                            }
+                            function_declaration_data.global_symbol.id = .function_declaration;
+
+                            const function_declaration = thread.external_functions.append(function_declaration_data);
+                            file.scope.scope.declarations.put_no_clobber(function_declaration.global_symbol.global_declaration.declaration.name, &function_declaration.global_symbol.global_declaration.declaration);
                         },
-                        else => exit_with_error("Unexpected character to close function declaration"),
+                        else => fail_message("Unexpected character to close function declaration"),
                     }
                 } else {
-                    exit(1);
+                    fail();
                 }
             },
             'i' => {
@@ -6203,7 +8754,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     const filename = std.fs.path.basename(string_literal);
                     const has_right_extension = filename.len > ".nat".len and byte_equal(filename[filename.len - ".nat".len..], ".nat");
                     if (!has_right_extension) {
-                        exit(1);
+                        fail();
                     }
 
                     const filename_without_extension = filename[0..filename.len - ".nat".len];
@@ -6217,7 +8768,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     for (thread.imports.slice()) |import| {
                         const pending_file_hash = import.hash;
                         if (pending_file_hash == file_path_hash) {
-                            exit(1);
+                            fail();
                         }
                     } else {
                         const import = thread.imports.append(.{
@@ -6248,7 +8799,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         });
                     }
                 } else {
-                    exit(1);
+                    fail();
                 }
             },
             's' => {
@@ -6266,6 +8817,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             },
                             .size = 0,
                             .alignment = 1,
+                            .bit_size = 0,
                         },
                         .declaration = .{
                             .name = struct_name,
@@ -6284,7 +8836,6 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     var fields = PinnedArray(*Type.AggregateField){};
 
-
                     while (parser.parse_field(thread, file)) |field_data| {
                         struct_type.type.alignment = @max(struct_type.type.alignment, field_data.type.alignment);
                         const aligned_offset = library.align_forward(struct_type.type.size, field_data.type.alignment);
@@ -6292,7 +8843,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             .type = field_data.type,
                             .parent = &struct_type.type,
                             .name = field_data.name,
-                            .index = thread.fields.length,
+                            .index = fields.length,
                             .line = field_data.line,
                             .column = field_data.column,
                             .member_offset = aligned_offset,
@@ -6304,12 +8855,13 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     parser.i += 1;
 
                     struct_type.type.size = library.align_forward(struct_type.type.size, struct_type.type.alignment);
+                    struct_type.type.bit_size = struct_type.type.size * 8;
                     struct_type.fields = fields.const_slice();
                 } else {
-                    exit(1);
+                    fail();
                 }
             },
-            else => exit(1),
+            else => fail(),
         }
     } 
 
@@ -6345,7 +8897,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                 else => |t| @panic(@tagName(t)),
             }
         } else {
-            exit(1);
+            fail_term("Unable to find lazy expression", thread.identifiers.get(name).?);
         }
     }
 
@@ -6384,7 +8936,7 @@ fn typecheck(expected: *Type, have: *Type) TypecheckResult {
     if (expected == have) {
         return TypecheckResult.success;
     } else {
-        exit(1);
+        fail();
     }
 }
 
@@ -6464,6 +9016,42 @@ fn emit_load(analyzer: *Analyzer, thread: *Thread, args: struct {
     return load;
 }
 
+fn emit_argument_symbol(analyzer: *Analyzer, thread: *Thread, args: struct{
+    type: *Type,
+    name: u32,
+    line: u32,
+    column: u32,
+    index: u32,
+    indirect_argument: ?u32 = null,
+}) *ArgumentSymbol{
+    const argument_symbol = thread.argument_symbols.append(.{
+        .argument_declaration = .{
+            .declaration = .{
+                .id = .argument,
+                .name = args.name,
+                .line = args.line,
+                .column = args.column,
+                .scope = analyzer.current_scope,
+            },
+        },
+        .type = args.type,
+        .pointer_type = get_typed_pointer(thread, .{
+            .pointee = args.type,
+        }),
+        .alignment = args.type.alignment,
+        .index = if (args.indirect_argument) |i| i else args.index,
+        .instruction = new_instruction(thread, .{
+            .scope = analyzer.current_scope,
+            .id = if (args.indirect_argument) |_| .abi_indirect_argument else .argument_storage,
+            .line = args.line,
+            .column = args.column,
+        }),
+    });
+    _ = analyzer.current_function.arguments.append(argument_symbol);
+
+    return argument_symbol;
+}
+
 fn emit_debug_argument(analyzer: *Analyzer, thread: *Thread, args: struct {
     argument_symbol: *ArgumentSymbol,
 }) void {
@@ -6475,6 +9063,63 @@ fn emit_debug_argument(analyzer: *Analyzer, thread: *Thread, args: struct {
         .instruction = i,
     });
     analyzer.append_instruction(&debug_argument.instruction);
+}
+
+fn emit_local_symbol(analyzer: *Analyzer, thread: *Thread, args: struct{
+    name: u32,
+    initial_value: ?*Value,
+    type: *Type,
+    line: u32,
+    column: u32,
+    alignment: ?u32 = null,
+}) *LocalSymbol {
+    const local_symbol = thread.local_symbols.append(.{
+        .local_declaration = .{
+            .declaration = .{
+                .id = .local,
+                .name = args.name,
+                .line = args.line,
+                .column = args.column,
+                .scope = analyzer.current_scope,
+            },
+        },
+        .type = args.type,
+        .pointer_type = get_typed_pointer(thread, .{
+            .pointee = args.type,
+        }),
+        .instruction = new_instruction(thread, .{
+            .resolved = args.type.sema.resolved and if (args.initial_value) |iv| iv.sema.resolved else true,
+            .id = .local_symbol,
+            .line = args.line,
+            .column = args.column,
+            .scope = analyzer.current_scope,
+        }),
+        .alignment = if (args.alignment) |a| a else args.type.alignment,
+    });
+
+    _ = analyzer.current_function.stack_slots.append(local_symbol);
+
+    if (args.name != 0) {
+        analyzer.current_scope.declarations.put_no_clobber(args.name, &local_symbol.local_declaration.declaration);
+        if (thread.generate_debug_information) {
+            emit_debug_local(analyzer, thread, .{
+                .local_symbol = local_symbol,
+            });
+        }
+    }
+
+    if (args.initial_value) |initial_value| {
+        emit_store(analyzer, thread, .{
+            .destination = &local_symbol.instruction.value,
+            .source = initial_value,
+            .alignment = local_symbol.alignment,
+            .line = args.line,
+            .column = args.column,
+            .scope = analyzer.current_scope,
+        });
+    }
+
+    return local_symbol;
 }
 
 fn emit_debug_local(analyzer: *Analyzer, thread: *Thread, args: struct {
@@ -6515,22 +9160,83 @@ fn emit_store(analyzer: *Analyzer, thread: *Thread, args: struct {
     analyzer.append_instruction(&store.instruction);
 }
 
-fn emit_unreachable(analyzer: *Analyzer, thread: *Thread, args: struct {
+const Memcpy = struct{
+    instruction: Instruction,
+    destination: *Value,
+    destination_alignment: u32,
+    source: *Value,
+    source_alignment: u32,
+    size: u64,
+    is_volatile: bool,
+    const Alignment = union(enum){
+        alignment: u32,
+        type: *Type,
+    };
+};
+
+fn emit_memcpy(analyzer: *Analyzer, thread: *Thread, args: struct{ 
+    destination: *Value,
+    destination_alignment: Memcpy.Alignment,
+    source: *Value,
+    source_alignment: Memcpy.Alignment,
+    size: u64,
+    is_volatile: bool = false,
     line: u32,
     column: u32,
     scope: *Scope,
 }) void {
-    assert(!analyzer.current_basic_block.is_terminated);
-    const ur = thread.unreachables.append(.{
+    const memcpy = thread.memcopies.append(.{
         .instruction = new_instruction(thread, .{
             .scope = args.scope,
             .line = args.line,
             .column = args.column,
-            .id = .@"unreachable",
+            .id = .memcpy,
         }),
+        .destination = args.destination,
+        .destination_alignment = switch (args.destination_alignment) {
+            .alignment => |a| a,
+            .type => |t| t.alignment,
+        },
+        .source = args.source,
+        .source_alignment = switch (args.source_alignment) {
+            .alignment => |a| a,
+            .type => |t| t.alignment,
+        },
+        .size = args.size,
+        .is_volatile = args.is_volatile,
     });
-    analyzer.append_instruction(&ur.instruction);
+    analyzer.append_instruction(&memcpy.instruction);
+}
+
+const RawEmitArgs = struct{
+    line: u32,
+    column: u32,
+    scope: *Scope,
+};
+
+fn emit_unreachable(analyzer: *Analyzer, thread: *Thread, args: RawEmitArgs) void {
+    assert(!analyzer.current_basic_block.is_terminated);
+    const ur = thread.standalone_instructions.append(new_instruction(thread, .{
+            .scope = args.scope,
+            .line = args.line,
+            .column = args.column,
+            .id = .@"unreachable",
+        }));
+    analyzer.append_instruction(ur);
     analyzer.current_basic_block.is_terminated = true;
+}
+
+fn emit_trap(analyzer: *Analyzer, thread: *Thread, args: RawEmitArgs) void {
+    assert(!analyzer.current_basic_block.is_terminated);
+    const trap = thread.standalone_instructions.append(new_instruction(thread, .{
+        .scope = args.scope,
+        .line = args.line,
+        .column = args.column,
+        .id = .@"trap",
+    }));
+    analyzer.append_instruction(trap);
+
+    emit_unreachable(analyzer, thread, args);
 }
 
 fn new_instruction(thread: *Thread, args: struct {
@@ -6634,8 +9340,7 @@ fn emit_condition(analyzer: *Analyzer, thread: *Thread, args: struct {
     const condition_type = args.condition.get_type();
     const compare = switch (condition_type.sema.id) {
         .integer => int: {
-            const integer_ty = condition_type.get_payload(.integer);
-            if (integer_ty.bit_count == 1) {
+            if (condition_type.bit_size == 1) {
                 break :int args.condition;
             } else {
                 const zero = create_constant_int(thread, .{
@@ -6665,6 +9370,74 @@ fn emit_condition(analyzer: *Analyzer, thread: *Thread, args: struct {
     return compare;
 }
 
+fn get_typed_pointer(thread: *Thread, descriptor: Type.TypedPointer.Descriptor) *Type {
+    assert(descriptor.pointee.sema.resolved);
+    if (thread.typed_pointer_type_map.get(descriptor)) |result| return result else {
+        const typed_pointer_type = thread.typed_pointer_types.append(.{
+            .type = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .id = .typed_pointer,
+                    .resolved = true,
+                },
+                .size = 8,
+                .alignment = 8,
+                .bit_size = 64,
+            },
+            .descriptor = descriptor,
+        });
+
+        thread.typed_pointer_type_map.put_no_clobber(descriptor, &typed_pointer_type.type);
+        return &typed_pointer_type.type;
+    }
+}
+
+fn get_anonymous_two_field_struct(thread: *Thread, types: [2]*Type) *Type {
+    if (thread.two_struct_map.get(types)) |result| return result else {
+        const anonymous_struct = thread.anonymous_structs.add_one();
+        const first_field = thread.fields.append(.{
+            .type = types[0],
+            .parent = &anonymous_struct.type,
+            .member_offset = 0,
+            .name = 0,
+            .index = 0,
+            .line = 0,
+            .column = 0,
+        });
+        const second_field = thread.fields.append(.{
+            .type = types[1],
+            .parent = &anonymous_struct.type,
+            .member_offset = types[0].alignment,
+            .name = 0,
+            .index = 1,
+            .line = 0,
+            .column = 0,
+        });
+        const fields = thread.arena.new_array(*Type.AggregateField, 2) catch unreachable;
+        fields[0] = first_field;
+        fields[1] = second_field;
+        const alignment = @max(types[0].alignment, types[1].alignment);
+        const size = library.align_forward(types[0].size + types[1].size, alignment);
+        anonymous_struct.* = .{
+            .type = .{
+                .sema = .{
+                    .id = .anonymous_struct,
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                },
+                .size = size,
+                .alignment = alignment,
+                .bit_size = @intCast(size * 8),
+            },
+            .fields = fields,
+        };
+
+        thread.two_struct_map.put_no_clobber(types, &anonymous_struct.type);
+
+        return &anonymous_struct.type;
+    }
+}
+
 fn get_array_type(thread: *Thread, descriptor: Type.Array.Descriptor) *Type {
     assert(descriptor.element_type.sema.resolved);
     if (thread.array_type_map.get(descriptor)) |result| return result else {
@@ -6677,6 +9450,7 @@ fn get_array_type(thread: *Thread, descriptor: Type.Array.Descriptor) *Type {
                 },
                 .size = descriptor.element_type.size * descriptor.element_count,
                 .alignment = descriptor.element_type.alignment,
+                .bit_size = 0,
             },
             .descriptor = descriptor,
         });
@@ -6711,6 +9485,8 @@ pub const LLVM = struct {
         nounwind: *Attribute,
         inreg: *Attribute,
         @"noalias": *Attribute,
+        sign_extend: *Attribute,
+        zero_extend: *Attribute,
     };
 
     pub const Linkage = enum(c_uint) {
@@ -7248,83 +10024,88 @@ pub const LLVM = struct {
             Builtin = 4,
             Cold = 5,
             Convergent = 6,
-            DisableSanitizerInstrumentation = 7,
-            FnRetThunkExtern = 8,
-            Hot = 9,
-            ImmArg = 10,
-            InReg = 11,
-            InlineHint = 12,
-            JumpTable = 13,
-            MinSize = 14,
-            MustProgress = 15,
-            Naked = 16,
-            Nest = 17,
-            NoAlias = 18,
-            NoBuiltin = 19,
-            NoCallback = 20,
-            NoCapture = 21,
-            NoCfCheck = 22,
-            NoDuplicate = 23,
-            NoFree = 24,
-            NoImplicitFloat = 25,
-            NoInline = 26,
-            NoMerge = 27,
-            NoProfile = 28,
-            NoRecurse = 29,
-            NoRedZone = 30,
-            NoReturn = 31,
-            NoSanitizeBounds = 32,
-            NoSanitizeCoverage = 33,
-            NoSync = 34,
-            NoUndef = 35,
-            NoUnwind = 36,
-            NonLazyBind = 37,
-            NonNull = 38,
-            NullPointerIsValid = 39,
-            OptForFuzzing = 40,
-            OptimizeForSize = 41,
-            OptimizeNone = 42,
-            PresplitCoroutine = 43,
-            ReadNone = 44,
-            ReadOnly = 45,
-            Returned = 46,
-            ReturnsTwice = 47,
-            SExt = 48,
-            SafeStack = 49,
-            SanitizeAddress = 50,
-            SanitizeHWAddress = 51,
-            SanitizeMemTag = 52,
-            SanitizeMemory = 53,
-            SanitizeThread = 54,
-            ShadowCallStack = 55,
-            SkipProfile = 56,
-            Speculatable = 57,
-            SpeculativeLoadHardening = 58,
-            StackProtect = 59,
-            StackProtectReq = 60,
-            StackProtectStrong = 61,
-            StrictFP = 62,
-            SwiftAsync = 63,
-            SwiftError = 64,
-            SwiftSelf = 65,
-            WillReturn = 66,
-            WriteOnly = 67,
-            ZExt = 68,
-            ByRef = 69,
-            ByVal = 70,
-            ElementType = 71,
-            InAlloca = 72,
-            Preallocated = 73,
-            StructRet = 74,
-            Alignment = 75,
-            AllocKind = 76,
-            AllocSize = 77,
-            Dereferenceable = 78,
-            DereferenceableOrNull = 79,
-            Memory = 80,
-            StackAlignment = 81,
-            UWTable = 82,
-            VScaleRange = 83,
+            CoroDestroyOnlyWhenComplete = 7,
+            DeadOnUnwind = 8,
+            DisableSanitizerInstrumentation = 9,
+            FnRetThunkExtern = 10,
+            Hot = 11,
+            ImmArg = 12,
+            InReg = 13,
+            InlineHint = 14,
+            JumpTable = 15,
+            MinSize = 16,
+            MustProgress = 17,
+            Naked = 18,
+            Nest = 19,
+            NoAlias = 20,
+            NoBuiltin = 21,
+            NoCallback = 22,
+            NoCapture = 23,
+            NoCfCheck = 24,
+            NoDuplicate = 25,
+            NoFree = 26,
+            NoImplicitFloat = 27,
+            NoInline = 28,
+            NoMerge = 29,
+            NoProfile = 30,
+            NoRecurse = 31,
+            NoRedZone = 32,
+            NoReturn = 33,
+            NoSanitizeBounds = 34,
+            NoSanitizeCoverage = 35,
+            NoSync = 36,
+            NoUndef = 37,
+            NoUnwind = 38,
+            NonLazyBind = 39,
+            NonNull = 40,
+            NullPointerIsValid = 41,
+            OptForFuzzing = 42,
+            OptimizeForDebugging = 43,
+            OptimizeForSize = 44,
+            OptimizeNone = 45,
+            PresplitCoroutine = 46,
+            ReadNone = 47,
+            ReadOnly = 48,
+            Returned = 49,
+            ReturnsTwice = 50,
+            SExt = 51,
+            SafeStack = 52,
+            SanitizeAddress = 53,
+            SanitizeHWAddress = 54,
+            SanitizeMemTag = 55,
+            SanitizeMemory = 56,
+            SanitizeThread = 57,
+            ShadowCallStack = 58,
+            SkipProfile = 59,
+            Speculatable = 60,
+            SpeculativeLoadHardening = 61,
+            StackProtect = 62,
+            StackProtectReq = 63,
+            StackProtectStrong = 64,
+            StrictFP = 65,
+            SwiftAsync = 66,
+            SwiftError = 67,
+            SwiftSelf = 68,
+            WillReturn = 69,
+            Writable = 70,
+            WriteOnly = 71,
+            ZExt = 72,
+            ByRef = 73,
+            ByVal = 74,
+            ElementType = 75,
+            InAlloca = 76,
+            Preallocated = 77,
+            StructRet = 78,
+            Alignment = 79,
+            AllocKind = 80,
+            AllocSize = 81,
+            Dereferenceable = 82,
+            DereferenceableOrNull = 83,
+            Memory = 84,
+            NoFPClass = 85,
+            StackAlignment = 86,
+            UWTable = 87,
+            VScaleRange = 88,
         };
     };
 
@@ -7889,9 +10670,7 @@ pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, return_
             compiler.write("\nPANIC: ");
             compiler.write(message);
             compiler.write("\n");
-            exit(1);
+            fail();
         },
     }
 }
-
-

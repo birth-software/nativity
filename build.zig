@@ -30,17 +30,12 @@ pub fn build(b: *std.Build) !void {
     const use_editor = b.option(bool, "editor", "Use the GUI editor to play around the programming language") orelse (!is_ci and enable_editor);
     const use_debug = b.option(bool, "use_debug", "This option enables the LLVM debug build in the development PC") orelse false;
     const sanitize = b.option(bool, "sanitize", "This option enables sanitizers for the compiler") orelse false;
-    const sleep_on_thread_hot_loops = b.option(bool, "sleep_on_thread_hot_loops", "This option enables sleep calls on hot threaded loops") orelse false;
+    const sleep_on_thread_hot_loops = b.option(bool, "sleep", "This option enables sleep calls on hot threaded loops") orelse false;
     const static = b.option(bool, "static", "This option enables the compiler to be built statically") orelse switch (@import("builtin").os.tag) {
         else => use_debug,
         .windows => true,
         // .macos => true,
     };
-    const compiler_options = b.addOptions();
-    compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
-    compiler_options.addOption(bool, "ci", is_ci);
-    compiler_options.addOption(bool, "editor", use_editor);
-    compiler_options.addOption(bool, "sleep_on_thread_hot_loops", sleep_on_thread_hot_loops);
 
     const fetcher = b.addExecutable(.{
         .name = "llvm_fetcher",
@@ -118,7 +113,6 @@ pub fn build(b: *std.Build) !void {
         },
     });
 
-    compiler.root_module.addOptions("configuration", compiler_options);
     compiler.formatted_panics = print_stack_trace;
     compiler.root_module.unwind_tables = print_stack_trace or target.result.os.tag == .windows;
     compiler.root_module.omit_frame_pointer = false;
@@ -371,6 +365,8 @@ pub fn build(b: *std.Build) !void {
         "libclangTransformer.a",
     };
 
+    var include_paths = std.ArrayList([]const u8).init(b.allocator);
+
     if (static or target.result.os.tag == .windows) {
         if (target.result.os.tag == .linux) compiler.linkage = .static;
         compiler.linkLibCpp();
@@ -440,15 +436,18 @@ pub fn build(b: *std.Build) !void {
         compiler.linkSystemLibrary(if (is_ci or builtin.os.tag == .macos) "z" else "zlib");
         compiler.linkSystemLibrary("zstd");
 
+        var llvm_prefix: []const u8 = "";
         switch (target.result.os.tag) {
             .linux => {
                 if (third_party_ci) {
                     compiler.addObjectFile(.{ .cwd_relative = "/lib/x86_64-linux-gnu/libstdc++.so.6" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/c++/11" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu/c++/11" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/lib/llvm-18/include" });
+                    try include_paths.append("/usr/include");
+                    try include_paths.append("/usr/include" );
+                    try include_paths.append("/usr/include/x86_64-linux-gnu" );
+                    try include_paths.append("/usr/include/c++/11" );
+                    try include_paths.append("/usr/include/x86_64-linux-gnu/c++/11" );
+                    try include_paths.append("/usr/lib/llvm-18/include" );
+                    llvm_prefix = "/usr/lib/llvm-18";
                     compiler.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib/llvm-18/lib" });
                 } else {
@@ -491,10 +490,11 @@ pub fn build(b: *std.Build) !void {
                     }
                     });
                     compiler.addObjectFile(.{ .cwd_relative = "/usr/lib64/libstdc++.so.6" });
-                    compiler.addIncludePath(.{ .cwd_relative = if (use_debug) "../../local/llvm18-debug/include" else "../../local/llvm18-release/include" });
-                    compiler.addIncludePath(.{ .cwd_relative = "/usr/include" });
-                    compiler.addIncludePath(.{ .cwd_relative = cxx_include_base });
-                    compiler.addIncludePath(.{ .cwd_relative = cxx_include_arch });
+                    llvm_prefix = if (use_debug) "../../local/llvm18-debug/" else "../../local/llvm18-release";
+                    try include_paths.append(try std.mem.concat(b.allocator, u8, &.{llvm_prefix, "/include"}));
+                    try include_paths.append("/usr/include");
+                    try include_paths.append(cxx_include_base);
+                    try include_paths.append(cxx_include_arch);
                     compiler.addLibraryPath(.{ .cwd_relative = if (use_debug) "../../local/llvm18-debug/lib" else "../../local/llvm18-release/lib" });
                     compiler.addLibraryPath(.{ .cwd_relative = "/usr/lib64" });
                 }
@@ -502,10 +502,11 @@ pub fn build(b: *std.Build) !void {
             .macos => {
                 compiler.linkLibCpp();
 
-                if (discover_brew_prefix(b, "llvm@18")) |llvm_prefix| {
+                if (discover_brew_prefix(b, "llvm@18")) |prefix| {
+                    llvm_prefix = prefix;
                     const llvm_include_path = try std.mem.concat(b.allocator, u8, &.{ llvm_prefix, "/include" });
                     const llvm_lib_path = try std.mem.concat(b.allocator, u8, &.{ llvm_prefix, "/lib" });
-                    compiler.addIncludePath(.{ .cwd_relative = llvm_include_path });
+                    try include_paths.append(llvm_include_path);
                     compiler.addLibraryPath(.{ .cwd_relative = llvm_lib_path });
                 } else |err| {
                     return err;
@@ -529,6 +530,12 @@ pub fn build(b: *std.Build) !void {
             else => |tag| @panic(@tagName(tag)),
         }
 
+        for (include_paths.items) |include_path| {
+            compiler.addIncludePath(.{ .cwd_relative = include_path });
+        }
+
+        try include_paths.append(try std.mem.concat(b.allocator, u8, &.{llvm_prefix, "/lib/clang/18/include"}));
+
         if (use_editor) {
             compiler.linkSystemLibrary("glfw");
             compiler.linkSystemLibrary("GL");
@@ -551,6 +558,14 @@ pub fn build(b: *std.Build) !void {
             compiler.addIncludePath(b.path("dependencies/imgui"));
         }
     }
+
+    const compiler_options = b.addOptions();
+    compiler_options.addOption(bool, "print_stack_trace", print_stack_trace);
+    compiler_options.addOption(bool, "ci", is_ci);
+    compiler_options.addOption(bool, "editor", use_editor);
+    compiler_options.addOption(bool, "sleep_on_thread_hot_loops", sleep_on_thread_hot_loops);
+    compiler_options.addOption([]const []const u8, "include_paths", include_paths.items);
+    compiler.root_module.addOptions("configuration", compiler_options);
 
     if (target.result.os.tag == .windows) {
         compiler.linkSystemLibrary("ole32");

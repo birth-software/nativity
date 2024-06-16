@@ -1,4 +1,481 @@
+struct Struct_u64_u64 {
+    a: u64,
+    b: u64,
+}
+
+struct BigStruct {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u8,
+}
+
+bitfield(u8) SmallPackedStruct {
+    a: u2,
+    b: u2,
+    c: u2,
+    d: u2,
+}
+
+struct SmallStructInts{
+    a: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+}
+
+struct SplitStructInt {
+    a: u64,
+    b: u8,
+    c: u32,
+}
+
+struct MedStructInts {
+    x: s32,
+    y: s32,
+    z: s32,
+}
+
+struct Rect {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32,
+}
+
+struct StructWithArray {
+    a: s32,
+    padding: [4]u8,
+    b: s64,
+}
+
+struct ByRef {
+    val: s32,
+    arr: [15]s32,
+}
+
+struct ByValOrigin {
+    x: u64,
+    y: u64,
+    z: u64,
+}
+
+struct ByValSize{
+    width: u64,
+    height: u64,
+    depth: u64,
+}
+
+struct ByVal {
+    origin: ByValOrigin,
+    size: ByValSize,
+}
+
+fn[cc(.c)] run_c_tests[extern]() void;
+
+fn[cc(.c)] c_u8[extern](x: u8) void;
+fn[cc(.c)] c_u16[extern](x: u16) void;
+fn[cc(.c)] c_u32[extern](x: u32) void;
+fn[cc(.c)] c_u64[extern](x: u64) void;
+
+fn[cc(.c)] c_s8[extern](x: s8) void;
+fn[cc(.c)] c_s16[extern](x: s16) void;
+fn[cc(.c)] c_s32[extern](x: s32) void;
+fn[cc(.c)] c_s64[extern](x: s64) void;
+
+fn[cc(.c)] c_bool[extern](x: u8) void;
+
+fn[cc(.c)] c_five_integers[extern](a: s32, b: s32, c: s32, d: s32, e: s32) void;
+fn[cc(.c)] c_ret_struct_u64_u64[extern]() Struct_u64_u64;
+
+fn[cc(.c)] c_struct_u64_u64_0 [extern] (a: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_1 [extern] (a: u64, b: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_2 [extern] (a: u64, b: u64, c: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_3 [extern] (a: u64, b: u64, c: u64, d: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_4 [extern] (a: u64, b: u64, c: u64, d: u64, e: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_5 [extern] (a: u64, b: u64, c: u64, d: u64, e: u64, f: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_6 [extern] (a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_7 [extern] (a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: Struct_u64_u64) void;
+fn[cc(.c)] c_struct_u64_u64_8 [extern] (a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: Struct_u64_u64) void;
+
+fn [cc(.c)] c_big_struct[extern](x: BigStruct) void;
+fn [cc(.c)] c_small_struct_ints[extern](x: SmallStructInts) void;
+fn [cc(.c)] c_ret_small_struct_ints[extern]() SmallStructInts;
+fn [cc(.c)] c_med_struct_ints[extern](x: MedStructInts) void;
+fn [cc(.c)] c_ret_med_struct_ints[extern]() MedStructInts;
+fn [cc(.c)] c_small_packed_struct[extern](x: SmallPackedStruct) void;
+fn [cc(.c)] c_ret_small_packed_struct[extern]() SmallPackedStruct;
+fn [cc(.c)] c_split_struct_ints[extern](x: SplitStructInt) void;
+fn [cc(.c)] c_big_struct_both[extern](x: BigStruct) BigStruct;
+fn [cc(.c)] c_multiple_struct_ints[extern](a: Rect, b: Rect) void;
+
+fn [cc(.c)] c_ret_bool[extern]() u8;
+
+fn [cc(.c)] c_ret_u8[extern]() u8;
+fn [cc(.c)] c_ret_u16[extern]() u16;
+fn [cc(.c)] c_ret_u32[extern]() u32;
+fn [cc(.c)] c_ret_u64[extern]() u64;
+
+fn [cc(.c)] c_ret_s8[extern]() s8;
+fn [cc(.c)] c_ret_s16[extern]() s16;
+fn [cc(.c)] c_ret_s32[extern]() s32;
+fn [cc(.c)] c_ret_s64[extern]() s64;
+
+fn [cc(.c)] c_struct_with_array[extern](x: StructWithArray) void;
+fn [cc(.c)] c_ret_struct_with_array[extern]() StructWithArray;
+
+fn [cc(.c)] c_modify_by_ref_param[extern](x: ByRef) ByRef;
+fn [cc(.c)] c_func_ptr_byval[extern] (a: u64, b: u64, c: ByVal, d: u64, e: u64, f: u64) void;
+
 fn[cc(.c)] main[export]() s32
 {
+    run_c_tests();
+    c_u8(0xff);
+    c_u16(0xfffe);
+    c_u32(0xfffffffd);
+    c_u64(0xfffffffffffffffc);
+
+    //if (has_i128) {
+    //    c_struct_u128({ .value = 0xfffffffffffffffc, });
+    //}
+
+    c_s8(-1);
+    c_s16(-2);
+    c_s32(-3);
+    c_s64(-4);
+
+    //if (has_i128) {
+    //    c_struct_i128({ .value = -6, });
+    //}
+
+    c_bool(1);
+
+    c_five_integers(12, 34, 56, 78, 90);
+
+    >s = c_ret_struct_u64_u64();
+    #require(s.a == 21);
+    #require(s.b == 22);
+    c_struct_u64_u64_0({ .a = 23, .b = 24, });
+    c_struct_u64_u64_1(0, { .a = 25, .b = 26, });
+    c_struct_u64_u64_2(0, 1, { .a = 27, .b = 28, });
+    c_struct_u64_u64_3(0, 1, 2, { .a = 29, .b = 30, });
+    c_struct_u64_u64_4(0, 1, 2, 3, { .a = 31, .b = 32, });
+    c_struct_u64_u64_5(0, 1, 2, 3, 4, { .a = 33, .b = 34, });
+    c_struct_u64_u64_6(0, 1, 2, 3, 4, 5, { .a = 35, .b = 36, });
+    c_struct_u64_u64_7(0, 1, 2, 3, 4, 5, 6, { .a = 37, .b = 38, });
+    c_struct_u64_u64_8(0, 1, 2, 3, 4, 5, 6, 7, { .a = 39, .b = 40, });
+
+    >big_struct: BigStruct = {
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+        .e = 5,
+    };
+    c_big_struct(big_struct);
+
+    >small: SmallStructInts = {
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+    };
+    c_small_struct_ints(small);
+    >small2 = c_ret_small_struct_ints();
+    #require(small2.a == 1);
+    #require(small2.b == 2);
+    #require(small2.c == 3);
+    #require(small2.d == 4);
+
+    >med: MedStructInts = {
+        .x = 1,
+        .y = 2,
+        .z = 3,
+    };
+    c_med_struct_ints(med);
+    >med2 = c_ret_med_struct_ints();
+    #require(med2.x == 1);
+    #require(med2.y == 2);
+    #require(med2.z == 3);
+
+    >p: SmallPackedStruct = { .a = 0, .b = 1, .c = 2, .d = 3, };
+    c_small_packed_struct(p);
+    >p2 = c_ret_small_packed_struct();
+    #require(p2.a == 0);
+    #require(p2.b == 1);
+    #require(p2.c == 2);
+    #require(p2.d == 3);
+
+    >split: SplitStructInt = {
+        .a = 1234,
+        .b = 100,
+        .c = 1337,
+    };
+    c_split_struct_ints(split);
+
+    > big: BigStruct = {
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+        .e = 5,
+    };
+    >big2 = c_big_struct_both(big);
+    #require(big2.a == 10);
+    #require(big2.b == 11);
+    #require(big2.c == 12);
+    #require(big2.d == 13);
+    #require(big2.e == 14);
+
+    >r1: Rect = {
+        .left = 1,
+        .right = 21,
+        .top = 16,
+        .bottom = 4,
+    };
+    >r2: Rect = {
+        .left = 178,
+        .right = 189,
+        .top = 21,
+        .bottom = 15,
+    };
+    c_multiple_struct_ints(r1, r2);
+
+    #require(c_ret_bool() == 1);
+
+    #require(c_ret_u8() == 0xff);
+    #require(c_ret_u16() == 0xffff);
+    #require(c_ret_u32() == 0xffffffff);
+    #require(c_ret_u64() == 0xffffffffffffffff);
+
+    #require(c_ret_s8() == -1);
+    #require(c_ret_s16() == -1);
+    #require(c_ret_s32() == -1);
+    #require(c_ret_s64() == -1);
+
+    c_struct_with_array({ .a = 1, .padding = undefined, .b = 2, });
+
+    >x = c_ret_struct_with_array();
+    #require(x.a == 4);
+    #require(x.b == 155);
+
+    >res = c_modify_by_ref_param({ .val = 1, .arr = undefined, });
+    #require(res.val == 42);
+
+    >function_pointer = c_func_ptr_byval&;
+    function_pointer(1, 2, { .origin = { .x = 9, .y = 10, .z = 11, }, .size = { .width = 12, .height = 13, .depth = 14, }, }, 3, 4, 5);
     return 0;
 }
+
+fn[cc(.c)] nat_u8[export] (x: u8) void {
+    #require(x == 0xff);
+}
+
+fn[cc(.c)] nat_u16 [export] (x: u16) void {
+    #require(x == 0xfffe);
+}
+
+fn[cc(.c)] nat_u32 [export] (x: u32) void {
+    #require(x == 0xfffffffd);
+}
+
+fn[cc(.c)] nat_u64 [export] (x: u64) void {
+    #require(x == 0xfffffffffffffffc);
+}
+
+fn[cc(.c)] nat_s8 [export] (x: s8) void {
+    #require(x == -1);
+}
+
+fn[cc(.c)] nat_s16 [export] (x: s16) void {
+    #require(x == -2);
+}
+
+fn[cc(.c)] nat_s32 [export] (x: s32) void {
+    #require(x == -3);
+}
+
+fn[cc(.c)] nat_s64 [export] (x: s64) void {
+    #require(x == -4);
+}
+
+fn[cc(.c)] nat_ptr [export] (x: *u8) void {
+    #require(#int_from_pointer(x) == 0xdeadbeef);
+}
+
+fn[cc(.c)] nat_five_integers [export] (a: s32, b: s32, c: s32, d: s32, e: s32) void {
+    #require(a == 12);
+    #require(b == 34);
+    #require(c == 56);
+    #require(d == 78);
+    #require(e == 90);
+}
+
+fn[cc(.c)] nat_bool [export] (x: u8) void {
+    #require(x);
+}
+
+fn[cc(.c)] nat_ret_struct_u64_u64 [export] () Struct_u64_u64 {
+    return { .a = 1, .b = 2, };
+}
+
+fn[cc(.c)] nat_struct_u64_u64_0 [export] (s: Struct_u64_u64) void {
+    #require(s.a == 3);
+    #require(s.b == 4);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_1 [export] (_: u64, s: Struct_u64_u64) void {
+    #require(s.a == 5);
+    #require(s.b == 6);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_2 [export] (_: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 7);
+    #require(s.b == 8);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_3 [export] (_: u64, _: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 9);
+    #require(s.b == 10);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_4 [export](_: u64, _: u64, _: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 11);
+    #require(s.b == 12);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_5 [export](_: u64, _: u64, _: u64, _: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 13);
+    #require(s.b == 14);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_6 [export](_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 15);
+    #require(s.b == 16);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_7 [export](_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 17);
+    #require(s.b == 18);
+}
+
+fn[cc(.c)] nat_struct_u64_u64_8 [export](_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64, s: Struct_u64_u64) void {
+    #require(s.a == 19);
+    #require(s.b == 20);
+}
+
+fn[cc(.c)] nat_big_struct [export] (x: BigStruct) void {
+    #require(x.a == 1);
+    #require(x.b == 2);
+    #require(x.c == 3);
+    #require(x.d == 4);
+    #require(x.e == 5);
+}
+
+fn[cc(.c)] nat_small_packed_struct [export] (x: SmallPackedStruct) void {
+    #require(x.a == 0);
+    #require(x.b == 1);
+    #require(x.c == 2);
+    #require(x.d == 3);
+}
+
+fn[cc(.c)] nat_split_struct_ints [export] (x: SplitStructInt) void {
+    #require(x.a == 1234);
+    #require(x.b == 100);
+    #require(x.c == 1337);
+}
+
+fn[cc(.c)] nat_big_struct_both [export] (x: BigStruct) BigStruct {
+    #require(x.a == 30);
+    #require(x.b == 31);
+    #require(x.c == 32);
+    #require(x.d == 33);
+    #require(x.e == 34);
+    >s: BigStruct = {
+        .a = 20,
+        .b = 21,
+        .c = 22,
+        .d = 23,
+        .e = 24,
+    };
+    return s;
+}
+
+fn[cc(.c)] nat_ret_bool[export] () u8 {
+    return 1;
+}
+
+fn[cc(.c)] nat_ret_u8[export] () u8 {
+    return 0xff;
+}
+
+fn[cc(.c)] nat_ret_u16[export] () u16 {
+    return 0xffff;
+}
+
+fn[cc(.c)] nat_ret_u32[export] () u32 {
+    return 0xffffffff;
+}
+
+fn[cc(.c)] nat_ret_u64[export] () u64 {
+    return 0xffffffffffffffff;
+}
+
+fn[cc(.c)] nat_ret_s8[export] () s8 {
+    return -1;
+}
+
+fn[cc(.c)] nat_ret_s16[export] () s16 {
+    return -1;
+}
+
+fn[cc(.c)] nat_ret_s32[export] () s32 {
+    return -1;
+}
+
+fn[cc(.c)] nat_ret_s64[export] () s64 {
+    return -1;
+}
+
+fn[cc(.c)] nat_ret_small_struct_ints[export] () SmallStructInts {
+    return {
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+    };
+}
+
+fn[cc(.c)] nat_ret_med_struct_ints[export] () MedStructInts {
+    return {
+        .x = 1,
+        .y = 2,
+        .z = 3,
+    };
+}
+
+fn[cc(.c)] nat_multiple_struct_ints [export] (x: Rect, y: Rect) void {
+    #require(x.left == 1);
+    #require(x.right == 21);
+    #require(x.top == 16);
+    #require(x.bottom == 4);
+    #require(y.left == 178);
+    #require(y.right == 189);
+    #require(y.top == 21);
+    #require(y.bottom == 15);
+}
+
+fn [cc(.c)] nat_small_struct_ints [export] (x: SmallStructInts) void {
+    #require(x.a == 1);
+    #require(x.b == 2);
+    #require(x.c == 3);
+    #require(x.d == 4);
+}
+
+fn [cc(.c)] nat_med_struct_ints [export] (s: MedStructInts) void {
+    #require(s.x == 1);
+    #require(s.y == 2);
+    #require(s.z == 3);
+}
+
