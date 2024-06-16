@@ -5714,37 +5714,38 @@ fn compile_c_source_files(thread: *Thread, arguments: []const []const u8) void {
                             "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/15.0.0/include",
                             "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include",
                         },
-                        .linux => switch (@import("builtin").abi) {
-                            .gnu => if (@import("configuration").ci) &.{
-                                "/usr/include/c++/11",
-                                "/usr/include/x86_64-linux-gnu/c++/11",
-                                "/usr/lib/clang/17/include",
-                                "/usr/include",
-                                "/usr/include/x86_64-linux-gnu",
-                            } else switch (@import("builtin").cpu.arch) {
-                                .x86_64 => &.{
-                                    "/usr/include/c++/14",
-                                    "/usr/include/c++/14/x86_64-pc-linux-gnu",
-                                    "/usr/lib/clang/17/include",
-                                    "/usr/include",
-                                    "/usr/include/linux",
-                                },
-                                .aarch64 => &.{
-                                    "/usr/include/c++/14",
-                                    "/usr/include/c++/14/aarch64-redhat-linux",
-                                    "/usr/lib/clang/18/include",
-                                    "/usr/include",
-                                    "/usr/include/linux",
-                                },
-                                else => unreachable,
-                            },
-                            else => unreachable, //@compileError("ABI not supported"),
-                        },
+                        .linux => configuration.include_paths,
+                        //     .gnu => if (@import("configuration").ci) &.{
+                        //         "/usr/include/c++/11",
+                        //         "/usr/include/x86_64-linux-gnu/c++/11",
+                        //         "/usr/lib/clang/17/include",
+                        //         "/usr/include",
+                        //         "/usr/include/x86_64-linux-gnu",
+                        //     } else switch (@import("builtin").cpu.arch) {
+                        //         .x86_64 => &.{
+                        //             "/usr/include/c++/14",
+                        //             "/usr/include/c++/14/x86_64-pc-linux-gnu",
+                        //             "/usr/lib/clang/17/include",
+                        //             "/usr/include",
+                        //             "/usr/include/linux",
+                        //         },
+                        //         .aarch64 => &.{
+                        //             "/usr/include/c++/14",
+                        //             "/usr/include/c++/14/aarch64-redhat-linux",
+                        //             "/usr/lib/clang/18/include",
+                        //             "/usr/include",
+                        //             "/usr/include/linux",
+                        //         },
+                        //         else => unreachable,
+                        //     },
+                        //     else => unreachable, //@compileError("ABI not supported"),
+                        // },
                         .windows => &.{},
                         else => @compileError("OS not supported"),
                     };
 
                     for (libc_include_dirs) |include_dir| {
+                        std.debug.print("Include path: {s}\n", .{include_dir});
                         argv.appendSliceAssumeCapacity(&.{ "-isystem", include_dir });
                     }
 
