@@ -1100,18 +1100,21 @@ extern "C" AttributeSet NativityLLVMContextGetAttributeSet(LLVMContext& context,
     return attribute_set;
 }
 
-extern "C" void NativityLLVMFunctionSetAttributes(Function& function, LLVMContext& context, AttributeSet function_attributes, AttributeSet return_attributes, const AttributeSet* parameter_attribute_set_ptr, size_t parameter_attribute_set_count)
+static AttributeList get_attribute_list(LLVMContext& context, AttributeSet function_attributes, AttributeSet return_attributes, const AttributeSet* parameter_attribute_set_ptr, size_t parameter_attribute_set_count)
 {
     auto parameter_attribute_sets = ArrayRef<AttributeSet>(parameter_attribute_set_ptr, parameter_attribute_set_count);
     auto attribute_list = AttributeList::get(context, function_attributes, return_attributes, parameter_attribute_sets);
-    function.setAttributes(attribute_list);
+    return attribute_list;
+}
+
+extern "C" void NativityLLVMFunctionSetAttributes(Function& function, LLVMContext& context, AttributeSet function_attributes, AttributeSet return_attributes, const AttributeSet* parameter_attribute_set_ptr, size_t parameter_attribute_set_count)
+{
+    function.setAttributes(get_attribute_list(context, function_attributes, return_attributes, parameter_attribute_set_ptr, parameter_attribute_set_count));
 }
 
 extern "C" void NativityLLVMCallSetAttributes(CallInst& call, LLVMContext& context, AttributeSet function_attributes, AttributeSet return_attributes, const AttributeSet* parameter_attribute_set_ptr, size_t parameter_attribute_set_count)
 {
-    auto parameter_attribute_sets = ArrayRef<AttributeSet>(parameter_attribute_set_ptr, parameter_attribute_set_count);
-    auto attribute_list = AttributeList::get(context, function_attributes, return_attributes, parameter_attribute_sets);
-    call.setAttributes(attribute_list);
+    call.setAttributes(get_attribute_list(context, function_attributes, return_attributes, parameter_attribute_set_ptr, parameter_attribute_set_count));
 }
 extern "C" void NativityLLVMGlobalObjectSetAlignment(GlobalObject& global_object, uint32_t alignment)
 {

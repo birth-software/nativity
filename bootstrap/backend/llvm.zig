@@ -76,6 +76,8 @@ pub const LLVM = struct {
         nounwind: *Attribute,
         inreg: *Attribute,
         @"noalias": *Attribute,
+        zero_extend: *Attribute,
+        sign_extend: *Attribute,
     };
 
     pub const Linkage = enum(c_uint) {
@@ -2417,6 +2419,8 @@ pub fn codegen(unit: *Compilation.Unit, context: *const Compilation.Context) !vo
             .nounwind = llvm_context.getAttributeFromEnum(.NoUnwind, 0),
             .inreg = llvm_context.getAttributeFromEnum(.InReg, 0),
             .@"noalias" = llvm_context.getAttributeFromEnum(.NoAlias, 0),
+            .sign_extend = llvm_context.getAttributeFromEnum(.SExt, 0),
+            .zero_extend = llvm_context.getAttributeFromEnum(.ZExt, 0),
         },
         .debug_info_file_map = try PinnedHashMap(Compilation.Debug.File.Index, *LLVM.DebugInfo.File).init(std.mem.page_size),
         .debug_type_map = try PinnedHashMap(Compilation.Type.Index, *LLVM.DebugInfo.Type).init(std.mem.page_size),

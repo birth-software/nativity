@@ -634,7 +634,11 @@ fn c_abi_tests(allocator: Allocator) !void {
     const run = try compiler_run(allocator, .{
         .test_name = "c_abi",
         .repetitions = 1,
-        .extra_arguments = &.{},
+        .extra_arguments = &.{
+            "-c_source_files_start",
+            "test/build/c-abi/c.c",
+            "-c_source_files_end",
+        },
         .source_file_path = "retest/c_abi/main.nat",
         .compiler_path = bootstrap_relative_path,
         .is_test = false,
