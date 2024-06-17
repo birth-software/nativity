@@ -6592,8 +6592,10 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                 const element_type = llvm_get_debug_type(thread, builder, typed_pointer.descriptor.pointee);
                 const alignment = 3;
                 const pointer_width = @bitSizeOf(usize);
-                // TODO:
-                const pointer_type = builder.createPointerType(element_type, pointer_width, alignment, "ptr", "ptr".len);
+                var element_name: []const u8 = undefined;
+                element_type.getName(&element_name.ptr, &element_name.len);
+                const pointer_name = thread.arena.join(&.{"*", element_name}) catch unreachable;
+                const pointer_type = builder.createPointerType(element_type, pointer_width, alignment, pointer_name.ptr, pointer_name.len);
                 break :block pointer_type.toType();
             },
             .@"struct" => block: {
@@ -6773,7 +6775,9 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                     .all_calls_described = false,
                 };
                 const file = file_struct.file;
-                const name = "[]";
+                var element_name: []const u8 = undefined;
+                element_type.getName(&element_name.ptr, &element_name.len);
+                const name = thread.arena.join(&.{"[]", element_name}) catch unreachable;
                 const line = 0;
 
                 const bitsize = nat_slice_type.type.size * 8;
@@ -10418,6 +10422,7 @@ pub const LLVM = struct {
         };
 
         pub const Type = opaque {
+            const getName = bindings.NativityLLLVMDITypeGetName;
             const isResolved = bindings.NativityLLLVMDITypeIsResolved;
             fn toScope(this: *@This()) *LLVM.DebugInfo.Scope {
                 return @ptrCast(this);
