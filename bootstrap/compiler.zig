@@ -869,6 +869,27 @@ const Parser = struct{
         const unary: Unary = switch (src[parser.i]) {
             'A'...'Z', 'a'...'z', '_' => Unary.none,
             '0'...'9' => Unary.none,
+            '\'' => {
+                // Character literal
+                parser.i += 1;
+                const is_escape = src[parser.i] == '\\';
+                parser.i += @intFromBool(is_escape);
+                const potential_ch = src[parser.i];
+                parser.i += 1;
+                parser.expect_character(src, '\'');
+                const ch = switch (is_escape) {
+                    true => switch (potential_ch) {
+                        'n' => '\n',
+                        else => unreachable,
+                    },
+                    false => potential_ch,
+                };
+                const character_literal =  create_constant_int(thread, .{
+                    .n = ch,
+                    .type = &thread.integers[8 - 1].type,
+                });
+                return &character_literal.value;
+            },
             '-' => block: {
                 parser.i += 1;
                 break :block .negation;
@@ -1232,6 +1253,7 @@ const Parser = struct{
                                 const ty = if (initial_type) |source_ty| if (maybe_type) |destination_ty| blk: {
                                         switch (typecheck(destination_ty, source_ty)) {
                                             .success => {},
+                                            else => unreachable,
                                         }
                                         break :blk source_ty;
                                     } else source_ty
@@ -1435,8 +1457,21 @@ const Parser = struct{
 
                                 switch (argument_abi.kind) {
                                     .direct => {
-                                        assert(argument_value_type == argument_type);
-                                        _ = abi_argument_values.append(argument_value);
+                                        const v = switch (typecheck(argument_type, argument_value_type)) {
+                                            .success => argument_value,
+                                            .implicit_pointer_cast => b: {
+                                                const cast = emit_cast(analyzer, thread, .{
+                                                    .value = argument_value,
+                                                    .type = argument_type,
+                                                    .id = .implicit_pointer_cast,
+                                                    .scope = analyzer.current_scope,
+                                                    .line = 0,
+                                                    .column = 0,
+                                                });
+                                                break :b &cast.instruction.value;
+                                            },
+                                        };
+                                        _ = abi_argument_values.append(v);
                                     },
                                     .direct_coerce => |coerced_type| {
                                         const coerced_value = emit_direct_coerce(analyzer, thread, .{
@@ -1724,6 +1759,7 @@ const Parser = struct{
                             if (maybe_type) |ty| {
                                 switch (typecheck(ty, pointer_load_type)) {
                                     .success => {},
+                                    else => unreachable,
                                 }
                             }
 
@@ -1854,6 +1890,7 @@ const Parser = struct{
                 if (expected_type) |expected| {
                     switch (typecheck(expected, result_type)) {
                         .success => {},
+                        else => unreachable,
                     }
                 }
 
@@ -1909,6 +1946,19 @@ const Parser = struct{
 
                 assert(result != value);
                 return result;
+            },
+            .array => {
+                const array_field_access_id = parser.parse_raw_identifier(src);
+                if (byte_equal(array_field_access_id, "length")) {
+                    const array_type = ty.get_payload(.array);
+                    const constant = create_constant_int(thread, .{
+                        .n = array_type.descriptor.element_count,
+                        .type = if (expected_type) |exp| exp else unreachable,
+                    });
+                    return &constant.value;
+                } else {
+                    fail_term("Array access must only be 'length', got", array_field_access_id);
+                }
             },
             else => |t| @panic(@tagName(t)),
         }
@@ -3428,6 +3478,7 @@ const Cast = struct{
         int_from_bitfield,
         int_from_pointer,
         truncate,
+        implicit_pointer_cast,
     };
 };
 
@@ -5375,7 +5426,9 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                             const cast = instruction.get_payload(.cast);
                                             const cast_value = llvm_get_value(thread, cast.value);
                                             const v = switch (cast.id) {
-                                                .int_from_bitfield => cast_value,
+                                                .int_from_bitfield,
+                                                .implicit_pointer_cast,
+                                                => cast_value,
                                                 .truncate, .int_from_pointer => |cast_id| b: {
                                                     const cast_type = llvm_get_type(thread, cast.type);
                                                     const cast_i = builder.createCast(switch (cast_id) {
@@ -9158,12 +9211,35 @@ fn try_resolve_file(thread: *Thread, file: *File) void {
 
 const TypecheckResult = enum{
     success,
+    implicit_pointer_cast,
 };
 
 fn typecheck(expected: *Type, have: *Type) TypecheckResult {
     if (expected == have) {
         return TypecheckResult.success;
     } else {
+        switch (expected.sema.id) {
+            .typed_pointer => {
+                const expected_pointer = expected.get_payload(.typed_pointer);
+                switch (have.sema.id) {
+                    .typed_pointer => {
+                        const have_pointer = have.get_payload(.typed_pointer);
+                        switch (have_pointer.descriptor.pointee.sema.id) {
+                            .array => {
+                                const have_pointed_array_type = have_pointer.descriptor.pointee.get_payload(.array);
+                                if (have_pointed_array_type.descriptor.element_type == expected_pointer.descriptor.pointee) {
+                                    return .implicit_pointer_cast;
+                                }
+                            },
+                            else => |t| @panic(@tagName(t)),
+                        }
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
+            },
+            else => |t| @panic(@tagName(t)),
+        }
+
         fail();
     }
 }
