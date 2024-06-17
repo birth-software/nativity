@@ -1,0 +1,9 @@
+fn [cc(.c)] write[extern](file_descriptor: s32, byte_pointer: *u8, byte_count: u64) s64;
+
+fn[cc(.c)] main[export]() s32 {
+    >local_string = "Hello world from local string!\n";
+    write(1, local_string&, local_string.length);
+    >global_string: []u8 = "Hello world from global string!\n";
+    write(1, global_string.pointer, global_string.length);
+    return 0;
+}

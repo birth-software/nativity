@@ -258,9 +258,22 @@ pub fn PinnedArrayAdvanced(comptime T: type, comptime MaybeIndex: ?type, comptim
             return ptr;
         }
 
+        pub fn add_many_with_capacity(array: *Array, count: u32) []T {
+            const index = array.length;
+            assert((index + count) * @sizeOf(T) < pinned_array_max_size);
+            array.length += count;
+            const ptr = array.pointer[index..][0..count];
+            return ptr;
+        }
+
         pub fn add_one(array: *Array) *T{
             array.ensure_capacity(1);
             return array.add_one_with_capacity();
+        }
+
+        pub fn add_slice(array: *Array, count: u32) []T {
+            array.ensure_capacity(count);
+            return array.add_many_with_capacity(count);
         }
 
         pub fn append_with_capacity(array: *Array, item: T) *T {
@@ -359,9 +372,9 @@ fn JointEnum(comptime enums: []const type, comptime backing_type: ?type) type {
     });
 }
 
+pub const fnv_offset = 14695981039346656037;
+pub const fnv_prime = 1099511628211;
 pub fn my_hash(bytes: []const u8) u32 {
-    const fnv_offset = 14695981039346656037;
-    const fnv_prime = 1099511628211;
     var result: u64 = fnv_offset;
 
     for (bytes) |byte| {
@@ -466,28 +479,30 @@ pub fn PinnedHashMapAdvanced(comptime K: type, comptime V: type, comptime granul
             }
         }
 
-        pub fn put(map: *@This(), key: K, value: V) void {
+        pub fn put(map: *@This(), key: K, value: V) *V {
             if (map.get_pointer(key)) |value_pointer| {
                 value_pointer.* = value;
+                return value_pointer;
             } else {
                 const len = map.length;
                 map.ensure_capacity(len + 1);
-                map.put_at_with_capacity(len, key, value);
+                return map.put_at_with_capacity(len, key, value);
             }
         }
 
-        pub fn put_no_clobber(map: *@This(), key: K, value: V) void {
+        pub fn put_no_clobber(map: *@This(), key: K, value: V) *V {
             assert(map.get_pointer(key) == null);
             const len = map.length;
             map.ensure_capacity(len + 1);
-            map.put_at_with_capacity(len, key, value);
+            return map.put_at_with_capacity(len, key, value);
         }
 
-        fn put_at_with_capacity(map: *@This(), index: u64, key: K, value: V) void {
+        fn put_at_with_capacity(map: *@This(), index: u64, key: K, value: V) *V {
             map.length += 1;
             assert(index < map.length);
             map.key_pointer[index] = key;
             map.value_pointer[index] = value;
+            return &map.value_pointer[index];
         }
 
         fn ensure_capacity(map: *Map, additional: u64) void {
