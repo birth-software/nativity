@@ -174,6 +174,7 @@ extern "C" DIType* NativityLLVMDebugInfoBuilderCreateBasicType(DIBuilder& builde
 {
     auto name = StringRef(name_ptr, name_len);
     auto* type = builder.createBasicType(name, bit_count, dwarf_encoding, flags);
+    type->getName();
     return type;
 }
 
@@ -253,6 +254,13 @@ extern "C" DIDerivedType* NativityLLVMDebugInfoBuilderCreateBitfieldMemberType(D
 extern "C" bool NativityLLLVMDITypeIsResolved(DIType* type)
 {
     return type->isResolved();
+}
+
+extern "C" void NativityLLLVMDITypeGetName(DIType& type, const char** name_pointer, size_t* name_length)
+{
+    auto name = type.getName();
+    *name_pointer = name.data();
+    *name_length = name.size();
 }
 
 extern "C" DISubprogram* NativityLLVMDebugInfoScopeToSubprogram(DIScope* scope)

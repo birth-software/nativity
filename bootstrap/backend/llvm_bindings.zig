@@ -40,6 +40,7 @@ pub extern fn NativityLLVMDebugInfoBuilderCreateReplaceableCompositeType(builder
 pub extern fn NativityLLVMDebugInfoBuilderCreateMemberType(builder: *LLVM.DebugInfo.Builder, scope: ?*LLVM.DebugInfo.Scope, name_ptr: [*]const u8, name_len: usize, file: ?*LLVM.DebugInfo.File, line_number: c_uint, bit_size: u64, alignment: u32, bit_offset: u64, flags: LLVM.DebugInfo.Node.Flags, type: *LLVM.DebugInfo.Type) *LLVM.DebugInfo.Type.Derived;
 pub extern fn NativityLLVMDebugInfoBuilderCreateBitfieldMemberType(builder: *LLVM.DebugInfo.Builder, scope: *LLVM.DebugInfo.Scope, name_pointer: [*]const u8, name_len: usize, file: *LLVM.DebugInfo.File, line_number: c_uint, bit_size: u64, bit_offset: u64, storage_bit_offset: u64, flags: LLVM.DebugInfo.Node.Flags, type: *LLVM.DebugInfo.Type) *LLVM.DebugInfo.Type.Derived;
 pub extern fn NativityLLVMDebugInfoBuilderCompositeTypeReplaceTypes(builder: *LLVM.DebugInfo.Builder, type: *LLVM.DebugInfo.Type.Composite, element_type_ptr: [*]const *LLVM.DebugInfo.Type, element_type_count: usize) void;
+pub extern fn NativityLLLVMDITypeGetName(type: *LLVM.DebugInfo.Type, name_pointer: *[*]const u8, name_length: *usize) void;
 pub extern fn NativityLLLVMDITypeIsResolved(type: *LLVM.DebugInfo.Type) bool;
 pub extern fn NativityLLVMDebugInfoBuilderFinalizeSubprogram(builder: *LLVM.DebugInfo.Builder, subprogram: *LLVM.DebugInfo.Subprogram, function: *LLVM.Value.Constant.Function) void;
 pub extern fn NativityLLVMDebugInfoBuilderFinalize(builder: *LLVM.DebugInfo.Builder) void;
