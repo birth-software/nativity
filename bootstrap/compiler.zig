@@ -670,23 +670,34 @@ const Parser = struct{
 
             parser.skip_space(src);
 
-            const element_count = parser.parse_constant_expression(thread, file, null);
-            switch (element_count.sema.id) {
-                .constant_int => {
-                    const constant_int = element_count.get_payload(.constant_int);
-                    parser.skip_space(src);
-                    parser.expect_character(src, ']');
-                    parser.skip_space(src);
+            if (src[parser.i] == ']') {
+                // Slice
+                parser.i += 1;
 
-                    const element_type = parser.parse_type_expression(thread, file, current_scope);
-                    const array_type = get_array_type(thread, .{
-                        .element_type = element_type,
-                        .element_count = constant_int.n,
-                    });
-                    return array_type;
-                },
-                else => |t| @panic(@tagName(t)),
+                const element_type = parser.parse_type_expression(thread, file, current_scope);
+                const slice_type = get_slice_type(thread, element_type);
+                return slice_type;
+            } else {
+                // Array
+                const element_count = parser.parse_constant_expression(thread, file, null);
+                switch (element_count.sema.id) {
+                    .constant_int => {
+                        const constant_int = element_count.get_payload(.constant_int);
+                        parser.skip_space(src);
+                        parser.expect_character(src, ']');
+                        parser.skip_space(src);
+
+                        const element_type = parser.parse_type_expression(thread, file, current_scope);
+                        const array_type = get_array_type(thread, .{
+                            .element_type = element_type,
+                            .element_count = constant_int.n,
+                        });
+                        return array_type;
+                    },
+                    else => |t| @panic(@tagName(t)),
+                }
             }
+
         }
 
         const identifier = parser.parse_identifier(thread, src);
@@ -858,6 +869,13 @@ const Parser = struct{
         };
     }
 
+    fn get_escape_character(ch: u8) u8 {
+        return switch (ch) {
+            'n' => '\n',
+            else => unreachable,
+        };
+    }
+
     fn parse_single_expression(parser: *Parser, analyzer: *Analyzer, thread: *Thread, file: *File, maybe_type: ?*Type, side: Side) *Value {
         const src = file.source_code;
         const Unary = enum{
@@ -878,10 +896,7 @@ const Parser = struct{
                 parser.i += 1;
                 parser.expect_character(src, '\'');
                 const ch = switch (is_escape) {
-                    true => switch (potential_ch) {
-                        'n' => '\n',
-                        else => unreachable,
-                    },
+                    true => get_escape_character(potential_ch),
                     false => potential_ch,
                 };
                 const character_literal =  create_constant_int(thread, .{
@@ -889,6 +904,148 @@ const Parser = struct{
                     .type = &thread.integers[8 - 1].type,
                 });
                 return &character_literal.value;
+            },
+            '"' => {
+                // String literal
+                parser.i += 1;
+
+                const string_start = parser.i;
+                var hash: u64 = library.fnv_offset;
+                var escape_character_count: u64 = 0;
+                while (parser.i < src.len) {
+                    if (src[parser.i] == '"') {
+                        break;
+                    }
+
+                    const is_escape = src[parser.i] == '\\';
+                    parser.i += @intFromBool(is_escape);
+                    escape_character_count += @intFromBool(is_escape);
+                    const potential_ch = src[parser.i];
+                    parser.i += 1;
+                    if (is_escape) {
+                        hash ^= '\\';
+                        hash *%= library.fnv_prime;
+                    }
+                    hash ^= potential_ch;
+                    hash *%= library.fnv_prime;
+                }
+                const string_end = parser.i;
+                parser.i += 1;
+
+                const StringKind = enum{
+                    array,
+                    global,
+                };
+
+                const kind: StringKind = if (maybe_type) |ty| switch (ty.sema.id) {
+                    // TODO: typecheck
+                    .slice => .global,
+                    else => |t| @panic(@tagName(t)),
+                } else .array;
+
+                switch (kind) {
+                    .global => {
+                        const truncated_hash: u32 = @truncate(hash);
+                        const string = if (thread.global_strings.get_pointer(truncated_hash)) |string| string
+                        else blk: {
+                            const expected_length: u32 = @intCast((string_end + 1) - (string_start + escape_character_count));
+                            const string_content = thread.string_buffer.add_slice(expected_length);
+                            var source_index: usize = string_start;
+                            var destination_index: usize = 0;
+
+                            while (source_index < string_end) {
+                                const is_escape = src[source_index] == '\\';
+                                source_index += @intFromBool(is_escape);
+                                const ch = switch (is_escape) {
+                                    true => get_escape_character(src[source_index]),
+                                    false => src[source_index],
+                                };
+                                string_content[destination_index] = ch;
+
+                                destination_index += 1;
+                                source_index += 1;
+                            }
+
+                            string_content[destination_index] = 0;
+
+                            const string = thread.global_strings.put_no_clobber(truncated_hash, .{
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = true,
+                                        .id = .global_string_literal,
+                                    },
+                                    },
+                                .content = string_content,
+                                .source_file_hash = truncated_hash,
+                                .emit = false,
+                            });
+                            break :blk string;
+                        };
+
+                        var values = PinnedArray(*Value){};
+                        _ = values.append(&string.value);
+                        _ = values.append(&create_constant_int(thread, .{
+                            .n = string.content.len,
+                            .type = &thread.integers[63].type,
+                        }).value);
+
+                        const constant_struct = thread.constant_structs.append(.{
+                            .value = .{
+                                .sema = .{
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                    .id = .constant_struct,
+                                },
+                            },
+                            .type = maybe_type orelse unreachable,
+                            .values = values.const_slice(),
+                        });
+                        
+                        return &constant_struct.value;
+                    },
+                    .array => {
+                        const truncated_hash: u32 = @truncate(hash);
+                        if (thread.constant_strings.get_pointer(truncated_hash)) |string| {
+                            return &string.value;
+                        } else {
+                            const expected_length: u32 = @intCast((string_end + 1) - (string_start + escape_character_count));
+                            const string_content = thread.string_buffer.add_slice(expected_length);
+                            var source_index: usize = string_start;
+                            var destination_index: usize = 0;
+
+                            while (source_index < string_end) {
+                                const is_escape = src[source_index] == '\\';
+                                source_index += @intFromBool(is_escape);
+                                const ch = switch (is_escape) {
+                                    true => get_escape_character(src[source_index]),
+                                    false => src[source_index],
+                                };
+                                string_content[destination_index] = ch;
+
+                                destination_index += 1;
+                                source_index += 1;
+                            }
+
+                            string_content[destination_index] = 0;
+
+                            const string = thread.constant_strings.put_no_clobber(truncated_hash, .{
+                                .value = .{
+                                    .sema = .{
+                                        .thread = thread.get_index(),
+                                        .resolved = true,
+                                        .id = .constant_string_literal,
+                                    },
+                                },
+                                .content = string_content,
+                                .source_file_hash = truncated_hash,
+                                .emit = false,
+                            });
+                            return &string.value;
+                        }
+                    },
+                }
+
             },
             '-' => block: {
                 parser.i += 1;
@@ -1960,6 +2117,46 @@ const Parser = struct{
                     fail_term("Array access must only be 'length', got", array_field_access_id);
                 }
             },
+            .slice => {
+                const slice_field_access_id = parser.parse_raw_identifier(src);
+                if (byte_equal(slice_field_access_id, "pointer")) {
+                    const slice_type = ty.get_payload(.slice);
+                    const load = emit_load(analyzer, thread, .{
+                        .value = value,
+                        .type = get_typed_pointer(thread, .{
+                            .pointee = slice_type.element_type,
+                        }),
+                        .scope = analyzer.current_scope,
+                        .line = 0,
+                        .column = 0,
+                    });
+                    return &load.instruction.value;
+                } else if (byte_equal(slice_field_access_id, "length")) {
+                    const gep = emit_gep(thread, analyzer, .{
+                        .line = 0,
+                        .column = 0,
+                        .scope = analyzer.current_scope,
+                        .pointer = value,
+                        .index = &create_constant_int(thread, .{
+                            .n = 1,
+                            .type = &thread.integers[31].type,
+                        }).value,
+                        .aggregate_type = ty,
+                        .type = &thread.integers[63].type,
+                        .is_struct = true,
+                    });
+                    const load = emit_load(analyzer, thread, .{
+                        .value = &gep.instruction.value,
+                        .type = &thread.integers[63].type,
+                        .scope = analyzer.current_scope,
+                        .line = 0,
+                        .column = 0,
+                    });
+                    return &load.instruction.value;
+                } else {
+                    fail_term("Slice access must be either 'pointer' or 'length', got", slice_field_access_id);
+                }
+            },
             else => |t| @panic(@tagName(t)),
         }
     }
@@ -2559,6 +2756,8 @@ const Value = struct {
         global_symbol,
         lazy_expression,
         local_lazy_expression,
+        constant_string_literal,
+        global_string_literal,
         undefined,
     };
 
@@ -2573,6 +2772,8 @@ const Value = struct {
         .instruction = Instruction,
         .lazy_expression = LazyExpression,
         .local_lazy_expression = LocalLazyExpression,
+        .constant_string_literal = String,
+        .global_string_literal = String,
         .undefined = Undefined,
     });
 
@@ -2656,6 +2857,25 @@ const Value = struct {
                 const constant_struct = value.get_payload(.constant_struct);
                 return constant_struct.type;
             },
+            .constant_string_literal => {
+                const string_literal = value.get_payload(.constant_string_literal);
+                const thread = &instance.threads[string_literal.value.sema.thread];
+                const array_type = get_array_type(thread, .{
+                    .element_type = &thread.integers[8 - 1].type,
+                    .element_count = string_literal.content.len,
+                });
+                return array_type;
+            },
+            .global_string_literal => {
+                unreachable;
+                // const string_literal = value.get_payload(.string_literal);
+                // const thread = &instance.threads[string_literal.value.sema.thread];
+                // const array_type = get_array_type(thread, .{
+                //     .element_type = &thread.integers[8 - 1].type,
+                //     .element_count = string_literal.content.len,
+                // });
+                // return array_type;
+            },
             else => |t| @panic(@tagName(t)),
         };
     }
@@ -2687,6 +2907,7 @@ const Type = struct {
         @"struct",
         bitfield,
         anonymous_struct,
+        slice,
     };
 
     const Integer = struct {
@@ -2751,6 +2972,11 @@ const Type = struct {
         };
     };
 
+    const Slice = struct{
+        type: Type,
+        element_type: *Type,
+    };
+
     const id_to_type_map = std.EnumArray(Id, type).init(.{
         .unresolved = void,
         .void = void,
@@ -2763,6 +2989,7 @@ const Type = struct {
         .bitfield = Type.Bitfield,
         .typed_pointer = TypedPointer,
         .anonymous_struct = AnonymousStruct,
+        .slice = Slice,
     });
 
     fn get_payload(ty: *Type, comptime id: Id) *id_to_type_map.get(id) {
@@ -2850,7 +3077,7 @@ const Type = struct {
             result.llvm = null;
             result.sema.thread = args.destination_thread.get_index();
 
-            args.destination_thread.cloned_types.put_no_clobber(ty, result);
+            _ = args.destination_thread.cloned_types.put_no_clobber(ty, result);
 
             break :blk result;
         };
@@ -2873,7 +3100,7 @@ const Type = struct {
             .bitfield,
             =>
             false,
-            .@"struct", .anonymous_struct => true,
+            .@"struct", .anonymous_struct, .slice => true,
         };
     }
 
@@ -3555,6 +3782,16 @@ const DebugArgument = struct{
     argument: *ArgumentSymbol,
 };
 
+const String = struct{
+    value: Value,
+    content: []const u8,
+    // This hash amounts to the source file bytes, not the actual string bytes
+    // in the final object
+    source_file_hash: u32, 
+    null_terminate: bool = true,
+    emit: bool,
+};
+
 const Thread = struct{
     arena: *Arena = undefined,
     functions: PinnedArray(Function) = .{},
@@ -3599,6 +3836,7 @@ const Thread = struct{
     array_type_map: PinnedHashMap(Type.Array.Descriptor, *Type) = .{},
     typed_pointer_type_map: PinnedHashMap(Type.TypedPointer.Descriptor, *Type) = .{},
     array_types: PinnedArray(Type.Array) = .{},
+    slice_types: PinnedHashMap(*Type, Type.Slice) = .{},
     typed_pointer_types: PinnedArray(Type.TypedPointer) = .{},
     structs: PinnedArray(Type.Struct) = .{},
     anonymous_structs: PinnedArray(Type.AnonymousStruct) = .{},
@@ -3606,6 +3844,9 @@ const Thread = struct{
     fields: PinnedArray(Type.AggregateField) = .{},
     bitfields: PinnedArray(Type.Bitfield) = .{},
     cloned_types: PinnedHashMap(*Type, *Type) = .{},
+    constant_strings: PinnedHashMap(u32, String) = .{},
+    global_strings: PinnedHashMap(u32, String) = .{},
+    string_buffer: PinnedArray(u8) = .{},
     analyzed_file_count: u32 = 0,
     assigned_file_count: u32 = 0,
     llvm: struct {
@@ -3618,6 +3859,8 @@ const Thread = struct{
         fixed_intrinsic_functions: std.EnumArray(LLVMFixedIntrinsic, *LLVM.Value.Constant.Function),
         intrinsic_id_map: PinnedHashMap([]const u8, LLVM.Value.IntrinsicID) = .{},
         intrinsic_function_map: PinnedHashMap(LLVMIntrinsic.Parameters, *LLVM.Value.Constant.Function) = .{},
+        pointer: *LLVM.Type,
+        slice: *LLVM.Type,
     } = undefined,
     integers: [128]Type.Integer = blk: {
         var integers: [128]Type.Integer = undefined;
@@ -4683,7 +4926,7 @@ fn intern_identifier(pool: *PinnedHashMap(u32, []const u8), identifier: []const 
     const start_index = @intFromBool(identifier[0] == '"');
     const end_index = identifier.len - start_index;
     const hash = hash_bytes(identifier[start_index..end_index]);
-    pool.put(hash, identifier);
+    _ = pool.put(hash, identifier);
 
     return hash;
 }
@@ -4993,6 +5236,9 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                         module.setTargetMachineDataLayout(target_machine);
                         module.setTargetTriple(target_triple.ptr, target_triple.len);
 
+                        const pointer_type = context.getPointerType(address_space);
+                        const usize_type = context.getIntegerType(64);
+                        const slice_types: []const *LLVM.Type = &.{pointer_type.toType(), usize_type.toType()};
 
                         thread.llvm = .{
                             .context = context,
@@ -5009,7 +5255,13 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                     .types = &.{},
                                 }),
                             }),
+                            .slice = context.getStructType(slice_types.ptr, slice_types.len, false).toType(),
+                            .pointer = pointer_type.toType(),
                         };
+
+                        for (thread.global_strings.values()) |*string| {
+                            string.value.llvm = builder.createGlobalString(string.content.ptr, string.content.len, string.content.ptr, string.content.len, address_space, module).toValue();
+                        }
 
                         for (thread.external_functions.slice()) |*nat_function| {
                             llvm_emit_function_declaration(thread, nat_function);
@@ -6264,6 +6516,10 @@ fn llvm_get_value(thread: *Thread, value: *Value) *LLVM.Value {
                 const poison = ty.getPoison();
                 break :b poison.toValue();
             },
+            .constant_string_literal => b: {
+                const string_literal = value.get_payload(.constant_string_literal);
+                break :b thread.llvm.context.getConstantString(string_literal.content.ptr, string_literal.content.len, false).toValue();
+            },
             else => |t| @panic(@tagName(t)),
         };
 
@@ -6482,6 +6738,55 @@ fn llvm_get_debug_type(thread: *Thread, builder: *LLVM.DebugInfo.Builder, ty: *T
                 builder.replaceCompositeTypes(struct_type, member_types.pointer, member_types.length);
                 break :block struct_type.toType();
             },
+            .slice => block: {
+                const nat_slice_type = ty.get_payload(.slice);
+                const file_struct = llvm_get_file(thread, 0);
+                const element_type = llvm_get_debug_type(thread, builder, nat_slice_type.element_type);
+                const usize_type = llvm_get_debug_type(thread, builder, &thread.integers[63].type);
+                const flags = LLVM.DebugInfo.Node.Flags{
+                    .visibility = .none,
+                    .forward_declaration = false,
+                    .apple_block = false,
+                    .block_by_ref_struct = false,
+                    .virtual = false,
+                    .artificial = false,
+                    .explicit = false,
+                    .prototyped = false,
+                    .objective_c_class_complete = false,
+                    .object_pointer = false,
+                    .vector = false,
+                    .static_member = false,
+                    .lvalue_reference = false,
+                    .rvalue_reference = false,
+                    .reserved = false,
+                    .inheritance = .none,
+                    .introduced_virtual = false,
+                    .bit_field = false,
+                    .no_return = false,
+                    .type_pass_by_value = false,
+                    .type_pass_by_reference = false,
+                    .enum_class = false,
+                    .thunk = false,
+                    .non_trivial = false,
+                    .big_endian = false,
+                    .little_endian = false,
+                    .all_calls_described = false,
+                };
+                const file = file_struct.file;
+                const name = "[]";
+                const line = 0;
+
+                const bitsize = nat_slice_type.type.size * 8;
+                const alignment = nat_slice_type.type.alignment;
+
+                const pointer_name = "pointer";
+                const length_name = "length";
+                const members = [_]*LLVM.DebugInfo.Type{builder.createMemberType(null, pointer_name, pointer_name.len, null, line, 64, 8, 0, flags, element_type).toType(), builder.createMemberType(null, length_name, length_name.len, null, line, 64, 8, 0, flags, usize_type).toType()};
+
+                const struct_type = builder.createStructType(file.toScope(), name.ptr, name.len, file, line, bitsize, alignment, flags, null, &members, members.len, null);
+
+                break :block struct_type.toType();
+            },
             else => |t| @panic(@tagName(t)),
         };
 
@@ -6512,10 +6817,8 @@ fn llvm_get_type(thread: *Thread, ty: *Type) *LLVM.Type {
                 const array_type = LLVM.Type.Array.get(element_type, array_ty.descriptor.element_count);
                 break :b array_type.toType();
             },
-            .opaque_pointer, .typed_pointer => b: {
-                const pointer_type = thread.llvm.context.getPointerType(address_space);
-                break :b pointer_type.toType();
-            },
+            .opaque_pointer, .typed_pointer => thread.llvm.pointer,
+            .slice => thread.llvm.slice,
             .function => b: {
                 const nat_function_type = ty.get_payload(.function);
                 const return_type = llvm_get_type(thread, nat_function_type.abi.abi_return_type);
@@ -6593,13 +6896,11 @@ fn llvm_get_file(thread: *Thread, file_index: u32) *LLVMFile {
         const sdk = "";
         const compile_unit = builder.createCompileUnit(LLVM.DebugInfo.Language.c11, llvm_file, producer, producer.len, is_optimized, flags, flags.len, runtime_version, splitname, splitname.len, debug_info_kind, DWOId, split_debug_inlining, debug_info_for_profiling, name_table_kind, ranges_base_address, sysroot, sysroot.len, sdk, sdk.len);
 
-        thread.debug_info_file_map.put_no_clobber(file_index, .{
+        return thread.debug_info_file_map.put_no_clobber(file_index, .{
             .file = llvm_file,
             .compile_unit = compile_unit,
             .builder = builder,
         });
-
-        return thread.debug_info_file_map.get_pointer(file_index).?;
     }
 }
 
@@ -7902,7 +8203,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                     .initial_value = global_initial_value,
                 });
 
-                file.scope.scope.declarations.put_no_clobber(global_name, &global_variable.global_symbol.global_declaration.declaration);
+                _ = file.scope.scope.declarations.put_no_clobber(global_name, &global_variable.global_symbol.global_declaration.declaration);
             },
             'b' => {
                 const identifier = parser.parse_raw_identifier(src);
@@ -7947,7 +8248,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 .fields = &.{},
                                 .backing_type = backing_type,
                             });
-                            file.scope.scope.declarations.put_no_clobber(bitfield_name, &bitfield_type.declaration);
+                            _ = file.scope.scope.declarations.put_no_clobber(bitfield_name, &bitfield_type.declaration);
 
                             parser.skip_space(src);
 
@@ -8692,7 +8993,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 },
                                 .entry_block = entry_block,
                             };
-                            file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
+                            _ = file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
                             var analyzer = Analyzer{
                                 .current_function = function,
                                 .current_basic_block = entry_block,
@@ -8905,7 +9206,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                     };
 
                                     if (argument.name != 0) {
-                                        analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
+                                        _ = analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
                                         if (thread.generate_debug_information) {
                                             emit_debug_argument(&analyzer, thread, .{
                                                 .argument_symbol = argument_symbol,
@@ -8957,7 +9258,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                             function_declaration_data.global_symbol.id = .function_declaration;
 
                             const function_declaration = thread.external_functions.append(function_declaration_data);
-                            file.scope.scope.declarations.put_no_clobber(function_declaration.global_symbol.global_declaration.declaration.name, &function_declaration.global_symbol.global_declaration.declaration);
+                            _ = file.scope.scope.declarations.put_no_clobber(function_declaration.global_symbol.global_declaration.declaration.name, &function_declaration.global_symbol.global_declaration.declaration);
                         },
                         else => fail_message("Unexpected character to close function declaration"),
                     }
@@ -9013,8 +9314,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         });
                         _ = import.files.append(file);
                         _ = file.imports.append(import);
-                        file.scope.scope.declarations.put_no_clobber(filename_without_extension_hash, &import.global_declaration.declaration);
-                        const global_declaration_reference: **GlobalDeclaration = @ptrCast(file.scope.scope.declarations.get_pointer(filename_without_extension_hash) orelse unreachable);
+                        const global_declaration_reference: **GlobalDeclaration = @ptrCast(file.scope.scope.declarations.put_no_clobber(filename_without_extension_hash, &import.global_declaration.declaration));
                         const import_values = file.values_per_import.append(.{});
                         const lazy_expression = thread.lazy_expressions.append(LazyExpression.init(global_declaration_reference, thread));
                         _ = import_values.append(&lazy_expression.value);
@@ -9056,7 +9356,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         },
                         .fields = &.{},
                     });
-                    file.scope.scope.declarations.put_no_clobber(struct_name, &struct_type.declaration);
+                    _ = file.scope.scope.declarations.put_no_clobber(struct_name, &struct_type.declaration);
 
                     parser.skip_space(src);
 
@@ -9404,7 +9704,7 @@ fn emit_local_symbol(analyzer: *Analyzer, thread: *Thread, args: struct{
     _ = analyzer.current_function.stack_slots.append(local_symbol);
 
     if (args.name != 0) {
-        analyzer.current_scope.declarations.put_no_clobber(args.name, &local_symbol.local_declaration.declaration);
+        _ = analyzer.current_scope.declarations.put_no_clobber(args.name, &local_symbol.local_declaration.declaration);
         if (thread.generate_debug_information) {
             emit_debug_local(analyzer, thread, .{
                 .local_symbol = local_symbol,
@@ -9691,7 +9991,7 @@ fn get_typed_pointer(thread: *Thread, descriptor: Type.TypedPointer.Descriptor) 
             .descriptor = descriptor,
         });
 
-        thread.typed_pointer_type_map.put_no_clobber(descriptor, &typed_pointer_type.type);
+        _ = thread.typed_pointer_type_map.put_no_clobber(descriptor, &typed_pointer_type.type);
         return &typed_pointer_type.type;
     }
 }
@@ -9736,12 +10036,30 @@ fn get_anonymous_two_field_struct(thread: *Thread, types: [2]*Type) *Type {
             .fields = fields,
         };
 
-        thread.two_struct_map.put_no_clobber(types, &anonymous_struct.type);
+        _ = thread.two_struct_map.put_no_clobber(types, &anonymous_struct.type);
 
         return &anonymous_struct.type;
     }
 }
 
+fn get_slice_type(thread: *Thread, ty: *Type) *Type {
+    if (thread.slice_types.get_pointer(ty)) |slice_type| return &slice_type.type else {
+        const slice_type = thread.slice_types.put_no_clobber(ty, .{
+            .element_type = ty,
+            .type = .{
+                .sema = .{
+                    .thread = thread.get_index(),
+                    .resolved = true,
+                    .id = .slice,
+                },
+                .size = 2 * 8,
+                .bit_size = 2 * 8 * 8,
+                .alignment = 8,
+            },
+        });
+        return &slice_type.type;
+    }
+}
 fn get_array_type(thread: *Thread, descriptor: Type.Array.Descriptor) *Type {
     assert(descriptor.element_type.sema.resolved);
     if (thread.array_type_map.get(descriptor)) |result| return result else {
@@ -9759,7 +10077,7 @@ fn get_array_type(thread: *Thread, descriptor: Type.Array.Descriptor) *Type {
             .descriptor = descriptor,
         });
 
-        thread.array_type_map.put_no_clobber(descriptor, &array_type.type);
+        _ = thread.array_type_map.put_no_clobber(descriptor, &array_type.type);
         return &array_type.type;
     }
 }
@@ -9817,7 +10135,7 @@ pub const LLVM = struct {
         const create = bindings.NativityLLVMCreateContext;
         const createBasicBlock = bindings.NativityLLVMCreateBasicBlock;
         const getConstantInt = bindings.NativityLLVMContextGetConstantInt;
-        const getConstString = bindings.NativityLLVMContextGetConstString;
+        const getConstantString = bindings.NativityLLVMContextGetConstantString;
         const getVoidType = bindings.NativityLLVMGetVoidType;
         const getIntegerType = bindings.NativityLLVMGetIntegerType;
         const getPointerType = bindings.NativityLLVMGetPointerType;
