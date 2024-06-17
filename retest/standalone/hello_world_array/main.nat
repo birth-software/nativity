@@ -1,0 +1,6 @@
+fn [cc(.c)] write[extern](file_descriptor: s32, byte_pointer: *u8, byte_count: u64) s64;
+fn [cc(.c)] main[export]() s32 {
+    >arr: [4]u8 = ['H', 'i', '!', '\n'];
+    write(1, arr&, arr.length);
+    return 0;
+}
