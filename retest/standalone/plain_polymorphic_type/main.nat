@@ -1,0 +1,10 @@
+struct SimplePolymorphic[$T] {
+    member: T,
+}
+
+fn[cc(.c)] main[export]() s32 {
+    >s: SimplePolymorphic[s32] = {
+        .member = 0,
+    };
+    return s.member;
+}
