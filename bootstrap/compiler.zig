@@ -258,7 +258,7 @@ const Parser = struct{
         column: u32,
     };
 
-    fn parse_field(parser: *Parser, thread: *Thread, file: *File) ?ParseFieldData{
+    fn parse_field(parser: *Parser, thread: *Thread, file: *File, scope: *Scope) ?ParseFieldData{
         const src = file.source_code;
         parser.skip_space(src);
 
@@ -276,7 +276,7 @@ const Parser = struct{
 
         parser.skip_space(src);
 
-        const field_type = parser.parse_type_expression(thread, file, &file.scope.scope);
+        const field_type = parser.parse_type_expression(thread, file, scope);
 
         parser.skip_space(src);
 
@@ -711,6 +711,120 @@ const Parser = struct{
                 .bitfield => {
                     const bitfield_type = declaration.get_payload(.bitfield);
                     return &bitfield_type.type;
+                },
+                .type => {
+                    const type_declaration = declaration.get_payload(.type);
+                    switch (type_declaration.id) {
+                        .polymorphic_name => {
+                            const name = type_declaration.get_payload(.polymorphic_name);
+                            return &name.type;
+                        },
+                    }
+                },
+                .polymorphic_struct => {
+                    const polymorphic_struct = declaration.get_payload(.polymorphic_struct);
+                    parser.skip_space(src);
+                    // Expect parameters for the struct (all polymorphic structs have polymorphic parameters)
+                    parser.expect_character(src, '[');
+
+                    var instantiation_types = PinnedArray(*Type){};
+
+                    while (true) {
+                        parser.skip_space(src);
+
+                        if (src[parser.i] == ']') {
+                            break;
+                        }
+
+                        const parameter_ty = parser.parse_type_expression(thread, file, current_scope); 
+
+                        parser.skip_space(src);
+
+                        switch (src[parser.i]) {
+                            ',' => parser.i += 1,
+                            ']' => {},
+                            else => fail(),
+                        }
+
+                        _ = instantiation_types.append(parameter_ty);
+                    }
+
+                    parser.i += 1;
+                    
+                    // Now that all parameters are known, the monomorphization starts
+
+                    if (instantiation_types.length != polymorphic_struct.parameters.len) {
+                        fail();
+                    }
+
+                    const hash = hash_bytes(std.mem.sliceAsBytes(instantiation_types.slice()));
+                    if (polymorphic_struct.instantiations.get(hash)) |instantiated_struct| {
+                        _ = instantiated_struct;
+                        unreachable;
+                    } else {
+                        const struct_polymorphic_name = thread.identifiers.get(polymorphic_struct.declaration.name).?;
+
+                        var struct_name = PinnedArray(u8){};
+                        _ = struct_name.append_slice(struct_polymorphic_name);
+                        _ = struct_name.append('[');
+
+                        for (instantiation_types.slice()) |ty| {
+                            _ = struct_name.append_slice(ty.get_name());
+                            _ = struct_name.append_slice(", ");
+                        }
+
+                        struct_name.length -= 2;
+                        _ = struct_name.append(']');
+
+                        const struct_name_hash = intern_identifier(&thread.identifiers, struct_name.slice());
+
+                        const struct_type = thread.structs.append(.{
+                            .type = .{
+                                .sema = .{
+                                    .id = .@"struct",
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                },
+                                .size = 0,
+                                .alignment = 1,
+                                .bit_size = 0,
+                            },
+                            .declaration = .{
+                                .name = struct_name_hash,
+                                .id = .@"struct",
+                                .line = polymorphic_struct.declaration.line,
+                                .column = polymorphic_struct.declaration.column,
+                                .scope = polymorphic_struct.declaration.scope,
+                            },
+                            .fields = &.{},
+                        });
+                        
+                        var fields = PinnedArray(*Type.AggregateField){};
+                        for (polymorphic_struct.fields) |polymorphic_field| {
+                            const field_type = switch (polymorphic_field.type.sema.id) {
+                                .polymorphic_name => b: {
+                                    const polymorphic_name = polymorphic_field.type.get_payload(.polymorphic_name);
+                                    break :b instantiation_types.slice()[polymorphic_name.index];
+                                },
+                                else => |t| @panic(@tagName(t)),
+                            };
+                            struct_type.type.alignment = @max(struct_type.type.alignment, field_type.alignment);
+                            const aligned_offset = library.align_forward(struct_type.type.size, field_type.alignment);
+                            const field = thread.fields.append(.{
+                                .name = polymorphic_field.name,
+                                .parent = &struct_type.type,
+                                .type = field_type,
+                                .member_offset = aligned_offset,
+                                .index = polymorphic_field.index,
+                                .line = polymorphic_field.line,
+                                .column = polymorphic_field.column,
+                            });
+                            _ = fields.append(field);
+                        }
+
+                        struct_type.fields = fields.slice();
+                        return &struct_type.type;
+                    }
                 },
                 else => |t| @panic(@tagName(t)),
             }
@@ -2908,6 +3022,8 @@ const Type = struct {
         bitfield,
         anonymous_struct,
         slice,
+        polymorphic_struct,
+        polymorphic_name,
     };
 
     const Integer = struct {
@@ -2977,6 +3093,30 @@ const Type = struct {
         element_type: *Type,
     };
 
+    const PolymorphicName = struct{
+        type: Type,
+        type_declaration: TypeDeclaration,
+        index: u32,
+    };
+
+    const PolymorphicField = struct{
+        type: *Type,
+        parent: *Type,
+        name: u32,
+        index: u32,
+        line: u32,
+        column: u32,
+    };
+
+    const PolymorphicStruct = struct{
+        type: Type,
+        declaration: Declaration,
+        scope: Scope,
+        parameters: []const *Type,
+        fields: []const *PolymorphicField,
+        instantiations: PinnedHashMap(u32, *Type.Struct) = .{},
+    };
+
     const id_to_type_map = std.EnumArray(Id, type).init(.{
         .unresolved = void,
         .void = void,
@@ -2990,6 +3130,8 @@ const Type = struct {
         .typed_pointer = TypedPointer,
         .anonymous_struct = AnonymousStruct,
         .slice = Slice,
+        .polymorphic_name = PolymorphicName,
+        .polymorphic_struct = PolymorphicStruct,
     });
 
     fn get_payload(ty: *Type, comptime id: Id) *id_to_type_map.get(id) {
@@ -3100,6 +3242,9 @@ const Type = struct {
             .bitfield,
             =>
             false,
+            .polymorphic_name,
+            .polymorphic_struct,
+            => unreachable,
             .@"struct", .anonymous_struct, .slice => true,
         };
     }
@@ -3150,6 +3295,18 @@ const Type = struct {
         comptime assert(@offsetOf(Type.Integer, "type") == 0);
         const index = @divExact(@intFromPtr(ty) - @intFromPtr(&thread.integers[0]), @sizeOf(Type.Integer));
         return index;
+    }
+
+    fn get_integer_name(ty: *Type) []const u8 {
+        const index = ty.get_integer_index();
+        return integer_name_map[index];
+    }
+
+    fn get_name(ty: *Type) []const u8 {
+        return switch (ty.sema.id) {
+            .integer => ty.get_integer_name(),
+            else => |t| @panic(@tagName(t)),
+        };
     }
 };
 
@@ -3236,6 +3393,7 @@ const Scope = struct {
         file,
         function,
         local,
+        polymorphic_struct,
     };
 };
 
@@ -3249,6 +3407,25 @@ const ArgumentDeclaration = struct {
 
     fn to_symbol(argument_declaration: *ArgumentDeclaration) *ArgumentSymbol {
         return @alignCast(@fieldParentPtr("argument_declaration", argument_declaration));
+    }
+};
+
+const TypeDeclaration = struct{
+    declaration: Declaration,
+    parent: *Type,
+    id: Id,
+
+    const Id = enum{
+        polymorphic_name,
+    };
+
+    const type_map = std.EnumArray(Id, type).init(.{
+        .polymorphic_name = Type.PolymorphicName,
+    });
+
+    fn get_payload(type_declaration: *TypeDeclaration, comptime id: Id) *type_map.get(id) {
+        assert(type_declaration.id == id);
+        return @alignCast(@fieldParentPtr("type_declaration", type_declaration));
     }
 };
 
@@ -3323,6 +3500,8 @@ const Declaration = struct {
         argument,
         @"struct",
         @"bitfield",
+        polymorphic_struct,
+        type,
     };
 
     const id_to_declaration_map = std.EnumArray(Id, type).init(.{
@@ -3331,6 +3510,8 @@ const Declaration = struct {
         .argument = ArgumentDeclaration,
         .@"struct" = Type.Struct,
         .bitfield = Type.Bitfield,
+        .type = TypeDeclaration,
+        .polymorphic_struct = Type.PolymorphicStruct,
     });
 
     fn get_payload(declaration: *Declaration, comptime id: Id) *id_to_declaration_map.get(id) {
@@ -3792,6 +3973,137 @@ const String = struct{
     emit: bool,
 };
 
+const integer_name_map = [128][]const u8{
+    "u1",
+    "u2",
+    "u3",
+    "u4",
+    "u5",
+    "u6",
+    "u7",
+    "u8",
+    "u9",
+    "u10",
+    "u11",
+    "u12",
+    "u13",
+    "u14",
+    "u15",
+    "u16",
+    "u17",
+    "u18",
+    "u19",
+    "u20",
+    "u21",
+    "u22",
+    "u23",
+    "u24",
+    "u25",
+    "u26",
+    "u27",
+    "u28",
+    "u29",
+    "u30",
+    "u31",
+    "u32",
+    "u33",
+    "u34",
+    "u35",
+    "u36",
+    "u37",
+    "u38",
+    "u39",
+    "u40",
+    "u41",
+    "u42",
+    "u43",
+    "u44",
+    "u45",
+    "u46",
+    "u47",
+    "u48",
+    "u49",
+    "u50",
+    "u51",
+    "u52",
+    "u53",
+    "u54",
+    "u55",
+    "u56",
+    "u57",
+    "u58",
+    "u59",
+    "u60",
+    "u61",
+    "u62",
+    "u63",
+    "u64",
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6",
+    "s7",
+    "s8",
+    "s9",
+    "s10",
+    "s11",
+    "s12",
+    "s13",
+    "s14",
+    "s15",
+    "s16",
+    "s17",
+    "s18",
+    "s19",
+    "s20",
+    "s21",
+    "s22",
+    "s23",
+    "s24",
+    "s25",
+    "s26",
+    "s27",
+    "s28",
+    "s29",
+    "s30",
+    "s31",
+    "s32",
+    "s33",
+    "s34",
+    "s35",
+    "s36",
+    "s37",
+    "s38",
+    "s39",
+    "s40",
+    "s41",
+    "s42",
+    "s43",
+    "s44",
+    "s45",
+    "s46",
+    "s47",
+    "s48",
+    "s49",
+    "s50",
+    "s51",
+    "s52",
+    "s53",
+    "s54",
+    "s55",
+    "s56",
+    "s57",
+    "s58",
+    "s59",
+    "s60",
+    "s61",
+    "s62",
+    "s63",
+    "s64",
+};
+
 const Thread = struct{
     arena: *Arena = undefined,
     functions: PinnedArray(Function) = .{},
@@ -3840,10 +4152,13 @@ const Thread = struct{
     typed_pointer_types: PinnedArray(Type.TypedPointer) = .{},
     structs: PinnedArray(Type.Struct) = .{},
     anonymous_structs: PinnedArray(Type.AnonymousStruct) = .{},
+    polymorphic_structs: PinnedArray(Type.PolymorphicStruct) = .{},
     two_struct_map: PinnedHashMap([2]*Type, *Type) = .{},
     fields: PinnedArray(Type.AggregateField) = .{},
+    polymorphic_fields: PinnedArray(Type.PolymorphicField) = .{},
     bitfields: PinnedArray(Type.Bitfield) = .{},
     cloned_types: PinnedHashMap(*Type, *Type) = .{},
+    polymorphic_names: PinnedArray(Type.PolymorphicName) = .{},
     constant_strings: PinnedHashMap(u32, String) = .{},
     global_strings: PinnedHashMap(u32, String) = .{},
     string_buffer: PinnedArray(u8) = .{},
@@ -3893,7 +4208,7 @@ const Thread = struct{
         },
         .size = 0,
         .bit_size = 0,
-        .alignment = 0,
+        .alignment = 1,
     },
     noreturn: Type = .{
         .sema = .{
@@ -3903,7 +4218,7 @@ const Thread = struct{
         },
         .size = 0,
         .bit_size = 0,
-        .alignment = 0,
+        .alignment = 1,
     },
     opaque_pointer: Type = .{
         .sema = .{
@@ -8260,7 +8575,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                             var fields = PinnedArray(*Type.AggregateField){};
                             var total_bit_count: u64 = 0;
-                            while (parser.parse_field(thread, file)) |field_data| {
+                            while (parser.parse_field(thread, file, &file.scope.scope)) |field_data| {
                                 const field_bit_offset = total_bit_count;
                                 const field_bit_count = field_data.type.bit_size;
                                 if (field_bit_count == 0) {
@@ -9340,55 +9655,164 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     const struct_name = parser.parse_identifier(thread, src);
                     top_level_declaration_name = thread.identifiers.get(struct_name).?;
-                    const struct_type = thread.structs.append(.{
-                        .type = .{
-                            .sema = .{
-                                .id = .@"struct",
-                                .thread = thread.get_index(),
-                                .resolved = true,
-                            },
-                            .size = 0,
-                            .alignment = 1,
-                            .bit_size = 0,
-                        },
-                        .declaration = .{
-                            .name = struct_name,
-                            .id = .@"struct",
-                            .line = declaration_line,
-                            .column = declaration_column,
-                            .scope = &file.scope.scope,
-                        },
-                        .fields = &.{},
-                    });
-                    _ = file.scope.scope.declarations.put_no_clobber(struct_name, &struct_type.declaration);
 
                     parser.skip_space(src);
 
-                    parser.expect_character(src, brace_open);
+                    if (src[parser.i] == '[') {
+                        parser.i += 1;
 
-                    var fields = PinnedArray(*Type.AggregateField){};
-
-                    while (parser.parse_field(thread, file)) |field_data| {
-                        struct_type.type.alignment = @max(struct_type.type.alignment, field_data.type.alignment);
-                        const aligned_offset = library.align_forward(struct_type.type.size, field_data.type.alignment);
-                        const field = thread.fields.append(.{
-                            .type = field_data.type,
-                            .parent = &struct_type.type,
-                            .name = field_data.name,
-                            .index = fields.length,
-                            .line = field_data.line,
-                            .column = field_data.column,
-                            .member_offset = aligned_offset,
+                        const polymorphic_struct = thread.polymorphic_structs.append(.{
+                            .type = .{
+                                .sema = .{
+                                    .id = .polymorphic_struct,
+                                    .thread = thread.get_index(),
+                                    .resolved = false,
+                                },
+                                .size = 0,
+                                .bit_size = 0,
+                                .alignment = 1,
+                            },
+                            .declaration = .{
+                                .name = struct_name,
+                                .id = .polymorphic_struct,
+                                .line = declaration_line,
+                                .column = declaration_column,
+                                .scope = &file.scope.scope,
+                            },
+                            .parameters = &.{},
+                            .fields = &.{},
+                            .scope = .{
+                                .parent = &file.scope.scope,
+                                .line = declaration_line,
+                                .column = declaration_column,
+                                .file = file.get_index(),
+                                .id = .polymorphic_struct,
+                            },
                         });
-                        struct_type.type.size = aligned_offset + field.type.size;
-                        _ = fields.append(field);
+                        _ = file.scope.scope.declarations.put_no_clobber(struct_name, &polymorphic_struct.declaration);
+
+                        var struct_parameters = PinnedArray(*Type){};
+
+                        while (true) {
+                            parser.skip_space(src);
+
+                            if (src[parser.i] == ']') {
+                                break;
+                            }
+
+                            const line = parser.get_debug_line();
+                            const column = parser.get_debug_column();
+                            parser.i += 1;
+                            const name = parser.parse_identifier(thread, src);
+                            const polymorphic_name = thread.polymorphic_names.append(.{
+                                .type = .{
+                                    .sema = .{
+                                        .id = .polymorphic_name,
+                                        .thread = thread.get_index(),
+                                        .resolved = false,
+                                    },
+                                    .size = 0,
+                                    .bit_size = 0,
+                                    .alignment = 1,
+                                },
+                                .type_declaration = .{
+                                    .declaration = .{
+                                        .id = .type,
+                                        .name = name,
+                                        .line = line,
+                                        .column = column,
+                                        .scope = &polymorphic_struct.scope,
+                                    },
+                                    .parent = &polymorphic_struct.type,
+                                    .id = .polymorphic_name,
+                                },
+                                .index = struct_parameters.length,
+                            });
+
+                            switch (src[parser.i]) {
+                                ',' => parser.i += 1,
+                                ']' => {},
+                                else => fail(),
+                            }
+
+                            _ = struct_parameters.append(&polymorphic_name.type);
+                            _ = polymorphic_struct.scope.declarations.put_no_clobber(name, &polymorphic_name.type_declaration.declaration);
+                        }
+
+                        parser.i += 1;
+
+                        polymorphic_struct.parameters = struct_parameters.slice();
+
+                        parser.skip_space(src);
+
+                        parser.expect_character(src, brace_open);
+
+                        var fields = PinnedArray(*Type.PolymorphicField){};
+
+                        while (parser.parse_field(thread, file, &polymorphic_struct.scope)) |field_data| {
+                            const field = thread.polymorphic_fields.append(.{
+                                .type = field_data.type,
+                                .parent = &polymorphic_struct.type,
+                                .name = field_data.name,
+                                .index = fields.length,
+                                .line = field_data.line,
+                                .column = field_data.column,
+                            });
+                            _ = fields.append(field);
+                        }
+
+                        parser.i += 1;
+
+                        polymorphic_struct.fields = fields.const_slice();
+                    } else {
+                        const struct_type = thread.structs.append(.{
+                            .type = .{
+                                .sema = .{
+                                    .id = .@"struct",
+                                    .thread = thread.get_index(),
+                                    .resolved = true,
+                                },
+                                .size = 0,
+                                .alignment = 1,
+                                .bit_size = 0,
+                            },
+                            .declaration = .{
+                                .name = struct_name,
+                                .id = .@"struct",
+                                .line = declaration_line,
+                                .column = declaration_column,
+                                .scope = &file.scope.scope,
+                            },
+                            .fields = &.{},
+                        });
+                        _ = file.scope.scope.declarations.put_no_clobber(struct_name, &struct_type.declaration);
+
+                        parser.expect_character(src, brace_open);
+
+                        var fields = PinnedArray(*Type.AggregateField){};
+
+                        while (parser.parse_field(thread, file, &file.scope.scope)) |field_data| {
+                            struct_type.type.alignment = @max(struct_type.type.alignment, field_data.type.alignment);
+                            const aligned_offset = library.align_forward(struct_type.type.size, field_data.type.alignment);
+                            const field = thread.fields.append(.{
+                                .type = field_data.type,
+                                .parent = &struct_type.type,
+                                .name = field_data.name,
+                                .index = fields.length,
+                                .line = field_data.line,
+                                .column = field_data.column,
+                                .member_offset = aligned_offset,
+                            });
+                            struct_type.type.size = aligned_offset + field.type.size;
+                            _ = fields.append(field);
+                        }
+
+                        parser.i += 1;
+
+                        struct_type.type.size = library.align_forward(struct_type.type.size, struct_type.type.alignment);
+                        struct_type.type.bit_size = struct_type.type.size * 8;
+                        struct_type.fields = fields.const_slice();
                     }
-
-                    parser.i += 1;
-
-                    struct_type.type.size = library.align_forward(struct_type.type.size, struct_type.type.alignment);
-                    struct_type.type.bit_size = struct_type.type.size * 8;
-                    struct_type.fields = fields.const_slice();
                 } else {
                     fail();
                 }
