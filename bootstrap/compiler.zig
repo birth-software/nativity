@@ -241,12 +241,9 @@ const Parser = struct{
                 while (parser.i < file.len) : (parser.i += 1) {
                     const is_line_feed = file[parser.i] == '\n';
                     if (is_line_feed) {
-                        parser.line += 1;
                         break;
                     }
                 }
-
-                if (parser.i == file.len) break;
             }
         }
     }
@@ -257,6 +254,65 @@ const Parser = struct{
         line: u32,
         column: u32,
     };
+
+    fn parse_polymorphic_arguments(parser: *Parser, thread: *Thread, file: *File, scope: *Scope) []const *Type{
+        const src = file.source_code;
+
+        parser.expect_character(src, polymorphic_start_token);
+
+        var polymorphic_parameters = PinnedArray(*Type){};
+
+        while (true) {
+            parser.skip_space(src);
+
+            if (src[parser.i] == polymorphic_end_token) {
+                break;
+            }
+
+            const line = parser.get_debug_line();
+            const column = parser.get_debug_column();
+
+            parser.expect_character(src, '$');
+
+            const name = parser.parse_identifier(thread, src);
+            const polymorphic_name = thread.polymorphic_names.append(.{
+                .type = .{
+                    .sema = .{
+                        .id = .polymorphic_name,
+                        .thread = thread.get_index(),
+                        .resolved = false,
+                    },
+                    .size = 0,
+                    .bit_size = 0,
+                    .alignment = 1,
+                },
+                .type_declaration = .{
+                    .declaration = .{
+                        .id = .type,
+                        .name = name,
+                        .line = line,
+                        .column = column,
+                        .scope = scope,
+                    },
+                    .id = .polymorphic_name,
+                },
+                .index = polymorphic_parameters.length,
+            });
+
+            switch (src[parser.i]) {
+                ',' => parser.i += 1,
+                polymorphic_end_token => {},
+                else => fail(),
+            }
+
+            _ = polymorphic_parameters.append(&polymorphic_name.type);
+            _ = scope.declarations.put_no_clobber(name, &polymorphic_name.type_declaration.declaration);
+        }
+
+        parser.i += 1;
+
+        return polymorphic_parameters.slice();
+    }
 
     fn parse_field(parser: *Parser, thread: *Thread, file: *File, scope: *Scope) ?ParseFieldData{
         const src = file.source_code;
@@ -725,14 +781,14 @@ const Parser = struct{
                     const polymorphic_struct = declaration.get_payload(.polymorphic_struct);
                     parser.skip_space(src);
                     // Expect parameters for the struct (all polymorphic structs have polymorphic parameters)
-                    parser.expect_character(src, '[');
+                    parser.expect_character(src, polymorphic_start_token);
 
                     var instantiation_types = PinnedArray(*Type){};
 
                     while (true) {
                         parser.skip_space(src);
 
-                        if (src[parser.i] == ']') {
+                        if (src[parser.i] == polymorphic_end_token) {
                             break;
                         }
 
@@ -742,7 +798,7 @@ const Parser = struct{
 
                         switch (src[parser.i]) {
                             ',' => parser.i += 1,
-                            ']' => {},
+                            polymorphic_end_token => {},
                             else => fail(),
                         }
 
@@ -766,7 +822,7 @@ const Parser = struct{
 
                         var struct_name = PinnedArray(u8){};
                         _ = struct_name.append_slice(struct_polymorphic_name);
-                        _ = struct_name.append('[');
+                        _ = struct_name.append(polymorphic_start_token);
 
                         for (instantiation_types.slice()) |ty| {
                             _ = struct_name.append_slice(ty.get_name());
@@ -774,7 +830,7 @@ const Parser = struct{
                         }
 
                         struct_name.length -= 2;
-                        _ = struct_name.append(']');
+                        _ = struct_name.append(polymorphic_end_token);
 
                         const struct_name_hash = intern_identifier(&thread.identifiers, struct_name.slice());
 
@@ -3010,7 +3066,6 @@ const Type = struct {
     alignment: u32,
 
     const Id = enum(u8){
-        unresolved,
         void,
         noreturn,
         integer,
@@ -3118,7 +3173,6 @@ const Type = struct {
     };
 
     const id_to_type_map = std.EnumArray(Id, type).init(.{
-        .unresolved = void,
         .void = void,
         .noreturn = void,
         .integer = Integer,
@@ -3231,7 +3285,6 @@ const Type = struct {
 
     fn is_aggregate(ty: *Type) bool {
         return switch (ty.sema.id) {
-            .unresolved => unreachable,
             .array => unreachable,
             .function => unreachable,
             .void,
@@ -3394,6 +3447,7 @@ const Scope = struct {
         function,
         local,
         polymorphic_struct,
+        polymorphic_function,
     };
 };
 
@@ -3412,7 +3466,6 @@ const ArgumentDeclaration = struct {
 
 const TypeDeclaration = struct{
     declaration: Declaration,
-    parent: *Type,
     id: Id,
 
     const Id = enum{
@@ -3520,12 +3573,18 @@ const Declaration = struct {
     }
 };
 
+const PolymorphicFunction = struct{
+    declaration: GlobalDeclaration,
+    scope: Function.Scope,
+    polymorphic_parameters: []const *Type,
+};
+
 const Function = struct{
     declaration: Function.Declaration,
-    entry_block: *BasicBlock,
-    stack_slots: PinnedArray(*LocalSymbol) = .{},
     scope: Function.Scope,
-    arguments: PinnedArray(*ArgumentSymbol) = .{},
+    stack_slots: PinnedArray(*LocalSymbol) = .{},
+    arguments: []const *ArgumentSymbol,
+    entry_block: *BasicBlock,
 
     const Attributes = struct{
     };
@@ -4159,6 +4218,7 @@ const Thread = struct{
     bitfields: PinnedArray(Type.Bitfield) = .{},
     cloned_types: PinnedHashMap(*Type, *Type) = .{},
     polymorphic_names: PinnedArray(Type.PolymorphicName) = .{},
+    polymorphic_functions: PinnedArray(PolymorphicFunction) = .{},
     constant_strings: PinnedHashMap(u32, String) = .{},
     global_strings: PinnedHashMap(u32, String) = .{},
     string_buffer: PinnedArray(u8) = .{},
@@ -5278,6 +5338,8 @@ const brace_open = '{';
 const brace_close = '}';
 
 const pointer_token = '*';
+const polymorphic_start_token = '\'';
+const polymorphic_end_token = '\'';
 
 const cache_line_size = switch (builtin.os.tag) {
     .macos => 128,
@@ -5651,7 +5713,7 @@ fn worker_thread(thread_index: u32, cpu_count: *u32) void {
                                 var last_block = basic_block_node;
 
                                 if (emit_allocas) {
-                                    for (nat_function.arguments.slice(), nat_function.declaration.get_function_type().abi.argument_types_abi) |argument, abi| {
+                                    for (nat_function.arguments, nat_function.declaration.get_function_type().abi.argument_types_abi) |argument, abi| {
                                         _ = abi; // autofix
                                         switch (argument.instruction.id) {
                                             .argument_storage => {
@@ -8697,13 +8759,13 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                 fail();
                             }
 
-                            parser.skip_space(src);
+                               parser.skip_space(src);
 
-                            const after_ch = src[parser.i];
-                            switch (after_ch) {
-                                ']' => {},
-                                else => unreachable,
-                            }
+                               const after_ch = src[parser.i];
+                               switch (after_ch) {
+                                   ']' => {},
+                                   else => unreachable,
+                               }
                         }
 
                         parser.i += 1;
@@ -8782,176 +8844,167 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         function_declaration_data.global_symbol.attributes.@"export" = true;
                     }
 
-                    parser.expect_character(src, '(');
-
-                    const ArgumentData = struct{
-                        type: *Type,
-                        name: u32,
-                        line: u32,
-                        column: u32,
-                    };
-
-                    var original_arguments = PinnedArray(ArgumentData){};
-                    var original_argument_types = PinnedArray(*Type){};
-                    var fully_resolved = true;
-
-                    while (true) {
-                        parser.skip_space(src);
-
-                        if (src[parser.i] == ')') break;
-
-                        const argument_line = parser.get_debug_line();
-                        const argument_column = parser.get_debug_column();
-
-                        const argument_name = parser.parse_identifier(thread, src);
-
-                        parser.skip_space(src);
-                        
-                        parser.expect_character(src, ':');
-
-                        parser.skip_space(src);
-                        
-                        const argument_type = parser.parse_type_expression(thread, file, &file.scope.scope);
-                        fully_resolved = fully_resolved and argument_type.sema.resolved;
-                        _ = original_arguments.append(.{
-                            .type = argument_type,
-                            .name = argument_name,
-                            .line = argument_line,
-                            .column = argument_column,
+                    const has_polymorphic_parameters = src[parser.i] == polymorphic_start_token;
+                    if (has_polymorphic_parameters) {
+                       const polymorphic_function = thread.polymorphic_functions.append(.{
+                            .declaration = function_declaration_data.global_symbol.global_declaration,
+                            .scope = .{
+                                .scope = .{
+                                    .parent = &file.scope.scope,
+                                    .line = declaration_line + 1,
+                                    .column = declaration_column + 1,
+                                    .file = file.get_index(),
+                                    .id = .polymorphic_function,
+                                },
+                            },
+                            .polymorphic_parameters = &.{},
                         });
-                        _ = original_argument_types.append(argument_type);
+                        _ = file.scope.scope.declarations.put_no_clobber(polymorphic_function.declaration.declaration.name, &polymorphic_function.declaration.declaration);
+                        polymorphic_function.polymorphic_parameters = parser.parse_polymorphic_arguments(thread, file, &polymorphic_function.scope.scope);
+
+                        parser.skip_space(src);
+                        parser.expect_character(src, '(');
+                        while (true) {
+                            parser.skip_space(src);
+                            if (src[parser.i] == ')') {
+                                break;
+                            }
+
+                            _ = parser.parse_identifier(thread, src);
+                            parser.skip_space(src);
+                            parser.expect_character(src, ':');
+                            parser.skip_space(src);
+                            _ = parser.parse_type_expression(thread, file, &polymorphic_function.scope.scope);
+
+                            parser.skip_space(src);
+
+                            switch (src[parser.i]) {
+                                ',' => parser.i += 1,
+                                ')' => {},
+                                else => fail(),
+                            }
+                        }
+
+                        parser.i += 1;
 
                         parser.skip_space(src);
 
-                        switch (src[parser.i]) {
-                            ',' => parser.i += 1,
-                            ')' => {},
-                            else => fail(),
+                        _ = parser.parse_type_expression(thread, file, &polymorphic_function.scope.scope);
+
+                        parser.skip_space(src);
+
+                        parser.expect_character(src, brace_open);
+
+                        // var open_brace_count: usize = 1;
+                        // while (parser.i < src.len) {
+                        //     if (open_brace_count == 0) {
+                        //         break;
+                        //     }
+                        //     const is_open_brace = src[parser.i] == brace_open;
+                        //     const is_close_brace = src[parser.i] == brace_close;
+                        //     const is_comment = src[parser.i] == '/' and Parser.get_next_ch_safe(src, parser.i) == '/';
+                        //     const is_new_line = src[parser.i] == '\n';
+                        //     open_brace_count += @intFromBool(is_open_brace);
+                        //     open_brace_count -= @intFromBool(is_close_brace);
+                        //     if (is_comment) {
+                        //         while (src[parser.i] != '\n') {
+                        //             parser.i += 1;
+                        //         }
+                        //     } else if (is_new_line) {
+                        //     } else {
+                        //         parser.i += 1;
+                        //     }
+                        // }
+                        
+                        // parser.parse_polymorphic_arguments(thread, file, scope);
+                        unreachable;
+                    } else {
+                        parser.expect_character(src, '(');
+
+                        const ArgumentData = struct{
+                            type: *Type,
+                            name: u32,
+                            line: u32,
+                            column: u32,
+                        };
+
+                        var original_arguments = PinnedArray(ArgumentData){};
+                        var original_argument_types = PinnedArray(*Type){};
+                        var fully_resolved = true;
+
+                        while (true) {
+                            parser.skip_space(src);
+
+                            if (src[parser.i] == ')') break;
+
+                            const argument_line = parser.get_debug_line();
+                            const argument_column = parser.get_debug_column();
+
+                            const argument_name = parser.parse_identifier(thread, src);
+
+                            parser.skip_space(src);
+
+                            parser.expect_character(src, ':');
+
+                            parser.skip_space(src);
+
+                            const argument_type = parser.parse_type_expression(thread, file, &file.scope.scope);
+                            fully_resolved = fully_resolved and argument_type.sema.resolved;
+                            _ = original_arguments.append(.{
+                                .type = argument_type,
+                                .name = argument_name,
+                                .line = argument_line,
+                                .column = argument_column,
+                            });
+                            _ = original_argument_types.append(argument_type);
+
+                            parser.skip_space(src);
+
+                            switch (src[parser.i]) {
+                                ',' => parser.i += 1,
+                                ')' => {},
+                                else => fail(),
+                            }
                         }
-                    }
 
-                    parser.expect_character(src, ')');
+                        parser.expect_character(src, ')');
 
-                    parser.skip_space(src);
+                        parser.skip_space(src);
 
-                    const original_return_type = parser.parse_type_expression(thread, file, &file.scope.scope);
-                    fully_resolved = fully_resolved and original_return_type.sema.resolved;
+                        const original_return_type = parser.parse_type_expression(thread, file, &file.scope.scope);
+                        fully_resolved = fully_resolved and original_return_type.sema.resolved;
 
-                    const function_abi: Function.Abi = if (fully_resolved) switch (calling_convention) {
-                        .c => abi: {
-                            var argument_type_abis = PinnedArray(Function.Abi.Information){};
-                            const return_type_abi: Function.Abi.Information = switch (builtin.cpu.arch) {
-                                .x86_64 => block: {
-                                    switch (builtin.os.tag) {
-                                        .linux => {
-                                            const return_type_abi: Function.Abi.Information = rta: {
-                                                const type_classes = SystemV.classify(original_return_type, 0);
-                                                assert(type_classes[1] != .memory or type_classes[0] == .memory);
-                                                assert(type_classes[1] != .sseup or type_classes[0] == .sse);
-
-                                                const result_type = switch (type_classes[0]) {
-                                                    .no_class => switch (type_classes[1]) {
-                                                        .no_class => break :rta .{
-                                                            .kind = .ignore,
-                                                        },
-                                                        else => |t| @panic(@tagName(t)),
-                                                    },
-                                                    .integer => b: {
-                                                        const result_type = SystemV.get_int_type_at_offset(original_return_type, 0, original_return_type, 0);
-                                                        if (type_classes[1] == .no_class and original_return_type.bit_size < 32) {
-                                                            const signed = switch (original_return_type.sema.id) {
-                                                                .integer => @intFromEnum(original_return_type.get_payload(.integer).signedness) != 0,
-                                                                .bitfield => false,
-                                                                else => |t| @panic(@tagName(t)),
-                                                            };
-
-                                                            break :rta .{
-                                                                .kind = .{
-                                                                    .direct_coerce = original_return_type,
-                                                                },
-                                                                .attributes = .{
-                                                                    .sign_extend = signed,
-                                                                    .zero_extend = !signed,
-                                                                },
-                                                            };
-                                                        }
-                                                        break :b result_type;
-                                                    },
-                                                    .memory => break :rta SystemV.indirect_return(original_return_type),
-                                                    else => |t| @panic(@tagName(t)),
-                                                };
-                                                const high_part: ?*Type = switch (type_classes[1]) {
-                                                    .no_class, .memory => null,
-                                                    .integer => b: {
-                                                        assert(type_classes[0] != .no_class);
-                                                        const high_part = SystemV.get_int_type_at_offset(original_return_type, 8, original_return_type, 8);
-                                                        break :b high_part;
-                                                    },
-                                                    else => |t| @panic(@tagName(t)),
-                                                };
-
-                                                if (high_part) |hp| {
-                                                    break :rta SystemV.get_argument_pair(.{ result_type, hp });
-                                                } else {
-                                                    // TODO
-                                                    const is_type = true;
-                                                    if (is_type) {
-                                                        if (result_type == original_return_type) {
-                                                            break :rta Function.Abi.Information{
-                                                                .kind = .direct,
-                                                            };
-                                                        } else {
-                                                            break :rta Function.Abi.Information{
-                                                                .kind = .{
-                                                                    .direct_coerce = result_type,
-                                                                },
-                                                            };
-                                                        }
-                                                    } else {
-                                                        unreachable;
-                                                    }
-                                                }
-                                            };
-                                            var available_registers = SystemV.RegisterCount{
-                                                .gp_registers = 6,
-                                                .sse_registers = 8,
-                                            };
-
-                                            if (return_type_abi.kind == .indirect) {
-                                                available_registers.gp_registers -= 1;
-                                            }
-
-                                            const return_by_reference = false;
-                                            if (return_by_reference) {
-                                                unreachable;
-                                            }
-
-                                            for (original_argument_types.const_slice()) |original_argument_type| {
-                                                var needed_registers = SystemV.RegisterCount{
-                                                    .gp_registers = 0,
-                                                    .sse_registers = 0,
-                                                };
-                                                const argument_type_abi_classification: Function.Abi.Information = ata: {
-                                                    const type_classes = SystemV.classify(original_argument_type, 0);
+                        const function_abi: Function.Abi = if (fully_resolved) switch (calling_convention) {
+                            .c => abi: {
+                                var argument_type_abis = PinnedArray(Function.Abi.Information){};
+                                const return_type_abi: Function.Abi.Information = switch (builtin.cpu.arch) {
+                                    .x86_64 => block: {
+                                        switch (builtin.os.tag) {
+                                            .linux => {
+                                                const return_type_abi: Function.Abi.Information = rta: {
+                                                    const type_classes = SystemV.classify(original_return_type, 0);
                                                     assert(type_classes[1] != .memory or type_classes[0] == .memory);
                                                     assert(type_classes[1] != .sseup or type_classes[0] == .sse);
 
-                                                    _ = &needed_registers; // autofix
-
                                                     const result_type = switch (type_classes[0]) {
+                                                        .no_class => switch (type_classes[1]) {
+                                                            .no_class => break :rta .{
+                                                                .kind = .ignore,
+                                                            },
+                                                            else => |t| @panic(@tagName(t)),
+                                                        },
                                                         .integer => b: {
-                                                            needed_registers.gp_registers += 1;
-                                                            const result_type = SystemV.get_int_type_at_offset(original_argument_type, 0, original_argument_type, 0);
-                                                            if (type_classes[1] == .no_class and original_argument_type.bit_size < 32) {
-                                                                const signed = switch (original_argument_type.sema.id) {
-                                                                    .integer => @intFromEnum(original_argument_type.get_payload(.integer).signedness) != 0,
+                                                            const result_type = SystemV.get_int_type_at_offset(original_return_type, 0, original_return_type, 0);
+                                                            if (type_classes[1] == .no_class and original_return_type.bit_size < 32) {
+                                                                const signed = switch (original_return_type.sema.id) {
+                                                                    .integer => @intFromEnum(original_return_type.get_payload(.integer).signedness) != 0,
                                                                     .bitfield => false,
                                                                     else => |t| @panic(@tagName(t)),
                                                                 };
 
-                                                                break :ata .{
+                                                                break :rta .{
                                                                     .kind = .{
-                                                                        .direct_coerce = original_argument_type,
+                                                                        .direct_coerce = original_return_type,
                                                                     },
                                                                     .attributes = .{
                                                                         .sign_extend = signed,
@@ -8961,174 +9014,171 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                                             }
                                                             break :b result_type;
                                                         },
-                                                        .memory => break :ata SystemV.indirect_argument(original_argument_type, available_registers.gp_registers),
+                                                        .memory => break :rta SystemV.indirect_return(original_return_type),
                                                         else => |t| @panic(@tagName(t)),
                                                     };
                                                     const high_part: ?*Type = switch (type_classes[1]) {
                                                         .no_class, .memory => null,
                                                         .integer => b: {
                                                             assert(type_classes[0] != .no_class);
-                                                            needed_registers.gp_registers += 1;
-                                                            const high_part = SystemV.get_int_type_at_offset(original_argument_type, 8, original_argument_type, 8);
+                                                            const high_part = SystemV.get_int_type_at_offset(original_return_type, 8, original_return_type, 8);
                                                             break :b high_part;
                                                         },
                                                         else => |t| @panic(@tagName(t)),
                                                     };
 
                                                     if (high_part) |hp| {
-                                                        break :ata SystemV.get_argument_pair(.{ result_type, hp });
+                                                        break :rta SystemV.get_argument_pair(.{ result_type, hp });
                                                     } else {
                                                         // TODO
                                                         const is_type = true;
                                                         if (is_type) {
-                                                            if (result_type == original_argument_type) {
-                                                                break :ata Function.Abi.Information{
+                                                            if (result_type == original_return_type) {
+                                                                break :rta Function.Abi.Information{
                                                                     .kind = .direct,
                                                                 };
-                                                            } else if (result_type.sema.id == .integer and original_argument_type.sema.id == .integer and original_argument_type.size == result_type.size) {
-                                                                unreachable;
                                                             } else {
-                                                                break :ata Function.Abi.Information{
+                                                                break :rta Function.Abi.Information{
                                                                     .kind = .{
                                                                         .direct_coerce = result_type,
                                                                     },
                                                                 };
                                                             }
+                                                        } else {
+                                                            unreachable;
                                                         }
-                                                        unreachable;
                                                     }
                                                 };
-                                                const argument_type_abi = if (available_registers.sse_registers < needed_registers.sse_registers or available_registers.gp_registers < needed_registers.gp_registers) b: {
-                                                    break :b SystemV.indirect_argument(original_argument_type, available_registers.gp_registers);
-                                                } else b: {
-                                                    available_registers.gp_registers -= needed_registers.gp_registers;
-                                                    available_registers.sse_registers -= needed_registers.sse_registers;
-                                                    break :b argument_type_abi_classification;
+                                                var available_registers = SystemV.RegisterCount{
+                                                    .gp_registers = 6,
+                                                    .sse_registers = 8,
                                                 };
 
-                                                _ = argument_type_abis.append(argument_type_abi);
-                                            }
+                                                if (return_type_abi.kind == .indirect) {
+                                                    available_registers.gp_registers -= 1;
+                                                }
 
-                                            break :block return_type_abi;
-                                        },
-                                        else => |t| @panic(@tagName(t)),
-                                    }
-                                },
-                                .aarch64 => block: {
-                                    const return_type_abi: Function.Abi.Information = blk: {
-                                        if (original_return_type.returns_nothing()) {
-                                            break :blk .{
-                                                .kind = .ignore,
-                                            };
-                                        }
-
-                                        const size = original_return_type.size;
-                                        const alignment = original_return_type.alignment;
-
-                                        const is_vector = false;
-                                        if (is_vector and size > 16) {
-                                            unreachable;
-                                        }
-
-                                        if (!original_return_type.is_aggregate()) {
-                                            const extend = builtin.os.tag.isDarwin() and switch (original_return_type.sema.id) {
-                                                .integer => original_return_type.bit_size < 32,
-                                                .bitfield => original_return_type.bit_size < 32,
-                                                else => |t| @panic(@tagName(t)),
-                                            };
-
-                                            if (extend) {
-                                                const signed = switch (original_return_type.sema.id) {
-                                                    else => |t| @panic(@tagName(t)),
-                                                    .bitfield => @intFromEnum(original_return_type.get_payload(.bitfield).backing_type.get_payload(.integer).signedness) != 0,
-                                                    .integer => @intFromEnum(original_return_type.get_payload(.integer).signedness) != 0,
-                                                    .typed_pointer => false,
-                                                };
-
-                                                break :blk Function.Abi.Information{
-                                                    .kind = .direct,
-                                                    .attributes = .{
-                                                        .zero_extend = !signed,
-                                                        .sign_extend = signed,
-                                                    },
-                                                };
-                                            } else break :blk .{
-                                                .kind = .direct,
-                                            };
-                                        } else {
-                                            assert(size > 0);
-                                            const is_variadic = false;
-                                            const is_aarch64_32 = false;
-                                            const maybe_homogeneous_aggregate = original_return_type.get_homogeneous_aggregate();
-                                            if (maybe_homogeneous_aggregate != null and !(is_aarch64_32 and is_variadic)) {
-                                                unreachable;
-                                            } else if (size <= 16) {
-                                                if (size <= 8 and builtin.cpu.arch.endian() == .little) {
-                                                    break :blk .{
-                                                        .kind = .{
-                                                            .direct_coerce = &thread.integers[size * 8 - 1].type,
-                                                        },
-                                                    };
-                                                } else {
-                                                    const aligned_size = library.align_forward(size, 8);
-                                                    if (alignment < 16 and aligned_size == 16) {
-                                                        break :blk .{
-                                                            .kind = .{
-                                                                .direct_coerce = get_array_type(thread, .{
-                                                                    .element_type = &thread.integers[63].type,
-                                                                    .element_count = 2,
-                                                                }),
-                                                            },
-                                                        };
-                                                    } else {
-                                                        unreachable;
-                                                    }
+                                                const return_by_reference = false;
+                                                if (return_by_reference) {
                                                     unreachable;
                                                 }
-                                            } else {
-                                                assert(alignment > 0);
-                                                break :blk .{
-                                                    .kind = .{
-                                                        .indirect = .{
-                                                            .type = original_return_type,
-                                                            .alignment = alignment,
-                                                        },
-                                                    },
-                                                    .attributes = .{
-                                                        .by_value = true,
-                                                    },
-                                                };
-                                            }
-                                        }
-                                    };
 
-                                    for (original_argument_types.const_slice()) |argument_type| {
-                                        const argument_type_abi: Function.Abi.Information = blk: {
-                                            if (argument_type.returns_nothing()) {
+                                                for (original_argument_types.const_slice()) |original_argument_type| {
+                                                    var needed_registers = SystemV.RegisterCount{
+                                                        .gp_registers = 0,
+                                                        .sse_registers = 0,
+                                                    };
+                                                    const argument_type_abi_classification: Function.Abi.Information = ata: {
+                                                        const type_classes = SystemV.classify(original_argument_type, 0);
+                                                        assert(type_classes[1] != .memory or type_classes[0] == .memory);
+                                                        assert(type_classes[1] != .sseup or type_classes[0] == .sse);
+
+                                                        _ = &needed_registers; // autofix
+
+                                                        const result_type = switch (type_classes[0]) {
+                                                            .integer => b: {
+                                                                needed_registers.gp_registers += 1;
+                                                                const result_type = SystemV.get_int_type_at_offset(original_argument_type, 0, original_argument_type, 0);
+                                                                if (type_classes[1] == .no_class and original_argument_type.bit_size < 32) {
+                                                                    const signed = switch (original_argument_type.sema.id) {
+                                                                        .integer => @intFromEnum(original_argument_type.get_payload(.integer).signedness) != 0,
+                                                                        .bitfield => false,
+                                                                        else => |t| @panic(@tagName(t)),
+                                                                    };
+
+                                                                    break :ata .{
+                                                                        .kind = .{
+                                                                            .direct_coerce = original_argument_type,
+                                                                        },
+                                                                        .attributes = .{
+                                                                            .sign_extend = signed,
+                                                                            .zero_extend = !signed,
+                                                                        },
+                                                                    };
+                                                                }
+                                                                break :b result_type;
+                                                            },
+                                                            .memory => break :ata SystemV.indirect_argument(original_argument_type, available_registers.gp_registers),
+                                                            else => |t| @panic(@tagName(t)),
+                                                        };
+                                                        const high_part: ?*Type = switch (type_classes[1]) {
+                                                            .no_class, .memory => null,
+                                                            .integer => b: {
+                                                                assert(type_classes[0] != .no_class);
+                                                                needed_registers.gp_registers += 1;
+                                                                const high_part = SystemV.get_int_type_at_offset(original_argument_type, 8, original_argument_type, 8);
+                                                                break :b high_part;
+                                                            },
+                                                            else => |t| @panic(@tagName(t)),
+                                                        };
+
+                                                        if (high_part) |hp| {
+                                                            break :ata SystemV.get_argument_pair(.{ result_type, hp });
+                                                        } else {
+                                                            // TODO
+                                                            const is_type = true;
+                                                            if (is_type) {
+                                                                if (result_type == original_argument_type) {
+                                                                    break :ata Function.Abi.Information{
+                                                                        .kind = .direct,
+                                                                    };
+                                                                } else if (result_type.sema.id == .integer and original_argument_type.sema.id == .integer and original_argument_type.size == result_type.size) {
+                                                                    unreachable;
+                                                                } else {
+                                                                    break :ata Function.Abi.Information{
+                                                                        .kind = .{
+                                                                            .direct_coerce = result_type,
+                                                                        },
+                                                                    };
+                                                                }
+                                                            }
+                                                            unreachable;
+                                                        }
+                                                    };
+                                                    const argument_type_abi = if (available_registers.sse_registers < needed_registers.sse_registers or available_registers.gp_registers < needed_registers.gp_registers) b: {
+                                                        break :b SystemV.indirect_argument(original_argument_type, available_registers.gp_registers);
+                                                    } else b: {
+                                                        available_registers.gp_registers -= needed_registers.gp_registers;
+                                                        available_registers.sse_registers -= needed_registers.sse_registers;
+                                                        break :b argument_type_abi_classification;
+                                                    };
+
+                                                    _ = argument_type_abis.append(argument_type_abi);
+                                                }
+
+                                                break :block return_type_abi;
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        }
+                                    },
+                                    .aarch64 => block: {
+                                        const return_type_abi: Function.Abi.Information = blk: {
+                                            if (original_return_type.returns_nothing()) {
                                                 break :blk .{
                                                     .kind = .ignore,
                                                 };
                                             }
 
-                                            // TODO:
-                                            const is_illegal_vector = false;
-                                            if (is_illegal_vector) {
+                                            const size = original_return_type.size;
+                                            const alignment = original_return_type.alignment;
+
+                                            const is_vector = false;
+                                            if (is_vector and size > 16) {
                                                 unreachable;
                                             }
 
-                                            if (!argument_type.is_aggregate()) {
-                                                const extend = builtin.os.tag.isDarwin() and switch (argument_type.sema.id) {
+                                            if (!original_return_type.is_aggregate()) {
+                                                const extend = builtin.os.tag.isDarwin() and switch (original_return_type.sema.id) {
+                                                    .integer => original_return_type.bit_size < 32,
+                                                    .bitfield => original_return_type.bit_size < 32,
                                                     else => |t| @panic(@tagName(t)),
-                                                    .bitfield => argument_type.bit_size < 32,
-                                                    .integer => argument_type.bit_size < 32,
-                                                    .typed_pointer => false,
                                                 };
 
                                                 if (extend) {
-                                                    const signed = switch (argument_type.sema.id) {
+                                                    const signed = switch (original_return_type.sema.id) {
                                                         else => |t| @panic(@tagName(t)),
-                                                        .bitfield => @intFromEnum(argument_type.get_payload(.bitfield).backing_type.get_payload(.integer).signedness) != 0,
-                                                        .integer => @intFromEnum(argument_type.get_payload(.integer).signedness) != 0,
+                                                        .bitfield => @intFromEnum(original_return_type.get_payload(.bitfield).backing_type.get_payload(.integer).signedness) != 0,
+                                                        .integer => @intFromEnum(original_return_type.get_payload(.integer).signedness) != 0,
                                                         .typed_pointer => false,
                                                     };
 
@@ -9143,443 +9193,538 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                                                     .kind = .direct,
                                                 };
                                             } else {
-                                                assert(argument_type.size > 0);
-
-                                                if (argument_type.get_homogeneous_aggregate()) |homogeneous_aggregate| {
-                                                    _ = homogeneous_aggregate; // autofix
+                                                assert(size > 0);
+                                                const is_variadic = false;
+                                                const is_aarch64_32 = false;
+                                                const maybe_homogeneous_aggregate = original_return_type.get_homogeneous_aggregate();
+                                                if (maybe_homogeneous_aggregate != null and !(is_aarch64_32 and is_variadic)) {
                                                     unreachable;
-                                                } else if (argument_type.size <= 16) {
-                                                    const base_alignment = argument_type.alignment;
-                                                    const is_aapcs = false;
-                                                    const alignment = switch (is_aapcs) {
-                                                        true => if (base_alignment < 16) 8 else 16,
-                                                        false => @max(base_alignment, 8),
-                                                    };
-                                                    assert(alignment == 8 or alignment == 16);
-                                                    const aligned_size = library.align_forward(argument_type.size, alignment);
-                                                    if (alignment == 16) {
-                                                        unreachable;
+                                                } else if (size <= 16) {
+                                                    if (size <= 8 and builtin.cpu.arch.endian() == .little) {
+                                                        break :blk .{
+                                                            .kind = .{
+                                                                .direct_coerce = &thread.integers[size * 8 - 1].type,
+                                                            },
+                                                        };
                                                     } else {
-                                                        const element_count = @divExact(aligned_size, alignment);
-                                                        if (element_count > 1) {
+                                                        const aligned_size = library.align_forward(size, 8);
+                                                        if (alignment < 16 and aligned_size == 16) {
                                                             break :blk .{
                                                                 .kind = .{
                                                                     .direct_coerce = get_array_type(thread, .{
                                                                         .element_type = &thread.integers[63].type,
-                                                                        .element_count = element_count,
+                                                                        .element_count = 2,
                                                                     }),
-                                                                }
+                                                                },
                                                             };
-                                                        } else break :blk .{
-                                                            .kind = .{
-                                                                .direct_coerce = &thread.integers[63].type,
-                                                            },
-                                                        };
+                                                        } else {
+                                                            unreachable;
+                                                        }
+                                                        unreachable;
                                                     }
                                                 } else {
-                                                    const alignment = argument_type.alignment;
                                                     assert(alignment > 0);
-
                                                     break :blk .{
                                                         .kind = .{
                                                             .indirect = .{
-                                                                .type = argument_type,
+                                                                .type = original_return_type,
                                                                 .alignment = alignment,
                                                             },
+                                                            },
+                                                        .attributes = .{
+                                                            .by_value = true,
                                                         },
                                                     };
                                                 }
                                             }
                                         };
-                                        _ = argument_type_abis.append(argument_type_abi);
-                                    }
 
-                                    break :block return_type_abi;
-                                },
-                                else => fail_message("ABI not supported"),
-                            };
-
-                            var abi_argument_types = PinnedArray(*Type){};
-                            const abi_return_type = switch (return_type_abi.kind) {
-                                .ignore, .direct => original_return_type,
-                                .direct_coerce => |coerced_type| coerced_type,
-                                .indirect => |indirect| b: {
-                                    _ = abi_argument_types.append(get_typed_pointer(thread, .{
-                                        .pointee = indirect.type,
-                                    }));
-                                    break :b &thread.void;
-                                },
-                                .direct_pair => |pair| get_anonymous_two_field_struct(thread, pair),
-                                else => |t| @panic(@tagName(t)),
-                            };
-
-                            for (argument_type_abis.slice(), original_argument_types.const_slice()) |*argument_abi, original_argument_type| {
-                                const start: u16 = @intCast(abi_argument_types.length);
-                                switch (argument_abi.kind) {
-                                    .direct => _ = abi_argument_types.append(original_argument_type),
-                                    .direct_coerce => |coerced_type| _ = abi_argument_types.append(coerced_type),
-                                    .direct_pair => |pair| {
-                                        _ = abi_argument_types.append(pair[0]);
-                                        _ = abi_argument_types.append(pair[1]);
-                                    },
-                                    .indirect => |indirect| _ = abi_argument_types.append(get_typed_pointer(thread, .{
-                                        .pointee = indirect.type,
-                                    })),
-                                    else => |t| @panic(@tagName(t)),
-                                }
-
-                                const end: u16 = @intCast(abi_argument_types.length);
-                                argument_abi.indices = .{start, end};
-                            }
-
-                            break :abi Function.Abi{
-                                .original_return_type = original_return_type,
-                                .original_argument_types = original_argument_types.const_slice(),
-                                .abi_return_type = abi_return_type,
-                                .abi_argument_types = abi_argument_types.const_slice(),
-                                .return_type_abi = return_type_abi,
-                                .argument_types_abi = argument_type_abis.const_slice(),
-                                .calling_convention = calling_convention,
-                            };
-                        },
-                        .custom => custom: {
-                            break :custom Function.Abi{
-                                .original_return_type = original_return_type,
-                                .original_argument_types = original_argument_types.const_slice(),
-                                .abi_return_type = original_return_type,
-                                .abi_argument_types = original_argument_types.const_slice(),
-                                .return_type_abi = .{
-                                    .kind = .direct,
-                                },
-                                .argument_types_abi = blk: {
-                                    var argument_abis = PinnedArray(Function.Abi.Information){};
-                                    for (0..original_argument_types.length) |i| {
-                                        _ = argument_abis.append(.{
-                                            .indices = .{@intCast(i), @intCast(i + 1) },
-                                            .kind = .direct,
-                                        });
-                                    }
-
-                                    break :blk argument_abis.const_slice();
-                                },
-                                .calling_convention = calling_convention,
-                            };
-                        },
-                        } else {
-                            unreachable;
-                    };
-
-                    const function_type = thread.function_types.append(.{
-                        .type = .{
-                            .sema = .{
-                                .id = .function,
-                                .resolved = true,
-                                .thread = thread.get_index(),
-                            },
-                            .size = 0,
-                            .alignment = 0,
-                            .bit_size = 0,
-                        },
-                        .abi = function_abi,
-                    });
-
-                    function_declaration_data.global_symbol.type = &function_type.type;
-                    function_declaration_data.global_symbol.pointer_type = get_typed_pointer(thread, .{
-                        .pointee = function_declaration_data.global_symbol.type,
-                    });
-
-                    parser.skip_space(src);
-
-                    switch (src[parser.i]) {
-                        brace_open => {
-                            if (function_declaration_data.global_symbol.attributes.@"extern") {
-                                fail();
-                            }
-                            
-
-                            const function = thread.functions.add_one();
-                            const entry_block = create_basic_block(thread);
-                            function.* = .{
-                                .declaration = function_declaration_data,
-                                .scope = .{
-                                    .scope = .{
-                                        .id = .function,
-                                        .parent = &file.scope.scope,
-                                        .line = declaration_line + 1,
-                                        .column = declaration_column + 1,
-                                        .file = file_index,
-                                    },
-                                },
-                                .entry_block = entry_block,
-                            };
-                            _ = file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
-                            var analyzer = Analyzer{
-                                .current_function = function,
-                                .current_basic_block = entry_block,
-                                .current_scope = &function.scope.scope,
-                            };
-                            analyzer.current_scope = &analyzer.current_function.scope.scope;
-
-                            switch (function_type.abi.return_type_abi.kind) {
-                                .indirect => |indirect| {
-                                    _ = indirect; // autofix
-                                    const abi_argument = thread.abi_arguments.append(.{
-                                        .instruction = new_instruction(thread, .{
-                                            .scope = analyzer.current_scope,
-                                            .line = 0,
-                                            .column = 0,
-                                            .id = .abi_argument,
-                                        }),
-                                        .index = 0,
-                                    });
-
-                                    analyzer.append_instruction(&abi_argument.instruction);
-                                    analyzer.return_pointer = &abi_argument.instruction;
-                                },
-                                else => {},
-                            }
-
-                            if (original_arguments.length > 0) {
-                                // var runtime_parameter_count: u64 = 0;
-                                for (original_arguments.const_slice(), function_abi.argument_types_abi, 0..) |argument, argument_abi, argument_index| {
-                                    if (analyzer.current_scope.declarations.get(argument.name) != null)  {
-                                        fail_message("A declaration already exists with such name");
-                                    }
-
-                                    var argument_abi_instructions = std.BoundedArray(*Instruction, 12){};
-
-                                    const argument_abi_count = argument_abi.indices[1] - argument_abi.indices[0];
-                                    const argument_symbol = if (argument_abi.kind == .indirect) blk: {
-                                        assert(argument_abi_count == 1);
-                                        const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
-                                            .type = argument.type,
-                                            .name = argument.name,
-                                            .line = argument.line,
-                                            .column = argument.column,
-                                            .index = @intCast(argument_index),
-                                            .indirect_argument = argument_abi.indices[0],
-                                        });
-                                        argument_symbol.instruction.id = .abi_indirect_argument;
-                                        break :blk argument_symbol;
-                                    } else blk: {
-                                        for (0..argument_abi_count) |abi_argument_index| {
-                                            const abi_argument = thread.abi_arguments.append(.{
-                                                .instruction = new_instruction(thread, .{
-                                                    .scope = analyzer.current_scope,
-                                                    .line = 0,
-                                                    .column = 0,
-                                                    .id = .abi_argument,
-                                                }),
-                                                .index = @intCast(abi_argument_index + argument_abi.indices[0]),
-                                            });
-                                            analyzer.append_instruction(&abi_argument.instruction);
-                                            argument_abi_instructions.appendAssumeCapacity(&abi_argument.instruction);
-                                        }
-                                        const LowerKind = union(enum) {
-                                            direct,
-                                            direct_pair: [2]*Type,
-                                            direct_coerce: *Type,
-                                            indirect,
-                                        };
-                                        const lower_kind: LowerKind = switch (argument_abi.kind) {
-                                            .direct => .direct,
-                                            .direct_coerce => |coerced_type| if (argument.type == coerced_type) .direct else .{ .direct_coerce = coerced_type },
-                                            .direct_pair => |pair| .{ .direct_pair = pair },
-                                            .indirect => .indirect,
-                                            else => |t| @panic(@tagName(t)),
-                                        };
-
-                                        const argument_symbol = switch (lower_kind) {
-                                            .indirect => unreachable,
-                                            .direct => block: {
-                                                assert(argument_abi_count == 1);
-                                                const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
-                                                    .type = argument.type,
-                                                    .name = argument.name,
-                                                    .line = argument.line,
-                                                    .column = argument.column,
-                                                    .index = @intCast(argument_index),
-                                                });
-                                                _ = emit_store(&analyzer, thread, .{
-                                                    .destination = &argument_symbol.instruction.value,
-                                                    .source = &argument_abi_instructions.slice()[0].value,
-                                                    .alignment = argument.type.alignment,
-                                                    .line = 0,
-                                                    .column = 0,
-                                                    .scope = analyzer.current_scope,
-                                                });
-                                                break :block argument_symbol;
-                                            },
-                                            .direct_coerce => |coerced_type| block: {
-                                                assert(coerced_type != argument.type);
-                                                assert(argument_abi_count == 1);
-                                                const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
-                                                    .type = argument.type,
-                                                    .name = argument.name,
-                                                    .line = argument.line,
-                                                    .column = argument.column,
-                                                    .index = @intCast(argument_index),
-                                                });
-
-                                                switch (argument.type.sema.id) {
-                                                    .@"struct" => {
-                                                        // TODO:
-                                                        const is_vector = false;
-
-                                                        if (coerced_type.size <= argument.type.size and !is_vector) {
-                                                            _ = emit_store(&analyzer, thread, .{
-                                                                .destination = &argument_symbol.instruction.value,
-                                                                .source = &argument_abi_instructions.slice()[0].value,
-                                                                .alignment = coerced_type.alignment,
-                                                                .line = 0,
-                                                                .column = 0,
-                                                                .scope = analyzer.current_scope,
-                                                            });
-                                                        }  else {
-                                                            const temporal = emit_local_symbol(&analyzer, thread, .{
-                                                                .name = 0,
-                                                                .initial_value = &argument_abi_instructions.slice()[0].value,
-                                                                .type = coerced_type,
-                                                                .line = 0,
-                                                                .column = 0,
-                                                            });
-                                                            emit_memcpy(&analyzer, thread, .{
-                                                                .destination = &argument_symbol.instruction.value,
-                                                                .source = &temporal.instruction.value,
-                                                                .destination_alignment = .{
-                                                                    .type = argument_symbol.type,
-                                                                },
-                                                                .source_alignment = .{
-                                                                    .type = temporal.type,
-                                                                },
-                                                                .size = argument.type.size,
-                                                                .line = 0,
-                                                                .column = 0,
-                                                                .scope = analyzer.current_scope,
-                                                            });
-                                                        }
-
-                                                        break :block argument_symbol;
-                                                    },
-                                                    else => |t| @panic(@tagName(t)),
+                                        for (original_argument_types.const_slice()) |argument_type| {
+                                            const argument_type_abi: Function.Abi.Information = blk: {
+                                                if (argument_type.returns_nothing()) {
+                                                    break :blk .{
+                                                        .kind = .ignore,
+                                                    };
                                                 }
-                                                unreachable;
-                                            },
-                                            .direct_pair => |pair| b: {
-                                                assert(argument_abi_count == 2);
-                                                assert(argument_abi_instructions.len == 2);
-                                                assert(pair[0].sema.id == .integer);
-                                                assert(pair[1].sema.id == .integer);
-                                                const alignments = [2]u32{ pair[0].alignment, pair[1].alignment };
-                                                const sizes = [2]u64{ pair[0].size, pair[1].size };
-                                                const alignment = @max(alignments[0], alignments[1]);
-                                                _ = alignment; // autofix
-                                                const high_aligned_size: u32 = @intCast(library.align_forward(sizes[1], alignments[1]));
-                                                _ = high_aligned_size; // autofix
-                                                const high_offset: u32 = @intCast(library.align_forward(sizes[0], alignments[1]));
-                                                assert(high_offset + sizes[1] <= argument.type.size);
-                                                const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
-                                                    .type = argument.type,
-                                                    .name = argument.name,
-                                                    .line = argument.line,
-                                                    .column = argument.column,
-                                                    .index = @intCast(argument_index),
-                                                });
 
-                                                _ = emit_store(&analyzer, thread, .{
-                                                    .destination = &argument_symbol.instruction.value,
-                                                    .source = &argument_abi_instructions.slice()[0].value,
-                                                    .alignment = pair[0].alignment,
-                                                    .line = 0,
-                                                    .column = 0,
-                                                    .scope = analyzer.current_scope,
-                                                });
+                                                // TODO:
+                                                const is_illegal_vector = false;
+                                                if (is_illegal_vector) {
+                                                    unreachable;
+                                                }
 
-                                                const gep = emit_gep(thread, &analyzer, .{
-                                                    .pointer = &argument_symbol.instruction.value,
-                                                    .type = pair[1],
-                                                    .aggregate_type = pair[0],
-                                                    .index = &create_constant_int(thread, .{
-                                                        .n = 1,
-                                                        .type = &thread.integers[31].type,
-                                                    }).value,
-                                                    .is_struct = false,
-                                                    .line = 0,
-                                                    .column = 0,
-                                                    .scope = analyzer.current_scope,
-                                                });
+                                                if (!argument_type.is_aggregate()) {
+                                                    const extend = builtin.os.tag.isDarwin() and switch (argument_type.sema.id) {
+                                                        else => |t| @panic(@tagName(t)),
+                                                        .bitfield => argument_type.bit_size < 32,
+                                                        .integer => argument_type.bit_size < 32,
+                                                        .typed_pointer => false,
+                                                    };
 
-                                                _ = emit_store(&analyzer, thread, .{
-                                                    .destination = &gep.instruction.value,
-                                                    .source = &argument_abi_instructions.slice()[1].value,
-                                                    .alignment = pair[1].alignment,
-                                                    .line = 0,
-                                                    .column = 0,
-                                                    .scope = analyzer.current_scope,
-                                                });
-                                                break :b argument_symbol;
-                                            },
-                                        };
+                                                    if (extend) {
+                                                        const signed = switch (argument_type.sema.id) {
+                                                            else => |t| @panic(@tagName(t)),
+                                                            .bitfield => @intFromEnum(argument_type.get_payload(.bitfield).backing_type.get_payload(.integer).signedness) != 0,
+                                                            .integer => @intFromEnum(argument_type.get_payload(.integer).signedness) != 0,
+                                                            .typed_pointer => false,
+                                                        };
 
-                                        break :blk argument_symbol;
-                                    };
+                                                        break :blk Function.Abi.Information{
+                                                            .kind = .direct,
+                                                            .attributes = .{
+                                                                .zero_extend = !signed,
+                                                                .sign_extend = signed,
+                                                            },
+                                                        };
+                                                    } else break :blk .{
+                                                        .kind = .direct,
+                                                    };
+                                                } else {
+                                                    assert(argument_type.size > 0);
 
-                                    if (argument.name != 0) {
-                                        _ = analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
-                                        if (thread.generate_debug_information) {
-                                            emit_debug_argument(&analyzer, thread, .{
-                                                .argument_symbol = argument_symbol,
-                                            });
+                                                    if (argument_type.get_homogeneous_aggregate()) |homogeneous_aggregate| {
+                                                        _ = homogeneous_aggregate; // autofix
+                                                        unreachable;
+                                                    } else if (argument_type.size <= 16) {
+                                                        const base_alignment = argument_type.alignment;
+                                                        const is_aapcs = false;
+                                                        const alignment = switch (is_aapcs) {
+                                                            true => if (base_alignment < 16) 8 else 16,
+                                                            false => @max(base_alignment, 8),
+                                                        };
+                                                        assert(alignment == 8 or alignment == 16);
+                                                        const aligned_size = library.align_forward(argument_type.size, alignment);
+                                                        if (alignment == 16) {
+                                                            unreachable;
+                                                        } else {
+                                                            const element_count = @divExact(aligned_size, alignment);
+                                                            if (element_count > 1) {
+                                                                break :blk .{
+                                                                    .kind = .{
+                                                                        .direct_coerce = get_array_type(thread, .{
+                                                                            .element_type = &thread.integers[63].type,
+                                                                            .element_count = element_count,
+                                                                        }),
+                                                                    }
+                                                                };
+                                                            } else break :blk .{
+                                                                .kind = .{
+                                                                    .direct_coerce = &thread.integers[63].type,
+                                                                },
+                                                            };
+                                                        }
+                                                    } else {
+                                                        const alignment = argument_type.alignment;
+                                                        assert(alignment > 0);
+
+                                                        break :blk .{
+                                                            .kind = .{
+                                                                .indirect = .{
+                                                                    .type = argument_type,
+                                                                    .alignment = alignment,
+                                                                },
+                                                                },
+                                                            };
+                                                    }
+                                                }
+                                            };
+                                            _ = argument_type_abis.append(argument_type_abi);
                                         }
-                                    }
-                                }
-                            }
-                            
-                            const result = analyze_local_block(thread, &analyzer, &parser, file);
-                            _ = result;
 
-                            const current_basic_block = analyzer.current_basic_block;
-                            if (analyzer.return_phi) |return_phi| {
-                                analyzer.current_basic_block = analyzer.return_block.?;
-                                analyzer.append_instruction(&return_phi.instruction);
-                                emit_return(thread, &analyzer, .{
-                                    .return_value = &return_phi.instruction.value,
-                                    .line = parser.get_debug_line(),
-                                    .column = parser.get_debug_column(),
-                                    .scope = analyzer.current_scope,
-                                });
-                                analyzer.current_basic_block = current_basic_block;
-                            }
-                            
-                            if (!current_basic_block.is_terminated and (current_basic_block.instructions.length > 0 or current_basic_block.predecessors.length > 0)) {
-                                if (analyzer.return_block == null) {
-                                    switch (original_return_type.sema.id) {
-                                        .void => {
-                                            emit_ret_void(thread, &analyzer, .{
-                                                .line = parser.get_debug_line(),
-                                                .column = parser.get_debug_column(),
-                                                .scope = analyzer.current_scope,
-                                            });
+                                        break :block return_type_abi;
+                                    },
+                                    else => fail_message("ABI not supported"),
+                                };
+
+                                var abi_argument_types = PinnedArray(*Type){};
+                                const abi_return_type = switch (return_type_abi.kind) {
+                                    .ignore, .direct => original_return_type,
+                                    .direct_coerce => |coerced_type| coerced_type,
+                                    .indirect => |indirect| b: {
+                                        _ = abi_argument_types.append(get_typed_pointer(thread, .{
+                                            .pointee = indirect.type,
+                                        }));
+                                        break :b &thread.void;
+                                    },
+                                    .direct_pair => |pair| get_anonymous_two_field_struct(thread, pair),
+                                    else => |t| @panic(@tagName(t)),
+                                };
+
+                                for (argument_type_abis.slice(), original_argument_types.const_slice()) |*argument_abi, original_argument_type| {
+                                    const start: u16 = @intCast(abi_argument_types.length);
+                                    switch (argument_abi.kind) {
+                                        .direct => _ = abi_argument_types.append(original_argument_type),
+                                        .direct_coerce => |coerced_type| _ = abi_argument_types.append(coerced_type),
+                                        .direct_pair => |pair| {
+                                            _ = abi_argument_types.append(pair[0]);
+                                            _ = abi_argument_types.append(pair[1]);
                                         },
+                                        .indirect => |indirect| _ = abi_argument_types.append(get_typed_pointer(thread, .{
+                                            .pointee = indirect.type,
+                                        })),
                                         else => |t| @panic(@tagName(t)),
                                     }
-                                } else {
-                                    unreachable;
+
+                                    const end: u16 = @intCast(abi_argument_types.length);
+                                    argument_abi.indices = .{start, end};
                                 }
-                            }
-                        },
-                        ';' => {
-                            parser.i += 1;
 
-                            if (!function_declaration_data.global_symbol.attributes.@"extern") {
-                                fail();
-                            }
-                            function_declaration_data.global_symbol.id = .function_declaration;
+                                break :abi Function.Abi{
+                                    .original_return_type = original_return_type,
+                                    .original_argument_types = original_argument_types.const_slice(),
+                                    .abi_return_type = abi_return_type,
+                                    .abi_argument_types = abi_argument_types.const_slice(),
+                                    .return_type_abi = return_type_abi,
+                                    .argument_types_abi = argument_type_abis.const_slice(),
+                                    .calling_convention = calling_convention,
+                                };
+                            },
+                            .custom => custom: {
+                                break :custom Function.Abi{
+                                    .original_return_type = original_return_type,
+                                    .original_argument_types = original_argument_types.const_slice(),
+                                    .abi_return_type = original_return_type,
+                                    .abi_argument_types = original_argument_types.const_slice(),
+                                    .return_type_abi = .{
+                                        .kind = .direct,
+                                    },
+                                    .argument_types_abi = blk: {
+                                        var argument_abis = PinnedArray(Function.Abi.Information){};
+                                        for (0..original_argument_types.length) |i| {
+                                            _ = argument_abis.append(.{
+                                                .indices = .{@intCast(i), @intCast(i + 1) },
+                                                .kind = .direct,
+                                            });
+                                        }
 
-                            const function_declaration = thread.external_functions.append(function_declaration_data);
-                            _ = file.scope.scope.declarations.put_no_clobber(function_declaration.global_symbol.global_declaration.declaration.name, &function_declaration.global_symbol.global_declaration.declaration);
-                        },
-                        else => fail_message("Unexpected character to close function declaration"),
+                                        break :blk argument_abis.const_slice();
+                                    },
+                                    .calling_convention = calling_convention,
+                                };
+                            },
+                        } else {
+                            fail();
+                        };
+
+                        const function_type = thread.function_types.append(.{
+                            .type = .{
+                                .sema = .{
+                                    .id = .function,
+                                    .resolved = true,
+                                    .thread = thread.get_index(),
+                                },
+                                .size = 0,
+                                .alignment = 0,
+                                .bit_size = 0,
+                            },
+                            .abi = function_abi,
+                        });
+
+                        function_declaration_data.global_symbol.type = &function_type.type;
+                        function_declaration_data.global_symbol.pointer_type = get_typed_pointer(thread, .{
+                            .pointee = function_declaration_data.global_symbol.type,
+                        });
+
+                        parser.skip_space(src);
+
+                        switch (src[parser.i]) {
+                            brace_open => {
+                                if (function_declaration_data.global_symbol.attributes.@"extern") {
+                                    fail();
+                                }
+
+                                const function = thread.functions.add_one();
+                                const entry_block = create_basic_block(thread);
+                                function.* = .{
+                                    .declaration = function_declaration_data,
+                                    .scope = .{
+                                        .scope = .{
+                                            .id = .function,
+                                            .parent = &file.scope.scope,
+                                            .line = declaration_line + 1,
+                                            .column = declaration_column + 1,
+                                            .file = file_index,
+                                        },
+                                    },
+                                    .entry_block = entry_block,
+                                    .arguments = &.{},
+                                };
+                                _ = file.scope.scope.declarations.put_no_clobber(function.declaration.global_symbol.global_declaration.declaration.name, &function.declaration.global_symbol.global_declaration.declaration);
+                                var analyzer = Analyzer{
+                                    .current_function = function,
+                                    .current_basic_block = entry_block,
+                                    .current_scope = &function.scope.scope,
+                                };
+                                analyzer.current_scope = &analyzer.current_function.scope.scope;
+
+                                switch (function_type.abi.return_type_abi.kind) {
+                                    .indirect => |indirect| {
+                                        _ = indirect; // autofix
+                                        const abi_argument = thread.abi_arguments.append(.{
+                                            .instruction = new_instruction(thread, .{
+                                                .scope = analyzer.current_scope,
+                                                .line = 0,
+                                                .column = 0,
+                                                .id = .abi_argument,
+                                            }),
+                                            .index = 0,
+                                        });
+
+                                        analyzer.append_instruction(&abi_argument.instruction);
+                                        analyzer.return_pointer = &abi_argument.instruction;
+                                    },
+                                    else => {},
+                                }
+
+                                if (original_arguments.length > 0) {
+                                    var arguments = PinnedArray(*ArgumentSymbol){};
+                                    // var runtime_parameter_count: u64 = 0;
+                                    for (original_arguments.const_slice(), function_abi.argument_types_abi, 0..) |argument, argument_abi, argument_index| {
+                                        if (analyzer.current_scope.declarations.get(argument.name) != null)  {
+                                            fail_message("A declaration already exists with such name");
+                                        }
+
+                                        var argument_abi_instructions = std.BoundedArray(*Instruction, 12){};
+
+                                        const argument_abi_count = argument_abi.indices[1] - argument_abi.indices[0];
+                                        const argument_symbol = if (argument_abi.kind == .indirect) blk: {
+                                            assert(argument_abi_count == 1);
+                                            const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                .type = argument.type,
+                                                .name = argument.name,
+                                                .line = argument.line,
+                                                .column = argument.column,
+                                                .index = @intCast(argument_index),
+                                                .indirect_argument = argument_abi.indices[0],
+                                            });
+                                            _ = arguments.append(argument_symbol);
+                                            argument_symbol.instruction.id = .abi_indirect_argument;
+                                            break :blk argument_symbol;
+                                        } else blk: {
+                                            for (0..argument_abi_count) |abi_argument_index| {
+                                                const abi_argument = thread.abi_arguments.append(.{
+                                                    .instruction = new_instruction(thread, .{
+                                                        .scope = analyzer.current_scope,
+                                                        .line = 0,
+                                                        .column = 0,
+                                                        .id = .abi_argument,
+                                                    }),
+                                                    .index = @intCast(abi_argument_index + argument_abi.indices[0]),
+                                                });
+                                                analyzer.append_instruction(&abi_argument.instruction);
+                                                argument_abi_instructions.appendAssumeCapacity(&abi_argument.instruction);
+                                            }
+                                            const LowerKind = union(enum) {
+                                                direct,
+                                                direct_pair: [2]*Type,
+                                                direct_coerce: *Type,
+                                                indirect,
+                                            };
+                                            const lower_kind: LowerKind = switch (argument_abi.kind) {
+                                                .direct => .direct,
+                                                .direct_coerce => |coerced_type| if (argument.type == coerced_type) .direct else .{ .direct_coerce = coerced_type },
+                                                .direct_pair => |pair| .{ .direct_pair = pair },
+                                                .indirect => .indirect,
+                                                else => |t| @panic(@tagName(t)),
+                                            };
+
+                                            const argument_symbol = switch (lower_kind) {
+                                                .indirect => unreachable,
+                                                .direct => block: {
+                                                    assert(argument_abi_count == 1);
+                                                    const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                        .type = argument.type,
+                                                        .name = argument.name,
+                                                        .line = argument.line,
+                                                        .column = argument.column,
+                                                        .index = @intCast(argument_index),
+                                                    });
+                                                    _ = arguments.append(argument_symbol);
+                                                    _ = emit_store(&analyzer, thread, .{
+                                                        .destination = &argument_symbol.instruction.value,
+                                                        .source = &argument_abi_instructions.slice()[0].value,
+                                                        .alignment = argument.type.alignment,
+                                                        .line = 0,
+                                                        .column = 0,
+                                                        .scope = analyzer.current_scope,
+                                                    });
+                                                    break :block argument_symbol;
+                                                },
+                                                .direct_coerce => |coerced_type| block: {
+                                                    assert(coerced_type != argument.type);
+                                                    assert(argument_abi_count == 1);
+                                                    const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                        .type = argument.type,
+                                                        .name = argument.name,
+                                                        .line = argument.line,
+                                                        .column = argument.column,
+                                                        .index = @intCast(argument_index),
+                                                    });
+                                                    _ = arguments.append(argument_symbol);
+
+                                                    switch (argument.type.sema.id) {
+                                                        .@"struct" => {
+                                                            // TODO:
+                                                            const is_vector = false;
+
+                                                            if (coerced_type.size <= argument.type.size and !is_vector) {
+                                                                _ = emit_store(&analyzer, thread, .{
+                                                                    .destination = &argument_symbol.instruction.value,
+                                                                    .source = &argument_abi_instructions.slice()[0].value,
+                                                                    .alignment = coerced_type.alignment,
+                                                                    .line = 0,
+                                                                    .column = 0,
+                                                                    .scope = analyzer.current_scope,
+                                                                });
+                                                            }  else {
+                                                                const temporal = emit_local_symbol(&analyzer, thread, .{
+                                                                    .name = 0,
+                                                                    .initial_value = &argument_abi_instructions.slice()[0].value,
+                                                                    .type = coerced_type,
+                                                                    .line = 0,
+                                                                    .column = 0,
+                                                                });
+                                                                emit_memcpy(&analyzer, thread, .{
+                                                                    .destination = &argument_symbol.instruction.value,
+                                                                    .source = &temporal.instruction.value,
+                                                                    .destination_alignment = .{
+                                                                        .type = argument_symbol.type,
+                                                                    },
+                                                                    .source_alignment = .{
+                                                                        .type = temporal.type,
+                                                                    },
+                                                                    .size = argument.type.size,
+                                                                    .line = 0,
+                                                                    .column = 0,
+                                                                    .scope = analyzer.current_scope,
+                                                                });
+                                                            }
+
+                                                            break :block argument_symbol;
+                                                        },
+                                                        else => |t| @panic(@tagName(t)),
+                                                    }
+                                                    unreachable;
+                                                },
+                                                .direct_pair => |pair| b: {
+                                                    assert(argument_abi_count == 2);
+                                                    assert(argument_abi_instructions.len == 2);
+                                                    assert(pair[0].sema.id == .integer);
+                                                    assert(pair[1].sema.id == .integer);
+                                                    const alignments = [2]u32{ pair[0].alignment, pair[1].alignment };
+                                                    const sizes = [2]u64{ pair[0].size, pair[1].size };
+                                                    const alignment = @max(alignments[0], alignments[1]);
+                                                    _ = alignment; // autofix
+                                                    const high_aligned_size: u32 = @intCast(library.align_forward(sizes[1], alignments[1]));
+                                                    _ = high_aligned_size; // autofix
+                                                    const high_offset: u32 = @intCast(library.align_forward(sizes[0], alignments[1]));
+                                                    assert(high_offset + sizes[1] <= argument.type.size);
+                                                    const argument_symbol = emit_argument_symbol(&analyzer, thread, .{
+                                                        .type = argument.type,
+                                                        .name = argument.name,
+                                                        .line = argument.line,
+                                                        .column = argument.column,
+                                                        .index = @intCast(argument_index),
+                                                    });
+                                                    _ = arguments.append(argument_symbol);
+
+                                                    _ = emit_store(&analyzer, thread, .{
+                                                        .destination = &argument_symbol.instruction.value,
+                                                        .source = &argument_abi_instructions.slice()[0].value,
+                                                        .alignment = pair[0].alignment,
+                                                        .line = 0,
+                                                        .column = 0,
+                                                        .scope = analyzer.current_scope,
+                                                    });
+
+                                                    const gep = emit_gep(thread, &analyzer, .{
+                                                        .pointer = &argument_symbol.instruction.value,
+                                                        .type = pair[1],
+                                                        .aggregate_type = pair[0],
+                                                        .index = &create_constant_int(thread, .{
+                                                            .n = 1,
+                                                            .type = &thread.integers[31].type,
+                                                        }).value,
+                                                        .is_struct = false,
+                                                        .line = 0,
+                                                        .column = 0,
+                                                        .scope = analyzer.current_scope,
+                                                    });
+
+                                                    _ = emit_store(&analyzer, thread, .{
+                                                        .destination = &gep.instruction.value,
+                                                        .source = &argument_abi_instructions.slice()[1].value,
+                                                        .alignment = pair[1].alignment,
+                                                        .line = 0,
+                                                        .column = 0,
+                                                        .scope = analyzer.current_scope,
+                                                    });
+                                                    break :b argument_symbol;
+                                                },
+                                            };
+
+                                            break :blk argument_symbol;
+                                        };
+
+                                        if (argument.name != 0) {
+                                            _ = analyzer.current_scope.declarations.put_no_clobber(argument.name, &argument_symbol.argument_declaration.declaration);
+                                            if (thread.generate_debug_information) {
+                                                emit_debug_argument(&analyzer, thread, .{
+                                                    .argument_symbol = argument_symbol,
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    function.arguments = arguments.slice();
+                                }
+
+                                const result = analyze_local_block(thread, &analyzer, &parser, file);
+                                _ = result;
+
+                                const current_basic_block = analyzer.current_basic_block;
+                                if (analyzer.return_phi) |return_phi| {
+                                    analyzer.current_basic_block = analyzer.return_block.?;
+                                    analyzer.append_instruction(&return_phi.instruction);
+                                    emit_return(thread, &analyzer, .{
+                                        .return_value = &return_phi.instruction.value,
+                                        .line = parser.get_debug_line(),
+                                        .column = parser.get_debug_column(),
+                                        .scope = analyzer.current_scope,
+                                    });
+                                    analyzer.current_basic_block = current_basic_block;
+                                }
+
+                                if (!current_basic_block.is_terminated and (current_basic_block.instructions.length > 0 or current_basic_block.predecessors.length > 0)) {
+                                    if (analyzer.return_block == null) {
+                                        switch (original_return_type.sema.id) {
+                                            .void => {
+                                                emit_ret_void(thread, &analyzer, .{
+                                                    .line = parser.get_debug_line(),
+                                                    .column = parser.get_debug_column(),
+                                                    .scope = analyzer.current_scope,
+                                                });
+                                            },
+                                            else => |t| @panic(@tagName(t)),
+                                        }
+                                    } else {
+                                        unreachable;
+                                    }
+                                }
+                            },
+                            ';' => {
+                                parser.i += 1;
+
+                                if (!function_declaration_data.global_symbol.attributes.@"extern") {
+                                    fail();
+                                }
+                                function_declaration_data.global_symbol.id = .function_declaration;
+
+                                const function_declaration = thread.external_functions.append(function_declaration_data);
+                                _ = file.scope.scope.declarations.put_no_clobber(function_declaration.global_symbol.global_declaration.declaration.name, &function_declaration.global_symbol.global_declaration.declaration);
+                            },
+                            else => fail_message("Unexpected character to close function declaration"),
+                        }
                     }
                 } else {
                     fail();
@@ -9658,9 +9803,8 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
 
                     parser.skip_space(src);
 
-                    if (src[parser.i] == '[') {
-                        parser.i += 1;
-
+                    const has_polymorphic_parameters = src[parser.i] == polymorphic_start_token;
+                    if (has_polymorphic_parameters) {
                         const polymorphic_struct = thread.polymorphic_structs.append(.{
                             .type = .{
                                 .sema = .{
@@ -9691,57 +9835,7 @@ pub fn analyze_file(thread: *Thread, file_index: u32) void {
                         });
                         _ = file.scope.scope.declarations.put_no_clobber(struct_name, &polymorphic_struct.declaration);
 
-                        var struct_parameters = PinnedArray(*Type){};
-
-                        while (true) {
-                            parser.skip_space(src);
-
-                            if (src[parser.i] == ']') {
-                                break;
-                            }
-
-                            const line = parser.get_debug_line();
-                            const column = parser.get_debug_column();
-                            parser.i += 1;
-                            const name = parser.parse_identifier(thread, src);
-                            const polymorphic_name = thread.polymorphic_names.append(.{
-                                .type = .{
-                                    .sema = .{
-                                        .id = .polymorphic_name,
-                                        .thread = thread.get_index(),
-                                        .resolved = false,
-                                    },
-                                    .size = 0,
-                                    .bit_size = 0,
-                                    .alignment = 1,
-                                },
-                                .type_declaration = .{
-                                    .declaration = .{
-                                        .id = .type,
-                                        .name = name,
-                                        .line = line,
-                                        .column = column,
-                                        .scope = &polymorphic_struct.scope,
-                                    },
-                                    .parent = &polymorphic_struct.type,
-                                    .id = .polymorphic_name,
-                                },
-                                .index = struct_parameters.length,
-                            });
-
-                            switch (src[parser.i]) {
-                                ',' => parser.i += 1,
-                                ']' => {},
-                                else => fail(),
-                            }
-
-                            _ = struct_parameters.append(&polymorphic_name.type);
-                            _ = polymorphic_struct.scope.declarations.put_no_clobber(name, &polymorphic_name.type_declaration.declaration);
-                        }
-
-                        parser.i += 1;
-
-                        polymorphic_struct.parameters = struct_parameters.slice();
+                        polymorphic_struct.parameters = parser.parse_polymorphic_arguments(thread, file, &polymorphic_struct.scope);
 
                         parser.skip_space(src);
 
@@ -10079,7 +10173,6 @@ fn emit_argument_symbol(analyzer: *Analyzer, thread: *Thread, args: struct{
             .column = args.column,
         }),
     });
-    _ = analyzer.current_function.arguments.append(argument_symbol);
 
     return argument_symbol;
 }

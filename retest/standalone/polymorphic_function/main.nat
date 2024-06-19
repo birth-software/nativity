@@ -1,0 +1,7 @@
+fn polymorphic'$T'(arg: T) T {
+    return arg;
+}
+
+fn[cc(.c)] main[export]() s32 {
+    return polymorphic's32'(0);
+}
